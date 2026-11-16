@@ -42,30 +42,44 @@ estado vazio. Não há dados DEMO.
 
 ---
 
-## 3. Configurar o Firebase (passo a passo do usuário)
+## 3. Configurar o Firebase
 
-1. Acesse <https://console.firebase.google.com> e crie um projeto (exemplo: `meu-finance`).
-   **Não habilite o plano Blaze** — tudo aqui funciona no Spark.
-2. Em **Authentication → Sign-in method**, habilite **E-mail/senha**.
-3. Em **Authentication → Users**, crie seu usuário (ou use a aba "Criar conta" da aplicação).
-4. Em **Configurações do projeto → Seus apps → Web**, registre um app e copie o objeto
-   `firebaseConfig`.
-5. Cole os valores em [`js/firebase/config.js`](js/firebase/config.js), substituindo os
-   placeholders `COLE_AQUI_*`.
-6. Crie o Firestore em **Firestore Database → Criar banco** (modo produção, região
-   `southamerica-east1` é a mais próxima do Brasil).
-7. Publique as regras e os índices:
-
-```bash
-npm install
-npx firebase login
-npx firebase use --add          # selecione seu projeto
-npx firebase deploy --only firestore:rules,firestore:indexes
-```
+**Configuração já preenchida** (projeto `vault-finance-d1603`, plano Spark, região `nam5`,
+Authentication por e-mail/senha habilitado): os valores estão em
+[`js/firebase/config.js`](js/firebase/config.js). Para trocar de projeto, edite esse arquivo.
 
 > A `apiKey` do Firebase **não é uma credencial administrativa**: ela é pública por design.
 > A segurança vem das Security Rules e do Authentication. Nunca coloque service account,
 > Admin SDK ou chave privada no frontend — este projeto não usa nenhum.
+
+### Modo DEMO vs Firebase real (alternância explícita)
+
+- `?mode=demo` na primeira página — força o modo DEMO contra os emuladores locais
+  (dados fictícios, nada alcança a nuvem). A escolha fica ativa em toda a navegação da aba.
+- `?mode=firebase` — força a config real mesmo em localhost.
+- Sem parâmetro (automático) — em localhost usa DEMO apenas enquanto a config for
+  placeholder; com a config real preenchida, usa o Firebase de verdade.
+- `?emulator=0` continua desligando os emuladores em localhost.
+
+### Publicar as Security Rules e índices (produção)
+
+```bash
+npm install
+npx firebase login               # ou: firebase login:ci para gerar um token
+npx firebase use --add           # selecione o projeto vault-finance-d1603
+npx firebase deploy --only firestore:rules,firestore:indexes
+```
+
+Alternativa sem login interativo:
+
+```bash
+npx firebase deploy --only firestore:rules,firestore:indexes \
+  --token "SEU_TOKEN_DO_FIREBASE_LOGIN_CI" --project vault-finance-d1603
+```
+
+> O projeto novo nasce com as regras padrão do Firebase, que **negam toda escrita**
+> (`Missing or insufficient permissions`). A aplicação só persiste dados depois de
+> publicar `firestore.rules`.
 
 ### Rodar localmente
 
@@ -75,8 +89,9 @@ npm run emulators     # Auth 9099 + Firestore 8080 + UI 4000
 npm run serve         # estático em http://localhost:5500 (ou use a extensão Live Server)
 ```
 
-Abrindo em `localhost`, o app conecta **automaticamente** aos emuladores
-(`js/firebase/client.js`). Para forçar o Firebase real em localhost, use `?emulator=0`.
+Abrindo em `localhost` com `?mode=demo`, o app conecta aos emuladores
+(`js/firebase/client.js`). Sem o parâmetro e com a config real preenchida, ele usa o
+Firebase real.
 
 ### Testar as Security Rules
 

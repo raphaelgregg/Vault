@@ -13,7 +13,7 @@ import {
   getFirestore,
   connectFirestoreEmulator,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
-import { firebaseConfig, isConfigPlaceholder, USE_EMULATORS, EMULATOR_HOST } from './config.js';
+import { firebaseConfig, isConfigPlaceholder, USE_EMULATORS, EMULATOR_HOST, resolveMode } from './config.js';
 
 /** Config fictícia: só funciona contra os emuladores locais. */
 const DEMO_CONFIG = Object.freeze({
@@ -25,7 +25,18 @@ const DEMO_CONFIG = Object.freeze({
   appId: '1:000000000000:web:demo',
 });
 
-export const usingDemoConfig = USE_EMULATORS && isConfigPlaceholder(firebaseConfig);
+/** Modo pedido na URL (?mode=demo | ?mode=firebase) ou 'auto'. */
+export const mode = resolveMode();
+
+/**
+ * DEMO quando: pedido explicitamente (?mode=demo, só em localhost, onde os emuladores
+ * existem), ou automaticamente em localhost enquanto a config real for placeholder.
+ * Com a config real preenchida, localhost usa o Firebase de verdade — a menos que
+ * ?mode=demo seja pedido.
+ */
+export const usingDemoConfig =
+  (mode === 'demo' && USE_EMULATORS) ||
+  (mode === 'auto' && USE_EMULATORS && isConfigPlaceholder(firebaseConfig));
 
 /** true = sem config real e sem emulador: a UI avisa em vez de falhar em silêncio. */
 export const configMissing = isConfigPlaceholder(firebaseConfig) && !usingDemoConfig;
@@ -39,11 +50,11 @@ export const db = getFirestore(app);
 
 let emulatorsConnected = false;
 export function connectEmulatorsOnce() {
-  if (emulatorsConnected || !USE_EMULATORS) return;
+  if (emulatorsConnected || !usingDemoConfig) return;
   connectAuthEmulator(auth, `http://${EMULATOR_HOST}:9099`, { disableWarnings: true });
   connectFirestoreEmulator(db, EMULATOR_HOST, 8080);
   emulatorsConnected = true;
-  console.info('[firebase] conectado aos emuladores locais (auth:9099, firestore:8080)');
+  console.info(`[firebase] modo DEMO — conectado aos emuladores locais (auth:9099, firestore:8080)`);
 }
 
 export { app };
