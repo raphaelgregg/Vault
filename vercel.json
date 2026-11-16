@@ -1,0 +1,33 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "Permissions-Policy", "value": "geolocation=(), camera=(), microphone=()" },
+        { "key": "X-Frame-Options", "value": "DENY" }
+      ]
+    },
+    {
+      "source": "/js/(.*)",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+    }
+  ],
+  "rewrites": [
+    { "source": "/dashboard", "destination": "/pages/dashboard.html" },
+    { "source": "/bancos", "destination": "/pages/bancos.html" },
+    { "source": "/receitas", "destination": "/pages/receitas.html" },
+    { "source": "/despesas", "destination": "/pages/despesas.html" },
+    { "source": "/transferencias", "destination": "/pages/transferencias.html" },
+    { "source": "/assinaturas", "destination": "/pages/assinaturas.html" },
+    { "source": "/devedores", "destination": "/pages/devedores.html" },
+    { "source": "/metas", "destination": "/pages/metas.html" },
+    { "source": "/cartoes", "destination": "/pages/cartoes.html" },
+    { "source": "/relatorios", "destination": "/pages/relatorios.html" },
+    { "source": "/configuracoes", "destination": "/pages/configuracoes.html" }
+  ]
+}
