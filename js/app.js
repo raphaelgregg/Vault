@@ -39,7 +39,7 @@ async function bootstrap() {
   const navItem = navItemById(pageId);
   const sidebar = mountSidebar($('#sidebar'), { activeId: pageId });
   mountTopbar($('#topbar'), {
-    title: navItem?.label ?? 'Personal Finance',
+    title: navItem?.label ?? 'Vault Finance',
     user,
     onMenuClick: () => sidebar.toggleMobile(),
   });

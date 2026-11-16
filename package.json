@@ -1,12 +1,12 @@
 {
-  "name": "personal-finance",
+  "name": "vault-finance",
   "version": "0.2.0",
   "private": true,
   "description": "Controle financeiro pessoal — HTML/CSS/JS puro + Firebase (Fase 2: fundação)",
   "type": "module",
   "scripts": {
     "emulators": "firebase emulators:start --only auth,firestore",
-    "test:rules": "firebase emulators:exec --only firestore,auth --project demo-personal-finance \"node --test tests/rules\"",
+    "test:rules": "firebase emulators:exec --only firestore,auth --project demo-vault-finance \"node --test tests/rules\"",
     "serve": "npx http-server -p 5500 -c-1 ."
   },
   "devDependencies": {

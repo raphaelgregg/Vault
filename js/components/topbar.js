@@ -12,7 +12,7 @@ export function mountTopbar(root, { title, user, onMenuClick } = {}) {
   menuButton.innerHTML = '<i data-lucide="menu" aria-hidden="true"></i>';
   menuButton.addEventListener('click', () => onMenuClick?.());
 
-  const heading = el('h1', { class: 'topbar__title', text: title ?? 'Personal Finance' });
+  const heading = el('h1', { class: 'topbar__title', text: title ?? 'Vault Finance' });
 
   const search = el('div', { class: 'topbar__search', role: 'search' }, [
     el('i', { 'data-lucide': 'search', 'aria-hidden': 'true' }),

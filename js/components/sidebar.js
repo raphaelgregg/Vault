@@ -12,7 +12,7 @@ export function mountSidebar(root, { activeId } = {}) {
 
   const brand = el('a', { class: 'sidebar__brand', href: 'dashboard.html' }, [
     el('span', { class: 'sidebar__logo', 'aria-hidden': 'true', text: 'PF' }),
-    el('span', { class: 'sidebar__name', text: 'Personal Finance' }),
+    el('span', { class: 'sidebar__name', text: 'Vault Finance' }),
   ]);
 
   const nav = el('nav', { class: 'sidebar__nav', 'aria-label': 'Menu principal' });

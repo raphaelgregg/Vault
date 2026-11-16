@@ -1,10 +1,10 @@
 # Vault
 
-Repositório de integração e trabalho. O projeto principal desta branch é o **Personal Finance** — sistema de controle financeiro pessoal. A documentação completa segue abaixo.
+Repositório de integração e trabalho. O projeto principal desta branch é o **Vault Finance** — sistema de controle financeiro pessoal. A documentação completa segue abaixo.
 
 ---
 
-# Personal Finance
+# Vault Finance
 
 Sistema de controle financeiro pessoal em **HTML5 + CSS3 + JavaScript (ES Modules) puro**, com
 **Firebase Authentication** e **Cloud Firestore** como backend. Sem framework, sem build
@@ -92,7 +92,7 @@ execução registrada: **24 testes, 24 passando, 0 falhas**.
 ## 4. Estrutura
 
 ```text
-personal-finance/
+./
 ├── index.html                  # login / cadastro / recuperação de senha
 ├── pages/                      # uma página por módulo (casca + módulo JS)
 ├── css/

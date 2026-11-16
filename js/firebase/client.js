@@ -18,9 +18,9 @@ import { firebaseConfig, isConfigPlaceholder, USE_EMULATORS, EMULATOR_HOST } fro
 /** Config fictícia: só funciona contra os emuladores locais. */
 const DEMO_CONFIG = Object.freeze({
   apiKey: 'demo-api-key',
-  authDomain: 'demo-personal-finance.firebaseapp.com',
-  projectId: 'demo-personal-finance',
-  storageBucket: 'demo-personal-finance.appspot.com',
+  authDomain: 'demo-vault-finance.firebaseapp.com',
+  projectId: 'demo-vault-finance',
+  storageBucket: 'demo-vault-finance.appspot.com',
   messagingSenderId: '000000000000',
   appId: '1:000000000000:web:demo',
 });

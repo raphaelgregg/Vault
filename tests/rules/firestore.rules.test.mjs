@@ -28,7 +28,7 @@ import { serverTimestamp } from 'firebase/firestore';
 const here = dirname(fileURLToPath(import.meta.url));
 const rules = readFileSync(join(here, '..', '..', 'firestore.rules'), 'utf8');
 
-const PROJECT_ID = 'demo-personal-finance';
+const PROJECT_ID = 'demo-vault-finance';
 const ALICE = 'alice-uid';
 const BOB = 'bob-uid';
 
