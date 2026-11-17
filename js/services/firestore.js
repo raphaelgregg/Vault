@@ -24,6 +24,33 @@ import { db } from '../firebase/client.js';
 
 export { Timestamp, serverTimestamp };
 
+// Regras publicadas exigem timestamp nativo nos campos de data; o modelo trabalha
+// com strings ISO. Conversão na camada de serviço, nos dois sentidos.
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function toFirestoreData(data) {
+  return Object.fromEntries(
+    Object.entries(data).map(([key, value]) =>
+      typeof value === 'string' && ISO_DATE.test(value)
+        ? [key, Timestamp.fromDate(new Date(`${value}T12:00:00`))]
+        : [key, value]
+    )
+  );
+}
+
+function fromFirestoreDoc(id, data) {
+  const out = { id };
+  for (const [key, value] of Object.entries(data)) {
+    // Campos de data (não createdAt/updatedAt) voltam como string ISO
+    if (value && typeof value.toDate === 'function' && (/Date$/.test(key) || key === 'date')) {
+      out[key] = value.toDate().toISOString().slice(0, 10);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 export function userCollection(uid, collectionName) {
   if (!uid) throw new Error('Usuário não autenticado.');
   return collection(db, 'users', uid, collectionName);
@@ -36,7 +63,7 @@ export function userDoc(uid, collectionName, docId) {
 
 export async function getById(uid, collectionName, docId) {
   const snapshot = await getDoc(userDoc(uid, collectionName, docId));
-  return snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null;
+  return snapshot.exists() ? fromFirestoreDoc(snapshot.id, snapshot.data()) : null;
 }
 
 /**
@@ -54,11 +81,11 @@ export async function list(uid, collectionName, options = {}) {
   }
   if (options.limit) constraints.push(limitTo(options.limit));
   const snapshot = await getDocs(query(userCollection(uid, collectionName), ...constraints));
-  return snapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+  return snapshot.docs.map((item) => fromFirestoreDoc(item.id, item.data()));
 }
 
 export async function create(uid, collectionName, data, docId = null) {
-  const payload = { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
+  const payload = { ...toFirestoreData(data), createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
   if (docId) {
     await setDoc(userDoc(uid, collectionName, docId), payload);
     return docId;
@@ -69,7 +96,7 @@ export async function create(uid, collectionName, data, docId = null) {
 
 export async function update(uid, collectionName, docId, data) {
   await updateDoc(userDoc(uid, collectionName, docId), {
-    ...data,
+    ...toFirestoreData(data),
     updatedAt: serverTimestamp(),
   });
 }

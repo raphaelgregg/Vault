@@ -32,6 +32,17 @@ export function openModal({ title, body, footer = [], onClose }) {
     dialog,
   ]);
 
+  // Se o corpo é um formulário e o footer contém o botão de submit, o footer
+  // precisa ficar DENTRO do form — botão submit fora do form não dispara submit.
+  const bodyNodes = [].concat(body);
+  const formNode = bodyNodes.find((n) => n && n.tagName === 'FORM');
+  const footerHasSubmit = footer.some(
+    (b) => b && typeof b.getAttribute === 'function' && b.getAttribute('type') === 'submit'
+  );
+  if (formNode && footerHasSubmit) {
+    formNode.append(el('div', { class: 'modal__footer' }, footer));
+  }
+
   const onKeyDown = (event) => {
     if (event.key === 'Escape') closeModal();
   };
