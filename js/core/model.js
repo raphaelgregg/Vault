@@ -12,6 +12,9 @@
  */
 import { ACCOUNT_TYPES, RECURRENCES } from '../utils/constants.js';
 
+// Re-exporta as enumerações para os serviços que as consomem via modelo.
+export { ACCOUNT_TYPES, RECURRENCES };
+
 // ---------------------------------------------------------------------------
 // Dinheiro
 // ---------------------------------------------------------------------------

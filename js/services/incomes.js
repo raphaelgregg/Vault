@@ -2,7 +2,7 @@
  * Serviço de Receitas — Fase 3: CRUD + validação do modelo + auditoria.
  * Isolamento por usuário via users/{uid}/incomes.
  */
-import { COLLECTIONS } from '../utils/constants.js';
+import { COLLECTIONS, RECURRENCES } from '../utils/constants.js';
 import {
   create,
   list,
@@ -16,7 +16,6 @@ import {
   buildEntity,
   formatCents,
   parseMoneyToCents,
-  RECURRENCES,
 } from '../core/model.js';
 
 const COLLECTION = COLLECTIONS.incomes;

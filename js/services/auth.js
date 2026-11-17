@@ -11,7 +11,7 @@ import {
   setPersistence,
   browserLocalPersistence,
   updateProfile,
-} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+} from 'firebase/auth';
 import { auth } from '../firebase/client.js';
 
 /** Códigos do Firebase traduzidos para mensagens acionáveis em pt-BR. */

@@ -7,12 +7,12 @@
  * uma config DEMO apontando para o Emulator Suite. Isso permite desenvolver sem
  * projeto Firebase; nada disso alcança a nuvem.
  */
-import { initializeApp, getApps } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
-import { getAuth, connectAuthEmulator } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import { initializeApp, getApps } from 'firebase/app';
+import { getAuth, connectAuthEmulator } from 'firebase/auth';
 import {
   getFirestore,
   connectFirestoreEmulator,
-} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+} from 'firebase/firestore';
 import { firebaseConfig, isConfigPlaceholder, USE_EMULATORS, EMULATOR_HOST, resolveMode } from './config.js';
 
 /** Config fictícia: só funciona contra os emuladores locais. */

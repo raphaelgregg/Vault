@@ -23,8 +23,12 @@ export function isConfigPlaceholder(config = firebaseConfig) {
   );
 }
 
+/** true quando há um ambiente de navegador (os testes em Node não têm window). */
+const hasBrowser = typeof window !== 'undefined' && typeof window.location !== 'undefined';
+
 /** Emuladores locais: usados apenas quando a página roda em localhost/127.0.0.1 */
 export const USE_EMULATORS =
+  hasBrowser &&
   ['localhost', '127.0.0.1'].includes(window.location.hostname) &&
   new URLSearchParams(window.location.search).get('emulator') !== '0';
 
@@ -38,7 +42,9 @@ export const EMULATOR_HOST = '127.0.0.1';
  *                    com a config real preenchida, usa o Firebase de verdade.
  */
 export function resolveMode() {
-  const mode = new URLSearchParams(window.location.search).get('mode');
+  const mode = hasBrowser
+    ? new URLSearchParams(window.location.search).get('mode')
+    : null;
   if (mode === 'demo' || mode === 'firebase') {
     // A escolha explícita persiste na aba: links internos não carregam ?mode=...
     try { sessionStorage.setItem('vault-mode', mode); } catch { /* storage indisponível */ }
