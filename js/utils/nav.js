@@ -5,6 +5,7 @@ export const NAV_ITEMS = Object.freeze([
   { id: 'receitas', label: 'Receitas', icon: 'trending-up', href: 'receitas.html' },
   { id: 'despesas', label: 'Despesas', icon: 'trending-down', href: 'despesas.html' },
   { id: 'transferencias', label: 'Transferências', icon: 'arrow-left-right', href: 'transferencias.html' },
+  { id: 'categorias', label: 'Categorias', icon: 'tags', href: 'categorias.html' },
   { id: 'assinaturas', label: 'Assinaturas', icon: 'repeat', href: 'assinaturas.html' },
   { id: 'devedores', label: 'Devedores', icon: 'users', href: 'devedores.html' },
   { id: 'metas', label: 'Metas', icon: 'target', href: 'metas.html' },

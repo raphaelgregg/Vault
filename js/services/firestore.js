@@ -16,6 +16,7 @@ import {
   where,
   orderBy,
   limit as limitTo,
+  getCountFromServer,
   serverTimestamp,
   Timestamp,
   writeBatch,
@@ -103,6 +104,22 @@ export async function update(uid, collectionName, docId, data) {
 
 export async function remove(uid, collectionName, docId) {
   await deleteDoc(userDoc(uid, collectionName, docId));
+}
+
+/**
+ * Conta documentos que atendem aos filtros, sem baixar os documentos.
+ * Usa agregação no servidor (getCountFromServer).
+ * @param {object} options { where: [[campo, op, valor]] }
+ */
+export async function count(uid, collectionName, options = {}) {
+  const constraints = [];
+  for (const [field, op, value] of options.where ?? []) {
+    constraints.push(where(field, op, value));
+  }
+  const snapshot = await getCountFromServer(
+    query(userCollection(uid, collectionName), ...constraints)
+  );
+  return snapshot.data().count;
 }
 
 /** Documento único (profile, settings). */

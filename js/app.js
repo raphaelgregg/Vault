@@ -17,6 +17,7 @@ const MODULES = {
   receitas: () => import('./modules/receitas.js'),
   despesas: () => import('./modules/despesas.js'),
   transferencias: () => import('./modules/transferencias.js'),
+  categorias: () => import('./modules/categorias.js'),
   assinaturas: () => import('./modules/assinaturas.js'),
   devedores: () => import('./modules/devedores.js'),
   metas: () => import('./modules/metas.js'),
