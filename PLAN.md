@@ -8,7 +8,7 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 
 - Propósito: controle financeiro pessoal (contas, receitas, despesas, transferências, categorias) por usuário.
 - Stack: HTML/CSS/JS ES Modules puro, Firebase Auth + Firestore (SDK 10.12.2 via CDN/importmap), Vercel estático, npm só para dev.
-- Maturidade: fases 2–4 (etapa 2) entregues; 6 módulos ainda são casca (dashboard, devedores, metas, cartões, relatórios, orçamentos); assinaturas entregue (VF-2-03a).
+- Maturidade: fases 2–4 (etapa 2) entregues; 6 módulos ainda são casca (dashboard, devedores, metas, cartões, relatórios, orçamentos); assinaturas (VF-2-03a) e devedores (VF-2-03b) entregues.
 - Testes: 44 de modelo passam (executado); testes de serviço e Rules **não executados** (sem `node_modules`; emulador exige instalação).
 - Sem lint, sem CI, sem build.
 
@@ -71,7 +71,9 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 **VF-2-03 — Módulos pendentes** (feature): assinaturas, devedores, metas, cartões, dashboard, relatórios, orçamentos conforme roadmap do README (fases 3–5). Cada módulo vira tarefa própria (`VF-2-03a…`) quando priorizado. Dependências: VF-1-01, VF-3-01.
 - [x] **VF-2-03a — Assinaturas** (feature) — CONCLUÍDA 2026-11-18. Primeiro da fila: schema já fechado em `firestore.rules:238` e a página de assinaturas é a menos acoplada (sem saldo/fatura).
 - Resolução: schema `subscriptions` em `js/core/model.js` (+ `REF_FIELDS`; enums `SUBSCRIPTION_PERIODICITIES/STATUSES` em `js/utils/constants.js`); cálculos puros `subscriptionAnnualCents/MonthlyCents/summarizeSubscriptions` (só ativas; semanal ×52, anual ÷12, centavos inteiros, projeção anual soma exata). Novo `js/services/subscriptions.js`: `list/get/create/update/delete` via `createAudited/updateAudited/removeAudited` (`io`/`deps` injetáveis; categoria lida do Firestore e restrita a `expense|both`), `pause/resume/cancel` com leitura prévia e transição validada (ativa⇄pausada, cancelada terminal, fail-closed, auditoria `pause|resume|cancel`). Campo de data `nextChargeDate` (convenção `*Date`, meio-dia UTC). UI: `js/modules/assinaturas.js` (cards mensal/anual, tabela, modal criar/editar, pausar/retomar/cancelar/excluir). `firestore.rules` NÃO alterado; 4 testes de Rules novos documentam o contrato (payload real do service). `deleteAccount` já bloqueia conta com assinaturas (VF-1-02). Testes: `test:unit` 205 ok (17 novos em `tests/services/subscriptions.test.mjs`), `test:rules` 39 ok. Não verificado: UI em navegador com emulador; sem testes de UI. Limitações: `nextChargeDate` não avança sozinha após a cobrança (sem geração de despesa) e `deleteCategory` não conta assinaturas (ver VF-2-03b+).
-- [ ] **VF-2-03b — Devedores/dívidas** (próximo): schema `debtors` (`firestore.rules:~265`, `loanDate`) + subcoleção `debtPayments` (confere `receivedCents <= lentCents`). Dependências: VF-2-03a (padrão).
+- [x] **VF-2-03b — Devedores** (feature) — CONCLUÍDA 2026-11-18 (escopo: coleção `debtors`; parcelas e recebimentos movidos para VF-2-03b2).
+- Resolução: schema `debtors` em `js/core/model.js` (`DEBTOR_STATUSES` em `constants.js`; `receivedCents` não negativo e `<= lentCents`, espelhando `firestore.rules:259`); cálculos puros `debtorPendingCents/summarizeDebtors` (a receber = só em aberto; cancelados fora) e `centsToMoneyString` (o parser trata número como reais — nunca reenviar centavos crus). Novo `js/services/debtors.js`: `create` força `receivedCents: 0`/`status: open`; `update` lê o estado, só edita em aberto, preserva recebido/status e rejeita `lentCents < receivedCents`; `cancel/reopen` com transição validada (`paid` reservado a recebimentos; auditoria `cancel|reopen`); `delete` bloqueia com `debts`/`debtPayments` vinculados (fail-closed). Todos via `createAudited/updateAudited/removeAudited` com `io` injetável; `loanDate` meio-dia UTC. UI: `js/modules/devedores.js`. `firestore.rules` NÃO alterado; 5 testes de Rules novos documentam o contrato. Testes: `test:unit` 221 ok (16 novos em `tests/services/debtors.test.mjs`), `test:rules` 44 ok. Não verificado: UI em navegador com emulador. Limitação: `receivedCents` fica em 0 até VF-2-03b2; editar `notes` para vazio não remove o campo (update é merge, igual às assinaturas).
+- [ ] **VF-2-03b2 — Parcelas e recebimentos de devedores** (próximo): `debts` (`firestore.rules:279`) e `debtPayments` (`:300`, exige `debtId`, `debtorId`, `accountId`). Registrar recebimento deve atualizar `debtors.receivedCents`/`status` (paid ao zerar pendente) e a parcela de forma atômica (`newBatch`), e decidir se recebimentos entram em `accountBalances`. Dependências: VF-2-03b.
 - [ ] **VF-2-03c — Metas** (`goals`/`goalTransactions`; saldo de meta derivado).
 - [ ] **VF-2-03d — Cartões/faturas**.
 - [ ] **VF-2-03e — Orçamentos**.
@@ -112,6 +114,7 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 ## Histórico
 
 - 2026-11-18 — VF-2-03a concluída (Assinaturas: modelo, service, UI, testes); VF-2-03b…h listadas.
+- 2026-11-18 — VF-2-03b concluída (Devedores); VF-2-03b2 (parcelas/recebimentos) criada.
 - 2026-11-18 — VF-3-03 concluída (datas: só campos de data, meio-dia UTC).
 - 2026-11-18 — VF-3-01 concluída (helpers CRUD+auditoria; desbloqueia VF-2-03).
 - 2026-11-18 — VF-4-01 e VF-1-01 concluídas (ver Registro de execução).

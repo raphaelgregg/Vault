@@ -493,3 +493,58 @@ describe('Assinaturas (VF-2-03a)', () => {
     await assertFails(getDoc(subDoc(asAnonymous())));
   });
 });
+
+describe('Devedores (VF-2-03b)', () => {
+  const debtorDoc = (db, id = 'dev1') => doc(db, 'users', ALICE, 'debtors', id);
+  // Payload equivalente ao gravado por js/services/debtors.js (loanDate = meio-dia UTC).
+  const debtor = (overrides = {}) => ({
+    name: 'João',
+    loanDate: new Date('2026-11-10T12:00:00.000Z'),
+    lentCents: 100000,
+    receivedCents: 0,
+    status: 'open',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('permite criar, editar valor emprestado, cancelar (patch) e excluir', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(debtorDoc(db), debtor({ notes: 'amigo' })));
+    await assertSucceeds(updateDoc(debtorDoc(db), { lentCents: 50000, updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(debtorDoc(db), { status: 'cancelled', updatedAt: serverTimestamp() }));
+    await assertSucceeds(deleteDoc(debtorDoc(db)));
+  });
+
+  it('nega emprestado <= 0/fracionário, recebido negativo ou maior que emprestado', async () => {
+    const db = asUser(ALICE);
+    await assertFails(setDoc(debtorDoc(db), debtor({ lentCents: 0 })));
+    await assertFails(setDoc(debtorDoc(db), debtor({ lentCents: 10.5 })));
+    await assertFails(setDoc(debtorDoc(db), debtor({ receivedCents: -1 })));
+    await assertFails(setDoc(debtorDoc(db), debtor({ receivedCents: 100001 })));
+    await assertSucceeds(setDoc(debtorDoc(db), debtor({ receivedCents: 100000, status: 'paid' })));
+  });
+
+  it('nega reduzir emprestado abaixo do recebido (patch)', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(debtorDoc(db), debtor({ receivedCents: 30000 })));
+    await assertFails(updateDoc(debtorDoc(db), { lentCents: 20000, updatedAt: serverTimestamp() }));
+  });
+
+  it('nega status inválido, data como string e campo extra', async () => {
+    const db = asUser(ALICE);
+    await assertFails(setDoc(debtorDoc(db), debtor({ status: 'late' })));
+    await assertFails(setDoc(debtorDoc(db), debtor({ loanDate: '2026-11-10' })));
+    await assertFails(setDoc(debtorDoc(db), debtor({ extra: 1 })));
+  });
+
+  it('nega alterar createdAt e acesso de outro usuário/anônimo', async () => {
+    await assertSucceeds(setDoc(debtorDoc(asUser(ALICE)), debtor()));
+    await assertFails(
+      updateDoc(debtorDoc(asUser(ALICE)), { createdAt: new Date('2000-01-01'), updatedAt: serverTimestamp() })
+    );
+    await assertFails(getDoc(debtorDoc(asUser(BOB))));
+    await assertFails(setDoc(debtorDoc(asUser(BOB), 'dev2'), debtor()));
+    await assertFails(getDoc(debtorDoc(asAnonymous())));
+  });
+});

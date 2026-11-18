@@ -57,6 +57,12 @@ export const SUBSCRIPTION_STATUSES = Object.freeze([
   { value: 'cancelled', label: 'Cancelada' },
 ]);
 
+export const DEBTOR_STATUSES = Object.freeze([
+  { value: 'open', label: 'Em aberto' },
+  { value: 'paid', label: 'Quitado' },
+  { value: 'cancelled', label: 'Cancelado' },
+]);
+
 export const DOC_STATUS = Object.freeze({
   active: 'active',
   inactive: 'inactive',

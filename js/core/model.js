@@ -15,11 +15,12 @@ import {
   RECURRENCES,
   SUBSCRIPTION_PERIODICITIES,
   SUBSCRIPTION_STATUSES,
+  DEBTOR_STATUSES,
 } from '../utils/constants.js';
 import { parseIsoDate } from '../utils/dates.js';
 
 // Re-exporta as enumerações para os serviços que as consomem via modelo.
-export { ACCOUNT_TYPES, RECURRENCES, SUBSCRIPTION_PERIODICITIES, SUBSCRIPTION_STATUSES };
+export { ACCOUNT_TYPES, RECURRENCES, SUBSCRIPTION_PERIODICITIES, SUBSCRIPTION_STATUSES, DEBTOR_STATUSES };
 
 // ---------------------------------------------------------------------------
 // Dinheiro
@@ -51,6 +52,16 @@ export function parseMoneyToCents(input) {
   return Math.round(value * 100);
 }
 
+/**
+ * Centavos inteiros → string "1234,56" aceita por parseMoneyToCents. Necessário
+ * porque o parser trata NÚMEROS como reais (×100): nunca reenvie centavos crus.
+ */
+export function centsToMoneyString(cents) {
+  const value = Number(cents);
+  if (!Number.isInteger(value) || value < 0) return null;
+  return `${Math.trunc(value / 100)},${String(value % 100).padStart(2, '0')}`;
+}
+
 /** Formata centavos para exibição pt-BR: 123456 -> "R$ 1.234,56". */
 export function formatCents(cents) {
   if (typeof cents !== 'number' || !Number.isInteger(cents)) return '—';
@@ -76,6 +87,7 @@ const refField = (required = true, kindCompat = null) => ({
 });
 const money = () => ({ kind: 'cents', required: true, positive: true });
 const cents0 = () => ({ kind: 'cents', required: true, positive: false });
+const centsNonNegative = () => ({ kind: 'cents', required: true, positive: false, nonNegative: true });
 const optionalText = (max) => ({ kind: 'text', max, required: false });
 
 export const SCHEMAS = Object.freeze({
@@ -156,6 +168,18 @@ export const SCHEMAS = Object.freeze({
       notes: optionalText(500),
     },
   },
+  debtors: {
+    dateFields: ['loanDate'],
+    fields: {
+      name: text(80),
+      loanDate: date(),
+      lentCents: money(),
+      // Gravado pelo service (começa em 0); a Rule exige 0 <= receivedCents <= lentCents.
+      receivedCents: centsNonNegative(),
+      status: { kind: 'enum', required: true, values: DEBTOR_STATUSES.map((s) => s.value) },
+      notes: optionalText(500),
+    },
+  },
 });
 
 /** Campos de referência por schema (IDs de docs da própria árvore). */
@@ -166,6 +190,7 @@ export const REF_FIELDS = Object.freeze({
   expenses: ['categoryId', 'accountId'],
   transfers: ['fromAccountId', 'toAccountId'],
   subscriptions: ['accountId', 'categoryId'],
+  debtors: [],
 });
 
 // ---------------------------------------------------------------------------
@@ -262,6 +287,7 @@ export function validateEntity(kind, data, context = {}) {
       const parsed = parseMoneyToCents(value);
       if (parsed === null) errors[field] = 'Valor monetário inválido.';
       else if (rule.positive && parsed <= 0) errors[field] = 'O valor deve ser maior que zero.';
+      else if (rule.nonNegative && parsed < 0) errors[field] = 'O valor não pode ser negativo.';
     } else if (rule.kind === 'date') {
       if (!isValidIsoDate(value)) errors[field] = 'Data inválida (use AAAA-MM-DD).';
     } else if (rule.kind === 'ref') {
@@ -280,6 +306,13 @@ export function validateEntity(kind, data, context = {}) {
   if (kind === 'transfers' && data.fromAccountId && data.toAccountId
     && data.fromAccountId === data.toAccountId) {
     errors.toAccountId = 'A conta de destino deve ser diferente da conta de origem.';
+  }
+
+  if (kind === 'debtors' && !errors.lentCents && !errors.receivedCents
+    && data.lentCents !== undefined && data.receivedCents !== undefined) {
+    if (parseMoneyToCents(data.receivedCents) > parseMoneyToCents(data.lentCents)) {
+      errors.receivedCents = 'O valor recebido não pode exceder o valor emprestado.';
+    }
   }
 
   return { ok: Object.keys(errors).length === 0, errors };
@@ -415,4 +448,34 @@ export function summarizeSubscriptions(items = []) {
     annualCents += subscriptionAnnualCents(item.amountCents, item.periodicity);
   }
   return { activeCount, monthlyCents: Math.round(annualCents / 12), annualCents };
+}
+
+// ---------------------------------------------------------------------------
+// Devedores (VF-2-03b) — cálculos puros
+// ---------------------------------------------------------------------------
+
+/** Saldo pendente de um devedor (emprestado − recebido), nunca negativo. Não é gravado. */
+export function debtorPendingCents(debtor) {
+  const lent = Number(debtor?.lentCents);
+  const received = Number(debtor?.receivedCents) || 0;
+  if (!Number.isInteger(lent)) return 0;
+  return Math.max(0, lent - received);
+}
+
+/**
+ * Totais dos devedores EM ABERTO (cancelados e quitados não entram em "a receber").
+ * Retorna { openCount, pendingCents, receivedCents }; recebido soma os não cancelados.
+ */
+export function summarizeDebtors(items = []) {
+  let openCount = 0;
+  let pendingCents = 0;
+  let receivedCents = 0;
+  for (const item of items) {
+    if (item?.status === 'cancelled') continue;
+    receivedCents += Number(item?.receivedCents) || 0;
+    if (item?.status !== 'open') continue;
+    openCount += 1;
+    pendingCents += debtorPendingCents(item);
+  }
+  return { openCount, pendingCents, receivedCents };
 }
