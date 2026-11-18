@@ -368,3 +368,77 @@ describe('Negação padrão', () => {
     await assertFails(setDoc(doc(db, 'publico', 'x'), { a: 1 }));
   });
 });
+
+describe('Perfil e configurações (VF-2-02)', () => {
+  const profileDoc = (db) => doc(db, 'users', ALICE, 'profile', 'main');
+  const settingsDoc = (db) => doc(db, 'users', ALICE, 'settings', 'main');
+  const profile = () => ({
+    name: 'Ana',
+    email: 'ana@exemplo.com',
+    currency: 'BRL',
+    locale: 'pt-BR',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  const settings = (overrides = {}) => ({
+    theme: 'dark',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('permite criar perfil válido e atualizar o nome via merge (como o service)', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(profileDoc(db), profile(), { merge: true }));
+    await assertSucceeds(
+      setDoc(profileDoc(db), { name: 'Ana Maria', updatedAt: serverTimestamp() }, { merge: true })
+    );
+  });
+
+  it('nega perfil com moeda/idioma diferentes, nome vazio ou campo extra', async () => {
+    const db = asUser(ALICE);
+    await assertFails(setDoc(profileDoc(db), { ...profile(), currency: 'USD' }));
+    await assertFails(setDoc(profileDoc(db), { ...profile(), locale: 'en-US' }));
+    await assertFails(setDoc(profileDoc(db), { ...profile(), name: '' }));
+    await assertFails(setDoc(profileDoc(db), { ...profile(), admin: true }));
+  });
+
+  it('nega alterar createdAt do perfil e excluir perfil', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(profileDoc(db), profile()));
+    await assertFails(
+      setDoc(profileDoc(db), { createdAt: new Date('2000-01-01'), updatedAt: serverTimestamp() }, { merge: true })
+    );
+    await assertFails(deleteDoc(profileDoc(db)));
+  });
+
+  it('permite criar configurações e trocar tema via merge sem reenviar createdAt', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(settingsDoc(db), settings(), { merge: true }));
+    await assertSucceeds(
+      setDoc(settingsDoc(db), { theme: 'light', updatedAt: serverTimestamp() }, { merge: true })
+    );
+  });
+
+  it('nega tema inválido, firstWeekday fora de 0–6, hideValues não booleano e campo extra', async () => {
+    const db = asUser(ALICE);
+    await assertFails(setDoc(settingsDoc(db), settings({ theme: 'neon' })));
+    await assertFails(setDoc(settingsDoc(db), settings({ firstWeekday: 7 })));
+    await assertFails(setDoc(settingsDoc(db), settings({ hideValues: 'sim' })));
+    await assertFails(setDoc(settingsDoc(db), settings({ extra: 1 })));
+  });
+
+  it('nega alterar createdAt das configurações e excluí-las', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(settingsDoc(db), settings()));
+    await assertFails(
+      setDoc(settingsDoc(db), { createdAt: new Date('2000-01-01'), updatedAt: serverTimestamp() }, { merge: true })
+    );
+    await assertFails(deleteDoc(settingsDoc(db)));
+  });
+
+  it('isola perfil/configurações entre usuários', async () => {
+    await assertFails(setDoc(doc(asUser(BOB), 'users', ALICE, 'settings', 'main'), settings()));
+    await assertFails(getDoc(doc(asUser(BOB), 'users', ALICE, 'profile', 'main')));
+  });
+});

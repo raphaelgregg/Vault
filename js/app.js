@@ -3,7 +3,8 @@
  * Fluxo: tema -> emuladores -> guarda de sessão -> shell -> módulo da página.
  * Nenhum módulo é importado antes da autenticação.
  */
-import { applyStoredTheme } from './components/theme.js';
+import { applyStoredTheme, applyThemePreference, setThemePersister } from './components/theme.js';
+import { getSettings, saveSettings } from './services/preferences.js';
 import { connectEmulatorsOnce, configMissing } from './firebase/client.js';
 import { requireSession } from './core/guard.js';
 import { mountSidebar } from './components/sidebar.js';
@@ -36,6 +37,15 @@ async function bootstrap() {
   const pageId = document.body.dataset.page || 'dashboard';
   const user = await requireSession();
   if (!user) return;
+
+  // Tema: o cache local já foi aplicado; aqui prevalece o valor salvo na conta (novo dispositivo).
+  setThemePersister((theme) => saveSettings(user.uid, { theme }));
+  try {
+    const settings = await getSettings(user.uid);
+    if (settings?.theme) applyThemePreference(settings.theme);
+  } catch (error) {
+    console.error('[app] falha ao carregar configurações', error);
+  }
 
   const navItem = navItemById(pageId);
   const sidebar = mountSidebar($('#sidebar'), { activeId: pageId });

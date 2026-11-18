@@ -21,6 +21,7 @@
   "rewrites": [
     { "source": "/dashboard", "destination": "/pages/dashboard.html" },
     { "source": "/bancos", "destination": "/pages/bancos.html" },
+    { "source": "/categorias", "destination": "/pages/categorias.html" },
     { "source": "/receitas", "destination": "/pages/receitas.html" },
     { "source": "/despesas", "destination": "/pages/despesas.html" },
     { "source": "/transferencias", "destination": "/pages/transferencias.html" },
