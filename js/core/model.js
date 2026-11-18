@@ -11,6 +11,7 @@
  * feita na camada de serviço, porque este módulo é puro e testável em Node).
  */
 import { ACCOUNT_TYPES, RECURRENCES } from '../utils/constants.js';
+import { parseIsoDate } from '../utils/dates.js';
 
 // Re-exporta as enumerações para os serviços que as consomem via modelo.
 export { ACCOUNT_TYPES, RECURRENCES };
@@ -151,8 +152,6 @@ export const REF_FIELDS = Object.freeze({
 // Validação e normalização
 // ---------------------------------------------------------------------------
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-
 /** Mensagem única de incompatibilidade entre tipo de categoria e movimentação. */
 export const CATEGORY_KIND_ERROR = 'Categoria incompatível com este tipo de movimentação.';
 
@@ -191,11 +190,7 @@ function lookupCategoryKind(categoryKinds, categoryId) {
 
 /** true quando a string é uma data de calendário real em "YYYY-MM-DD". */
 export function isValidIsoDate(value) {
-  if (typeof value !== 'string' || !ISO_DATE.test(value)) return false;
-  const [y, m, d] = value.split('-').map(Number);
-  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
-  const probe = new Date(Date.UTC(y, m - 1, d));
-  return probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d;
+  return parseIsoDate(value) !== null;
 }
 
 /**

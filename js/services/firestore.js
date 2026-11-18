@@ -22,29 +22,30 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { db } from '../firebase/client.js';
+import { isDateFieldName, parseIsoDate, dateToIsoDate } from '../utils/dates.js';
 
 export { Timestamp, serverTimestamp };
 
 // Regras publicadas exigem timestamp nativo nos campos de data; o modelo trabalha
-// com strings ISO. Conversão na camada de serviço, nos dois sentidos.
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-
-function toFirestoreData(data) {
+// com strings ISO. Conversão na camada de serviço, nos dois sentidos, SOMENTE nos
+// campos de data (`date`/`*Date`) e sempre em meio-dia UTC (sem deslocar o dia por fuso).
+export function toFirestoreData(data) {
   return Object.fromEntries(
-    Object.entries(data).map(([key, value]) =>
-      typeof value === 'string' && ISO_DATE.test(value)
-        ? [key, Timestamp.fromDate(new Date(`${value}T12:00:00`))]
-        : [key, value]
-    )
+    Object.entries(data).map(([key, value]) => {
+      if (typeof value !== 'string' || !isDateFieldName(key)) return [key, value];
+      const parsed = parseIsoDate(value);
+      if (!parsed) throw new RangeError(`Data inválida em "${key}" (use AAAA-MM-DD).`);
+      return [key, Timestamp.fromDate(parsed)];
+    })
   );
 }
 
-function fromFirestoreDoc(id, data) {
+export function fromFirestoreDoc(id, data) {
   const out = { id };
   for (const [key, value] of Object.entries(data)) {
     // Campos de data (não createdAt/updatedAt) voltam como string ISO
-    if (value && typeof value.toDate === 'function' && (/Date$/.test(key) || key === 'date')) {
-      out[key] = value.toDate().toISOString().slice(0, 10);
+    if (value && typeof value.toDate === 'function' && isDateFieldName(key)) {
+      out[key] = dateToIsoDate(value);
     } else {
       out[key] = value;
     }

@@ -14,6 +14,34 @@ export function toDate(value) {
   return new Date(value);
 }
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Campos de data gravados como Timestamp: `date` e qualquer `*Date` (expectedDate,
+ * dueDate, loanDate…). createdAt/updatedAt são do servidor e ficam de fora.
+ * Texto livre (description, notes…) nunca é convertido, mesmo que pareça uma data.
+ */
+export function isDateFieldName(key) {
+  return key === 'date' || /Date$/.test(key);
+}
+
+/** "YYYY-MM-DD" de calendário real → Date; caso contrário null. Puro. */
+export function parseIsoDate(value) {
+  if (typeof value !== 'string' || !ISO_DATE.test(value)) return null;
+  const [y, m, d] = value.split('-').map(Number);
+  // Meio-dia UTC: o dia de calendário é o mesmo em qualquer fuso (UTC−12…UTC+12),
+  // independente do fuso do navegador. Leitura correspondente: dateToIsoDate (UTC).
+  const probe = new Date(Date.UTC(y, m - 1, d, 12));
+  const valid = probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d;
+  return valid ? probe : null;
+}
+
+/** Date/Timestamp → "YYYY-MM-DD" do dia de calendário em UTC (inverso de parseIsoDate). */
+export function dateToIsoDate(value) {
+  const date = toDate(value);
+  return date && !Number.isNaN(date.getTime()) ? date.toISOString().slice(0, 10) : null;
+}
+
 export function formatDateBR(value) {
   const date = toDate(value);
   if (!date || Number.isNaN(date.getTime())) return '—';
