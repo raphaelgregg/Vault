@@ -14,11 +14,21 @@ import {
 import {
   validateEntity,
   buildEntity,
+  checkCategoryForMovement,
+  SCHEMAS,
   formatCents,
   parseMoneyToCents,
 } from '../core/model.js';
 
 const COLLECTION = COLLECTIONS.incomes;
+const CATEGORY_COLLECTION = COLLECTIONS.categories;
+// Tipos aceitos vêm do schema (fonte única: kindCompat).
+const ALLOWED_CATEGORY_KINDS = SCHEMAS.incomes.fields.categoryId.kindCompat;
+
+/** Leitura autoritativa da categoria no Firestore do próprio usuário. */
+async function fetchCategory(uid, categoryId) {
+  return getById(uid, CATEGORY_COLLECTION, categoryId);
+}
 
 /** Lista receitas com filtros opcionais. */
 export async function listIncomes(uid, options = {}) {
@@ -35,14 +45,24 @@ export async function getIncome(uid, incomeId) {
 
 /**
  * Cria uma nova receita.
+ * Ordem: modelo → existência da categoria no Firestore → compatibilidade de tipo.
+ * O terceiro parâmetro (deps) existe apenas como ponto de injeção em testes;
+ * em produção o lookup padrão lê users/{uid}/categories direto no Firestore.
  * Retorna { ok, id, errors }.
  */
-export async function createIncome(uid, rawData) {
+export async function createIncome(uid, rawData, deps = {}) {
   const { ok, data, errors } = buildEntity('incomes', rawData);
   if (!ok) return { ok: false, errors };
 
-  const id = await create(uid, COLLECTION, data);
-  await writeAudit(uid, {
+  const lookupCategory = deps.lookupCategory ?? fetchCategory;
+  const category = await lookupCategory(uid, data.categoryId);
+  const categoryCheck = checkCategoryForMovement(category, ALLOWED_CATEGORY_KINDS);
+  if (!categoryCheck.ok) return categoryCheck;
+
+  const createDoc = deps.create ?? create;
+  const audit = deps.writeAudit ?? writeAudit;
+  const id = await createDoc(uid, COLLECTION, data);
+  await audit(uid, {
     action: 'create',
     collection: COLLECTION,
     docId: id,
@@ -53,14 +73,22 @@ export async function createIncome(uid, rawData) {
 
 /**
  * Atualiza uma receita existente.
+ * Mesma ordem de validação de createIncome.
  * Retorna { ok, errors }.
  */
-export async function updateIncome(uid, incomeId, rawData) {
+export async function updateIncome(uid, incomeId, rawData, deps = {}) {
   const { ok, data, errors } = buildEntity('incomes', rawData);
   if (!ok) return { ok: false, errors };
 
-  await update(uid, COLLECTION, incomeId, data);
-  await writeAudit(uid, {
+  const lookupCategory = deps.lookupCategory ?? fetchCategory;
+  const category = await lookupCategory(uid, data.categoryId);
+  const categoryCheck = checkCategoryForMovement(category, ALLOWED_CATEGORY_KINDS);
+  if (!categoryCheck.ok) return categoryCheck;
+
+  const updateDoc = deps.update ?? update;
+  const audit = deps.writeAudit ?? writeAudit;
+  await updateDoc(uid, COLLECTION, incomeId, data);
+  await audit(uid, {
     action: 'update',
     collection: COLLECTION,
     docId: incomeId,

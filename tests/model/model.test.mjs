@@ -12,6 +12,10 @@ import {
   buildEntity,
   accountBalances,
   sumAmounts,
+  filterMovements,
+  isKindCompatible,
+  checkCategoryForMovement,
+  CATEGORY_KIND_ERROR,
 } from '../../js/core/model.js';
 
 describe('parseMoneyToCents (dinheiro em centavos)', () => {
@@ -240,5 +244,197 @@ describe('sumAmounts', () => {
     ];
     assert.equal(sumAmounts(items, 'received'), 300);
     assert.equal(sumAmounts(items), 700);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Etapa 2 — compatibilidade de categoria por tipo de movimentação
+// ---------------------------------------------------------------------------
+
+const validIncome = {
+  description: 'Salário',
+  categoryId: 'cat-salario',
+  amountCents: '3.000,00',
+  expectedDate: '2026-12-05',
+  accountId: 'acc1',
+  status: 'pending',
+  recurrence: 'monthly',
+};
+
+const validExpense = {
+  description: 'Mercado',
+  categoryId: 'cat-mercado',
+  amountCents: '250,90',
+  accountId: 'acc1',
+  purchaseDate: '2026-11-10',
+  dueDate: '2026-11-20',
+  status: 'pending',
+  recurrence: 'none',
+};
+
+describe('kindCompat — receitas', () => {
+  it('aceita categoria income', () => {
+    const { ok } = validateEntity('incomes', validIncome, {
+      categoryKinds: new Map([['cat-salario', 'income']]),
+    });
+    assert.equal(ok, true);
+  });
+
+  it('aceita categoria both', () => {
+    const { ok } = validateEntity('incomes', validIncome, {
+      categoryKinds: (id) => (id === 'cat-salario' ? 'both' : null),
+    });
+    assert.equal(ok, true);
+  });
+
+  it('recusa categoria expense', () => {
+    const { ok, errors } = validateEntity('incomes', validIncome, {
+      categoryKinds: new Map([['cat-salario', 'expense']]),
+    });
+    assert.equal(ok, false);
+    assert.equal(errors.categoryId, CATEGORY_KIND_ERROR);
+  });
+
+  it('sem contexto NÃO executa a checagem de kind (retrocompatível)', () => {
+    const { ok } = validateEntity('incomes', validIncome);
+    assert.equal(ok, true);
+  });
+
+  it('lookup que não conhece o id não inventa incompatibilidade', () => {
+    const { ok } = validateEntity('incomes', validIncome, {
+      categoryKinds: new Map([['outra-categoria', 'expense']]),
+    });
+    assert.equal(ok, true);
+  });
+
+  it('buildEntity repassa o contexto e bloqueia categoria incompatível', () => {
+    const { ok, errors } = buildEntity('incomes', validIncome, {
+      categoryKinds: { 'cat-salario': 'expense' },
+    });
+    assert.equal(ok, false);
+    assert.equal(errors.categoryId, CATEGORY_KIND_ERROR);
+  });
+});
+
+describe('kindCompat — despesas', () => {
+  it('aceita categoria expense', () => {
+    const { ok } = validateEntity('expenses', validExpense, {
+      categoryKinds: new Map([['cat-mercado', 'expense']]),
+    });
+    assert.equal(ok, true);
+  });
+
+  it('aceita categoria both', () => {
+    const { ok } = validateEntity('expenses', validExpense, {
+      categoryKinds: new Map([['cat-mercado', 'both']]),
+    });
+    assert.equal(ok, true);
+  });
+
+  it('recusa categoria income', () => {
+    const { ok, errors } = validateEntity('expenses', validExpense, {
+      categoryKinds: new Map([['cat-mercado', 'income']]),
+    });
+    assert.equal(ok, false);
+    assert.equal(errors.categoryId, CATEGORY_KIND_ERROR);
+  });
+
+  it('sem contexto continua aceitando (retrocompatível)', () => {
+    const { ok } = validateEntity('expenses', validExpense);
+    assert.equal(ok, true);
+  });
+});
+
+describe('isKindCompatible / checkCategoryForMovement', () => {
+  it('isKindCompatible compara com a lista de tipos aceitos', () => {
+    assert.equal(isKindCompatible('both', ['income', 'both']), true);
+    assert.equal(isKindCompatible('expense', ['income', 'both']), false);
+    assert.equal(isKindCompatible(undefined, ['income']), false);
+    assert.equal(isKindCompatible('income', null), false);
+  });
+
+  it('checkCategoryForMovement recusa categoria inexistente', () => {
+    const result = checkCategoryForMovement(null, ['income', 'both']);
+    assert.equal(result.ok, false);
+    assert.match(result.errors.categoryId, /não encontrada/i);
+  });
+
+  it('checkCategoryForMovement recusa tipo incompatível com a mensagem única', () => {
+    const result = checkCategoryForMovement({ kind: 'expense' }, ['income', 'both']);
+    assert.equal(result.ok, false);
+    assert.equal(result.errors.categoryId, CATEGORY_KIND_ERROR);
+  });
+
+  it('checkCategoryForMovement aceita tipo compatível', () => {
+    const result = checkCategoryForMovement({ kind: 'both' }, ['expense', 'both']);
+    assert.equal(result.ok, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Etapa 2 — filtros de listagem (status + mês + categoria)
+// ---------------------------------------------------------------------------
+
+describe('filterMovements', () => {
+  const items = [
+    { id: '1', status: 'pending', expectedDate: '2026-11-05', categoryId: 'cat-a' },
+    { id: '2', status: 'received', expectedDate: '2026-11-20', categoryId: 'cat-b' },
+    { id: '3', status: 'pending', expectedDate: '2026-12-01', categoryId: 'cat-a' },
+    { id: '4', status: 'received', expectedDate: '2026-12-10', categoryId: 'cat-b' },
+  ];
+  const options = { dateField: 'expectedDate' };
+
+  it('sem filtros retorna tudo', () => {
+    assert.equal(filterMovements(items, {}, options).length, 4);
+    assert.equal(filterMovements(items, { status: 'all', month: null, categoryId: null }, options).length, 4);
+  });
+
+  it('filtra por status', () => {
+    const ids = filterMovements(items, { status: 'received' }, options).map((i) => i.id);
+    assert.deepEqual(ids, ['2', '4']);
+  });
+
+  it('filtra por mês', () => {
+    const ids = filterMovements(items, { month: '2026-12' }, options).map((i) => i.id);
+    assert.deepEqual(ids, ['3', '4']);
+  });
+
+  it('filtra por categoria', () => {
+    const ids = filterMovements(items, { categoryId: 'cat-a' }, options).map((i) => i.id);
+    assert.deepEqual(ids, ['1', '3']);
+  });
+
+  it('combina status + mês + categoria', () => {
+    const ids = filterMovements(
+      items,
+      { status: 'pending', month: '2026-11', categoryId: 'cat-a' },
+      options
+    ).map((i) => i.id);
+    assert.deepEqual(ids, ['1']);
+
+    const none = filterMovements(
+      items,
+      { status: 'received', month: '2026-11', categoryId: 'cat-a' },
+      options
+    );
+    assert.equal(none.length, 0);
+  });
+
+  it('categoria "Todas" (categoryId null) não restringe', () => {
+    const ids = filterMovements(items, { categoryId: null }, options).map((i) => i.id);
+    assert.deepEqual(ids, ['1', '2', '3', '4']);
+  });
+
+  it('usa o dateField informado (dueDate em despesas)', () => {
+    const expenses = [
+      { id: 'e1', status: 'pending', dueDate: '2026-11-10', expectedDate: '2027-01-01' },
+    ];
+    assert.equal(filterMovements(expenses, { month: '2026-11' }, { dateField: 'dueDate' }).length, 1);
+    assert.equal(filterMovements(expenses, { month: '2027-01' }, { dateField: 'dueDate' }).length, 0);
+  });
+
+  it('tolera lista vazia ou ausente', () => {
+    assert.deepEqual(filterMovements([], {}), []);
+    assert.deepEqual(filterMovements(undefined, { status: 'all' }), []);
   });
 });

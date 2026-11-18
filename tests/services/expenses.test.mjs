@@ -6,10 +6,12 @@ import assert from 'node:assert/strict';
 import {
   getRecurrenceOptions,
   getExpenseStatusOptions,
+  createExpense,
+  updateExpense,
   formatCents,
   parseMoneyToCents,
 } from '../../js/services/expenses.js';
-import { buildEntity } from '../../js/core/model.js';
+import { buildEntity, CATEGORY_KIND_ERROR } from '../../js/core/model.js';
 
 describe('expenses service — validação e helpers', () => {
   it('getRecurrenceOptions retorna recorrências esperadas', () => {
@@ -102,5 +104,101 @@ describe('expenses service — validação e helpers', () => {
     const { ok, errors } = buildEntity('expenses', invalid);
     assert.ok(!ok);
     assert.ok(errors.dueDate);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Etapa 2 — validação autoritativa da categoria no serviço
+// ---------------------------------------------------------------------------
+
+const expenseData = {
+  description: 'Mercado',
+  categoryId: 'cat-mercado',
+  amountCents: '250,90',
+  accountId: 'acc1',
+  purchaseDate: '2026-11-10',
+  dueDate: '2026-11-20',
+  status: 'pending',
+  recurrence: 'none',
+};
+
+function stubs(category) {
+  const calls = { lookup: [], create: 0, update: 0, audit: 0 };
+  return {
+    calls,
+    deps: {
+      lookupCategory: async (uid, categoryId) => {
+        calls.lookup.push([uid, categoryId]);
+        return category === undefined ? null : category;
+      },
+      create: async () => {
+        calls.create += 1;
+        return 'novo-id';
+      },
+      update: async () => {
+        calls.update += 1;
+      },
+      writeAudit: async () => {
+        calls.audit += 1;
+      },
+    },
+  };
+}
+
+describe('expenses service — categoria compatível (Etapa 2)', () => {
+  it('aceita categoria expense e grava com o uid do próprio usuário', async () => {
+    const { deps, calls } = stubs({ id: 'cat-mercado', kind: 'expense' });
+    const result = await createExpense('uid-1', expenseData, deps);
+    assert.equal(result.ok, true);
+    assert.equal(result.id, 'novo-id');
+    assert.deepEqual(calls.lookup, [['uid-1', 'cat-mercado']]);
+    assert.equal(calls.create, 1);
+  });
+
+  it('aceita categoria both', async () => {
+    const { deps } = stubs({ id: 'cat-mercado', kind: 'both' });
+    const result = await createExpense('uid-1', expenseData, deps);
+    assert.equal(result.ok, true);
+  });
+
+  it('recusa categoria inexistente sem gravar', async () => {
+    const { deps, calls } = stubs(undefined);
+    const result = await createExpense('uid-1', expenseData, deps);
+    assert.equal(result.ok, false);
+    assert.match(result.errors.categoryId, /não encontrada/i);
+    assert.equal(calls.create, 0);
+  });
+
+  it('isolamento: a leitura da categoria usa o uid da sessão', async () => {
+    const { deps, calls } = stubs(undefined);
+    await createExpense('uid-2', expenseData, deps);
+    assert.deepEqual(calls.lookup, [['uid-2', 'cat-mercado']]);
+  });
+
+  it('recusa categoria income mesmo sem contexto no formulário', async () => {
+    const { deps, calls } = stubs({ kind: 'income' });
+    const result = await createExpense('uid-1', expenseData, deps);
+    assert.equal(result.ok, false);
+    assert.equal(result.errors.categoryId, CATEGORY_KIND_ERROR);
+    assert.equal(calls.create, 0);
+  });
+
+  it('updateExpense aplica a mesma checagem', async () => {
+    const incompat = stubs({ kind: 'income' });
+    const refused = await updateExpense('uid-1', 'exp-1', expenseData, incompat.deps);
+    assert.equal(refused.ok, false);
+    assert.equal(incompat.calls.update, 0);
+
+    const compat = stubs({ kind: 'expense' });
+    const accepted = await updateExpense('uid-1', 'exp-1', expenseData, compat.deps);
+    assert.equal(accepted.ok, true);
+    assert.equal(compat.calls.update, 1);
+  });
+
+  it('dados inválidos param antes de qualquer leitura de categoria', async () => {
+    const { deps, calls } = stubs({ kind: 'expense' });
+    const result = await createExpense('uid-1', { ...expenseData, description: '' }, deps);
+    assert.equal(result.ok, false);
+    assert.equal(calls.lookup.length, 0);
   });
 });

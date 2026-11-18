@@ -6,10 +6,12 @@ import assert from 'node:assert/strict';
 import {
   getRecurrenceOptions,
   getIncomeStatusOptions,
+  createIncome,
+  updateIncome,
   formatCents,
   parseMoneyToCents,
 } from '../../js/services/incomes.js';
-import { buildEntity } from '../../js/core/model.js';
+import { buildEntity, CATEGORY_KIND_ERROR } from '../../js/core/model.js';
 
 describe('incomes service — validação e helpers', () => {
   it('getRecurrenceOptions retorna recorrências esperadas', () => {
@@ -108,5 +110,101 @@ describe('incomes service — validação e helpers', () => {
     const { ok, errors } = buildEntity('incomes', invalid);
     assert.ok(!ok);
     assert.ok(errors.expectedDate);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Etapa 2 — validação autoritativa da categoria no serviço
+// ---------------------------------------------------------------------------
+
+const incomeData = {
+  description: 'Salário',
+  categoryId: 'cat-salario',
+  amountCents: '3.000,00',
+  expectedDate: '2026-12-05',
+  accountId: 'acc1',
+  status: 'pending',
+  recurrence: 'monthly',
+};
+
+/** Stubs: impedem qualquer toque real no Firestore. */
+function stubs(category) {
+  const calls = { lookup: [], create: 0, update: 0, audit: 0 };
+  return {
+    calls,
+    deps: {
+      lookupCategory: async (uid, categoryId) => {
+        calls.lookup.push([uid, categoryId]);
+        return category === undefined ? null : category;
+      },
+      create: async () => {
+        calls.create += 1;
+        return 'novo-id';
+      },
+      update: async () => {
+        calls.update += 1;
+      },
+      writeAudit: async () => {
+        calls.audit += 1;
+      },
+    },
+  };
+}
+
+describe('incomes service — categoria compatível (Etapa 2)', () => {
+  it('aceita categoria income e grava com o uid do próprio usuário', async () => {
+    const { deps, calls } = stubs({ id: 'cat-salario', kind: 'income' });
+    const result = await createIncome('uid-1', incomeData, deps);
+    assert.equal(result.ok, true);
+    assert.equal(result.id, 'novo-id');
+    assert.deepEqual(calls.lookup, [['uid-1', 'cat-salario']]);
+    assert.equal(calls.create, 1);
+  });
+
+  it('aceita categoria both', async () => {
+    const { deps } = stubs({ id: 'cat-salario', kind: 'both' });
+    const result = await createIncome('uid-1', incomeData, deps);
+    assert.equal(result.ok, true);
+  });
+
+  it('recusa categoria inexistente sem gravar', async () => {
+    const { deps, calls } = stubs(undefined);
+    const result = await createIncome('uid-1', incomeData, deps);
+    assert.equal(result.ok, false);
+    assert.match(result.errors.categoryId, /não encontrada/i);
+    assert.equal(calls.create, 0);
+  });
+
+  it('isolamento: categoria de outro usuário não é visível (lookup recebe o uid correto)', async () => {
+    const { deps, calls } = stubs(undefined);
+    await createIncome('uid-2', incomeData, deps);
+    assert.deepEqual(calls.lookup, [['uid-2', 'cat-salario']]);
+  });
+
+  it('recusa categoria expense mesmo sem contexto no formulário', async () => {
+    const { deps, calls } = stubs({ kind: 'expense' });
+    const result = await createIncome('uid-1', incomeData, deps);
+    assert.equal(result.ok, false);
+    assert.equal(result.errors.categoryId, CATEGORY_KIND_ERROR);
+    assert.equal(calls.create, 0);
+  });
+
+  it('updateIncome aplica a mesma checagem', async () => {
+    const incompat = stubs({ kind: 'expense' });
+    const refused = await updateIncome('uid-1', 'inc-1', incomeData, incompat.deps);
+    assert.equal(refused.ok, false);
+    assert.equal(incompat.calls.update, 0);
+
+    const compat = stubs({ kind: 'income' });
+    const accepted = await updateIncome('uid-1', 'inc-1', incomeData, compat.deps);
+    assert.equal(accepted.ok, true);
+    assert.equal(compat.calls.update, 1);
+  });
+
+  it('dados inválidos param antes de qualquer leitura de categoria', async () => {
+    const { deps, calls } = stubs({ kind: 'income' });
+    const result = await createIncome('uid-1', { ...incomeData, description: '' }, deps);
+    assert.equal(result.ok, false);
+    assert.equal(calls.lookup.length, 0);
   });
 });

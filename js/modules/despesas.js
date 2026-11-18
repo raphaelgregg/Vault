@@ -8,6 +8,7 @@
  */
 import { el, $, $$, toast, refreshIcons } from '../core/ui.js';
 import { openModal, closeModal } from '../components/modal.js';
+import { filterMovements } from '../core/model.js';
 import {
   listExpenses,
   createExpense,
@@ -20,7 +21,7 @@ import {
   formatCents,
   parseMoneyToCents,
 } from '../services/expenses.js';
-import { listCategories } from '../services/categories.js';
+import { listCategories, getCategoryKindOptions } from '../services/categories.js';
 import { listAccounts } from '../services/accounts.js';
 
 export const meta = { title: 'Despesas', icon: 'trending-down' };
@@ -29,7 +30,7 @@ let currentUser = null;
 let expensesCache = [];
 let categoriesCache = [];
 let accountsCache = [];
-let currentFilter = { status: 'all', month: null };
+let currentFilter = { status: 'all', month: null, categoryId: null };
 
 /** Render principal do módulo. */
 export async function render(container, { user }) {
@@ -178,18 +179,40 @@ function createFilterBar() {
             },
           }, monthOptions.map((o) => el('option', { value: o.value, selected: currentFilter.month === o.value }, o.label))),
         ]),
+        el('div', { class: 'form__field', style: 'flex: 1; min-width: 180px;' }, [
+          el('label', { for: 'filter-category', text: 'Categoria' }),
+          el('select', {
+            id: 'filter-category',
+            value: currentFilter.categoryId ?? '',
+            onChange: (e) => {
+              currentFilter.categoryId = e.target.value || null;
+              refreshTable();
+            },
+          }, [
+            el('option', { value: '', selected: !currentFilter.categoryId }, 'Todas as categorias'),
+            ...categoriesCache.map((c) =>
+              el('option', { value: c.id, selected: currentFilter.categoryId === c.id }, c.name)
+            ),
+          ]),
+        ]),
       ]),
     ]),
   ]);
 }
 
-/** Retorna despesas filtradas. */
+/**
+ * Retorna despesas filtradas.
+ * Filtro client-side: vale enquanto a listagem não for paginada. Com paginação
+ * futura, migrar status/mês/categoria para options.where no serviço (campos
+ * únicos, sem índice composto novo).
+ */
 function getFilteredExpenses() {
-  return expensesCache.filter((expense) => {
-    if (currentFilter.status !== 'all' && expense.status !== currentFilter.status) return false;
-    if (currentFilter.month && !expense.dueDate?.startsWith(currentFilter.month)) return false;
-    return true;
-  });
+  return filterMovements(expensesCache, currentFilter, { dateField: 'dueDate' });
+}
+
+/** true quando algum filtro de status/mês/categoria está ativo. */
+function hasActiveFilters() {
+  return currentFilter.status !== 'all' || Boolean(currentFilter.month) || Boolean(currentFilter.categoryId);
 }
 
 /** Atualiza apenas a tabela. */
@@ -209,14 +232,14 @@ function createExpensesTable() {
     return el('div', { id: 'expenses-table-container', class: 'empty' }, [
       el('div', { class: 'empty__icon' }, [el('i', { 'data-lucide': 'trending-down', 'aria-hidden': 'true' })]),
       el('p', { class: 'empty__title', text: 'Nenhuma despesa encontrada' }),
-      el('p', { class: 'empty__text', text: currentFilter.status !== 'all' || currentFilter.month
+      el('p', { class: 'empty__text', text: hasActiveFilters()
         ? 'Tente ajustar os filtros acima.'
         : 'Cadastre contas do mês para controlar vencimentos e comparar com o orçamento.' }),
-      (currentFilter.status !== 'all' || currentFilter.month) ? el('button', {
+      hasActiveFilters() ? el('button', {
         type: 'button',
         class: 'btn btn--secondary',
         onClick: () => {
-          currentFilter = { status: 'all', month: null };
+          currentFilter = { status: 'all', month: null, categoryId: null };
           refreshTable();
         },
         text: 'Limpar filtros',
@@ -226,8 +249,8 @@ function createExpensesTable() {
 
   const columns = [
     { key: 'description', label: 'Descrição' },
-    { key: 'category', label: 'Categoria', render: (v) => getCategoryLabel(v) },
-    { key: 'amount', label: 'Valor', numeric: true, render: (v) => formatCents(Number(v) || 0) },
+    { key: 'categoryId', label: 'Categoria', render: (v) => getCategoryLabel(v) },
+    { key: 'amountCents', label: 'Valor', numeric: true, render: (v) => formatCents(Number(v) || 0) },
     { key: 'dueDate', label: 'Vencimento', render: (v) => formatDate(v) },
     { key: 'paidDate', label: 'Pagamento', render: (v) => v ? formatDate(v) : '—' },
     { key: 'status', label: 'Status', render: (v) => getStatusLabel(v) },
@@ -342,7 +365,7 @@ function openExpenseModal(expense = null) {
         }, [
           el('option', { value: '', disabled: true, selected: !expense }, 'Selecione uma categoria'),
           ...expenseCategories.map((c) =>
-            el('option', { value: c.id, selected: expense?.categoryId === c.id }, c.name)
+            el('option', { value: c.id, selected: expense?.categoryId === c.id }, categoryLabel(c))
           ),
         ]),
         el('span', { class: 'form__error', 'data-for': 'categoryId' }),
@@ -585,6 +608,12 @@ function formatCentsInput(cents) {
 function getCategoryLabel(categoryId) {
   const cat = categoriesCache.find((c) => c.id === categoryId);
   return cat?.name ?? categoryId ?? '—';
+}
+
+/** Rótulo da opção no select: nome + tipo (Receita/Despesa/Ambos). */
+function categoryLabel(category) {
+  const kind = getCategoryKindOptions().find((o) => o.value === category.kind)?.label;
+  return kind ? `${category.name} (${kind})` : category.name;
 }
 
 function getStatusLabel(value) {

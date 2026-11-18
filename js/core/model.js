@@ -62,7 +62,12 @@ export function formatCents(cents) {
 const text = (max, required = true) => ({ kind: 'text', max, required });
 const date = (required = true) => ({ kind: 'date', required });
 const optionalDate = () => ({ kind: 'date', required: false });
-const refField = (required = true) => ({ kind: 'ref', max: 128, required });
+const refField = (required = true, kindCompat = null) => ({
+  kind: 'ref',
+  max: 128,
+  required,
+  ...(kindCompat ? { kindCompat } : {}),
+});
 const money = () => ({ kind: 'cents', required: true, positive: true });
 const cents0 = () => ({ kind: 'cents', required: true, positive: false });
 const optionalText = (max) => ({ kind: 'text', max, required: false });
@@ -91,7 +96,8 @@ export const SCHEMAS = Object.freeze({
     dateFields: ['expectedDate', 'receivedDate'],
     fields: {
       description: text(120),
-      categoryId: refField(),
+      // Receitas só aceitam categoria de receita ou "ambos".
+      categoryId: refField(true, ['income', 'both']),
       amountCents: money(),
       expectedDate: date(),
       receivedDate: optionalDate(),
@@ -105,7 +111,8 @@ export const SCHEMAS = Object.freeze({
     dateFields: ['purchaseDate', 'dueDate', 'paidDate'],
     fields: {
       description: text(120),
-      categoryId: refField(),
+      // Despesas só aceitam categoria de despesa ou "ambos".
+      categoryId: refField(true, ['expense', 'both']),
       amountCents: money(),
       accountId: refField(),
       purchaseDate: date(),
@@ -146,6 +153,42 @@ export const REF_FIELDS = Object.freeze({
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
+/** Mensagem única de incompatibilidade entre tipo de categoria e movimentação. */
+export const CATEGORY_KIND_ERROR = 'Categoria incompatível com este tipo de movimentação.';
+
+/**
+ * Verifica se uma categoria pode ser usada por uma movimentação.
+ * Puro e reutilizável: a categoria deve vir do Firestore, nunca do formulário.
+ * Retorna { ok, errors } no padrão dos serviços.
+ */
+export function checkCategoryForMovement(category, allowedKinds) {
+  if (!category) {
+    return { ok: false, errors: { categoryId: 'Categoria não encontrada.' } };
+  }
+  if (!isKindCompatible(category.kind, allowedKinds)) {
+    return { ok: false, errors: { categoryId: CATEGORY_KIND_ERROR } };
+  }
+  return { ok: true, errors: {} };
+}
+
+/** true quando `categoryKind` está na lista de tipos aceitos. */
+export function isKindCompatible(categoryKind, allowedKinds) {
+  return Array.isArray(allowedKinds) && allowedKinds.includes(categoryKind);
+}
+
+/**
+ * Resolve o tipo de uma categoria no contexto de validação.
+ * Aceita função (id) => kind, Map id → kind ou objeto { id: kind }.
+ * Retorna undefined quando o contexto não traz o lookup ou não conhece o id.
+ */
+function lookupCategoryKind(categoryKinds, categoryId) {
+  if (!categoryKinds) return undefined;
+  if (typeof categoryKinds === 'function') return categoryKinds(categoryId);
+  if (categoryKinds instanceof Map) return categoryKinds.get(categoryId);
+  if (typeof categoryKinds === 'object') return categoryKinds[categoryId];
+  return undefined;
+}
+
 /** true quando a string é uma data de calendário real em "YYYY-MM-DD". */
 export function isValidIsoDate(value) {
   if (typeof value !== 'string' || !ISO_DATE.test(value)) return false;
@@ -158,8 +201,18 @@ export function isValidIsoDate(value) {
 /**
  * Valida os dados de uma entidade (sem createdAt/updatedAt — o serviço os grava).
  * Retorna { ok, errors } com mensagens em pt-BR por campo.
+ *
+ * `context` é opcional e retrocompatível. Hoje aceita:
+ *  - categoryKinds: função ou Map categoryId → kind. Quando presente, campos com
+ *    `kindCompat` (ex.: categoryId de incomes/expenses) também são validados
+ *    contra o tipo da categoria.
+ *
+ * AUSÊNCIA DE CONTEXTO = a checagem de compatibilidade de tipo NÃO é executada;
+ * apenas a referência (string/limite) é validada, como antes. A existência e o
+ * tipo reais da categoria devem ser conferidos na camada de serviço, que lê o
+ * Firestore. Não passe o kind do formulário: ele não é fonte de verdade.
  */
-export function validateEntity(kind, data) {
+export function validateEntity(kind, data, context = {}) {
   const schema = SCHEMAS[kind];
   if (!schema) return { ok: false, errors: { _form: 'Entidade desconhecida.' } };
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
@@ -199,6 +252,12 @@ export function validateEntity(kind, data) {
     } else if (rule.kind === 'ref') {
       if (typeof value !== 'string' || value.trim().length === 0 || value.length > rule.max) {
         errors[field] = 'Referência inválida.';
+      } else if (rule.kindCompat) {
+        // Checagem declarativa: só roda se o contexto trouxer o lookup do kind.
+        const categoryKind = lookupCategoryKind(context?.categoryKinds, value);
+        if (typeof categoryKind === 'string' && !isKindCompatible(categoryKind, rule.kindCompat)) {
+          errors[field] = CATEGORY_KIND_ERROR;
+        }
       }
     }
   }
@@ -214,9 +273,11 @@ export function validateEntity(kind, data) {
 /**
  * Normaliza os dados validados para gravação: texto aparado, dinheiro em
  * centavos inteiros, datas mantidas em "YYYY-MM-DD". Retorna { ok, data, errors }.
+ * `context` é repassado a validateEntity; sem ele, a checagem de kindCompat
+ * não é executada (comportamento retrocompatível).
  */
-export function buildEntity(kind, data) {
-  const check = validateEntity(kind, data);
+export function buildEntity(kind, data, context = {}) {
+  const check = validateEntity(kind, data, context);
   if (!check.ok) return check;
 
   const schema = SCHEMAS[kind];
@@ -233,6 +294,34 @@ export function buildEntity(kind, data) {
     }
   }
   return { ok: true, data: out, errors: {} };
+}
+
+// ---------------------------------------------------------------------------
+// Filtros de listagem (puros, usados pela interface)
+// ---------------------------------------------------------------------------
+
+/**
+ * Filtra movimentações por status, mês e categoria.
+ *
+ * IMPORTANTE (limitação conhecida): o filtro é client-side sobre a lista já
+ * carregada. Vale enquanto a listagem não for paginada; com paginação futura,
+ * migrar para options.where no serviço (campos únicos, sem índice composto novo).
+ *
+ * @param {Array} items movimentações (incomes/expenses)
+ * @param {object} filters { status: 'all'|valor, month: 'YYYY-MM'|null, categoryId: id|null }
+ * @param {object} options { dateField } campo de data usado pelo filtro de mês
+ */
+export function filterMovements(items, filters = {}, { dateField } = {}) {
+  const { status = 'all', month = null, categoryId = null } = filters ?? {};
+  return (items ?? []).filter((item) => {
+    if (status !== 'all' && item.status !== status) return false;
+    if (month) {
+      const value = dateField ? item?.[dateField] : null;
+      if (typeof value !== 'string' || !value.startsWith(month)) return false;
+    }
+    if (categoryId && item.categoryId !== categoryId) return false;
+    return true;
+  });
 }
 
 // ---------------------------------------------------------------------------
