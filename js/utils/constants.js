@@ -63,6 +63,13 @@ export const DEBTOR_STATUSES = Object.freeze([
   { value: 'cancelled', label: 'Cancelado' },
 ]);
 
+export const DEBT_STATUSES = Object.freeze([
+  { value: 'pending', label: 'Pendente' },
+  { value: 'paid', label: 'Paga' },
+  { value: 'late', label: 'Atrasada' },
+  { value: 'cancelled', label: 'Cancelada' },
+]);
+
 export const DOC_STATUS = Object.freeze({
   active: 'active',
   inactive: 'inactive',

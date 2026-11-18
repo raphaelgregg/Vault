@@ -16,11 +16,12 @@ import {
   SUBSCRIPTION_PERIODICITIES,
   SUBSCRIPTION_STATUSES,
   DEBTOR_STATUSES,
+  DEBT_STATUSES,
 } from '../utils/constants.js';
 import { parseIsoDate } from '../utils/dates.js';
 
 // Re-exporta as enumerações para os serviços que as consomem via modelo.
-export { ACCOUNT_TYPES, RECURRENCES, SUBSCRIPTION_PERIODICITIES, SUBSCRIPTION_STATUSES, DEBTOR_STATUSES };
+export { ACCOUNT_TYPES, RECURRENCES, SUBSCRIPTION_PERIODICITIES, SUBSCRIPTION_STATUSES, DEBTOR_STATUSES, DEBT_STATUSES };
 
 // ---------------------------------------------------------------------------
 // Dinheiro
@@ -88,6 +89,7 @@ const refField = (required = true, kindCompat = null) => ({
 const money = () => ({ kind: 'cents', required: true, positive: true });
 const cents0 = () => ({ kind: 'cents', required: true, positive: false });
 const centsNonNegative = () => ({ kind: 'cents', required: true, positive: false, nonNegative: true });
+const intRange = (min, max) => ({ kind: 'int', required: true, min, max });
 const optionalText = (max) => ({ kind: 'text', max, required: false });
 
 export const SCHEMAS = Object.freeze({
@@ -180,6 +182,30 @@ export const SCHEMAS = Object.freeze({
       notes: optionalText(500),
     },
   },
+  // Parcelas de devedores (VF-2-03b2) — espelha firestore.rules `debts`.
+  debts: {
+    dateFields: ['dueDate'],
+    fields: {
+      debtorId: refField(),
+      description: text(120),
+      principalCents: money(),
+      dueDate: date(),
+      installmentNumber: intRange(1, 360),
+      status: { kind: 'enum', required: true, values: DEBT_STATUSES.map((s) => s.value) },
+    },
+  },
+  // Recebimentos — espelha firestore.rules `debtPayments`.
+  debtPayments: {
+    dateFields: ['date'],
+    fields: {
+      debtId: refField(),
+      debtorId: refField(),
+      amountCents: money(),
+      date: date(),
+      accountId: refField(),
+      notes: optionalText(500),
+    },
+  },
 });
 
 /** Campos de referência por schema (IDs de docs da própria árvore). */
@@ -191,6 +217,8 @@ export const REF_FIELDS = Object.freeze({
   transfers: ['fromAccountId', 'toAccountId'],
   subscriptions: ['accountId', 'categoryId'],
   debtors: [],
+  debts: ['debtorId'],
+  debtPayments: ['debtId', 'debtorId', 'accountId'],
 });
 
 // ---------------------------------------------------------------------------
@@ -288,6 +316,11 @@ export function validateEntity(kind, data, context = {}) {
       if (parsed === null) errors[field] = 'Valor monetário inválido.';
       else if (rule.positive && parsed <= 0) errors[field] = 'O valor deve ser maior que zero.';
       else if (rule.nonNegative && parsed < 0) errors[field] = 'O valor não pode ser negativo.';
+    } else if (rule.kind === 'int') {
+      const n = typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value) : value;
+      if (!Number.isInteger(n) || n < rule.min || n > rule.max) {
+        errors[field] = `Informe um número inteiro entre ${rule.min} e ${rule.max}.`;
+      }
     } else if (rule.kind === 'date') {
       if (!isValidIsoDate(value)) errors[field] = 'Data inválida (use AAAA-MM-DD).';
     } else if (rule.kind === 'ref') {
@@ -337,6 +370,8 @@ export function buildEntity(kind, data, context = {}) {
       out[field] = typeof value === 'string' ? value.trim() : value;
     } else if (rule.kind === 'cents') {
       out[field] = parseMoneyToCents(value);
+    } else if (rule.kind === 'int') {
+      out[field] = Number(value);
     } else {
       out[field] = value;
     }
@@ -381,10 +416,11 @@ export function filterMovements(items, filters = {}, { dateField } = {}) {
  *   saldo = saldo inicial
  *         + receitas recebidas (status received)
  *         - despesas pagas (status paid)
- *         + transferências confirmadas recebidas - confirmadas enviadas.
+ *         + transferências confirmadas recebidas - confirmadas enviadas
+         + recebimentos de devedores (debtPayments).
  * Transferências pendentes/canceladas não movem dinheiro.
  */
-export function accountBalances(accounts, { incomes = [], expenses = [], transfers = [] } = {}) {
+export function accountBalances(accounts, { incomes = [], expenses = [], transfers = [], debtPayments = [] } = {}) {
   const balances = new Map();
   for (const account of accounts) {
     balances.set(account.id, Number(account.initialBalanceCents) || 0);
@@ -399,6 +435,8 @@ export function accountBalances(accounts, { incomes = [], expenses = [], transfe
   for (const expense of expenses) {
     if (expense.status === 'paid') bump(expense.accountId, -expense.amountCents);
   }
+  // Recebimentos de devedores entram na conta de destino (existir já = dinheiro recebido).
+  for (const payment of debtPayments) bump(payment.accountId, payment.amountCents);
   for (const transfer of transfers) {
     if (transfer.status !== 'confirmed') continue;
     bump(transfer.fromAccountId, -transfer.amountCents);
@@ -478,4 +516,22 @@ export function summarizeDebtors(items = []) {
     pendingCents += debtorPendingCents(item);
   }
   return { openCount, pendingCents, receivedCents };
+}
+
+// ---------------------------------------------------------------------------
+// Parcelas e recebimentos (VF-2-03b2) — puros
+// ---------------------------------------------------------------------------
+
+/**
+ * Aplica um recebimento ao devedor. Retorna { ok, receivedCents, status, error }.
+ * Rejeita devedor não aberto, valor inválido e valor acima do pendente; quita
+ * (status paid) quando o pendente zera. Nada é gravado aqui.
+ */
+export function applyPaymentToDebtor(debtor, amountCents) {
+  if (debtor?.status !== 'open') return { ok: false, error: 'Só é possível registrar recebimento de devedor em aberto.' };
+  if (!Number.isInteger(amountCents) || amountCents <= 0) return { ok: false, error: 'O valor deve ser maior que zero.' };
+  const pending = debtorPendingCents(debtor);
+  if (amountCents > pending) return { ok: false, error: 'O valor excede o saldo pendente do devedor.' };
+  const receivedCents = (Number(debtor.receivedCents) || 0) + amountCents;
+  return { ok: true, receivedCents, status: receivedCents >= debtor.lentCents ? 'paid' : 'open' };
 }

@@ -159,9 +159,9 @@ function stripUndefined(value) {
  * A falha NÃO é silenciosa: é registrada com console.error e devolvida em
  * { ok: false, error } para quem quiser tratá-la.
  */
-export async function writeAudit(uid, entry) {
+export function auditPayload(uid, entry) {
   const { action, collection: entity, docId: entityId, before, after } = entry ?? {};
-  const payload = stripUndefined({
+  return stripUndefined({
     action,
     entity,
     entityId,
@@ -170,6 +170,10 @@ export async function writeAudit(uid, entry) {
     actorUid: uid,
     createdAt: serverTimestamp(),
   });
+}
+
+export async function writeAudit(uid, entry) {
+  const payload = auditPayload(uid, entry);
   try {
     await addDoc(userCollection(uid, 'auditLog'), payload);
     return { ok: true };
@@ -210,3 +214,39 @@ export function newBatch() {
 }
 
 export { writeBatch };
+
+/**
+ * Grava várias operações e as auditorias correspondentes em UM lote (tudo ou nada).
+ * ops: [{ type: 'create'|'update', collection, docId?, data, action? }]. Em 'create'
+ * sem docId o ID é gerado. Retorna os IDs na ordem das ops. Diferente de
+ * createAudited/updateAudited, a auditoria entra no lote: falha → nada é gravado.
+ * `io` (newBatch, userDoc, newDocRef) é injetável nos testes.
+ */
+export async function commitAtomic(uid, ops, io = {}) {
+  const {
+    newBatch: newBatchFn = newBatch,
+    userDoc: userDocFn = userDoc,
+    newDocRef = (u, c) => doc(userCollection(u, c)),
+  } = io;
+  const batch = newBatchFn();
+  const ids = [];
+  for (const op of ops) {
+    const stamps = { updatedAt: serverTimestamp() };
+    if (op.type === 'create') {
+      const ref = op.docId ? userDocFn(uid, op.collection, op.docId) : newDocRef(uid, op.collection);
+      batch.set(ref, { ...toFirestoreData(op.data), createdAt: serverTimestamp(), ...stamps });
+      ids.push(ref.id);
+      batch.set(newDocRef(uid, 'auditLog'), auditPayload(uid, {
+        action: op.action ?? 'create', collection: op.collection, docId: ref.id, after: op.data,
+      }));
+    } else {
+      batch.update(userDocFn(uid, op.collection, op.docId), { ...toFirestoreData(op.data), ...stamps });
+      ids.push(op.docId);
+      batch.set(newDocRef(uid, 'auditLog'), auditPayload(uid, {
+        action: op.action ?? 'update', collection: op.collection, docId: op.docId, after: op.data,
+      }));
+    }
+  }
+  await batch.commit();
+  return ids;
+}

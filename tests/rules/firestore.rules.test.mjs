@@ -22,7 +22,7 @@ import {
   assertFails,
   assertSucceeds,
 } from '@firebase/rules-unit-testing';
-import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, addDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, addDoc, writeBatch } from 'firebase/firestore';
 import { serverTimestamp } from 'firebase/firestore';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -546,5 +546,79 @@ describe('Devedores (VF-2-03b)', () => {
     await assertFails(getDoc(debtorDoc(asUser(BOB))));
     await assertFails(setDoc(debtorDoc(asUser(BOB), 'dev2'), debtor()));
     await assertFails(getDoc(debtorDoc(asAnonymous())));
+  });
+});
+
+describe('Parcelas e recebimentos de devedores (VF-2-03b2)', () => {
+  const debtorDoc = (db) => doc(db, 'users', ALICE, 'debtors', 'dev1');
+  const debtDoc = (db, id = 'd1') => doc(db, 'users', ALICE, 'debts', id);
+  const payDoc = (db, id = 'p1') => doc(db, 'users', ALICE, 'debtPayments', id);
+  const accountDoc = (db) => doc(db, 'users', ALICE, 'accounts', 'acc1');
+  const noon = (d) => new Date(`${d}T12:00:00.000Z`);
+  // Payloads equivalentes aos gravados por js/services/debtPayments.js (datas = meio-dia UTC).
+  const debt = (o = {}) => ({
+    debtorId: 'dev1', description: 'Parcela 1', principalCents: 50000, dueDate: noon('2026-12-10'),
+    installmentNumber: 1, status: 'pending', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...o,
+  });
+  const payment = (o = {}) => ({
+    debtId: 'd1', debtorId: 'dev1', amountCents: 20000, date: noon('2026-11-18'), accountId: 'acc1',
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...o,
+  });
+
+  async function seed() {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(accountDoc(db), account));
+    await assertSucceeds(setDoc(debtorDoc(db), {
+      name: 'João', loanDate: noon('2026-11-10'), lentCents: 50000, receivedCents: 0, status: 'open',
+      createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    }));
+    await assertSucceeds(setDoc(debtDoc(db), debt()));
+    return db;
+  }
+
+  it('lote atômico do recebimento: pagamento + parcela paga + devedor quitado', async () => {
+    const db = await seed();
+    const batch = writeBatch(db);
+    batch.set(payDoc(db), payment({ amountCents: 50000, notes: 'pix' }));
+    batch.update(debtDoc(db), { status: 'paid', updatedAt: serverTimestamp() });
+    batch.update(debtorDoc(db), { receivedCents: 50000, status: 'paid', updatedAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('lote inteiro falha se o recebimento excede o emprestado (nada gravado)', async () => {
+    const db = await seed();
+    const batch = writeBatch(db);
+    batch.set(payDoc(db), payment());
+    batch.update(debtorDoc(db), { receivedCents: 50001, updatedAt: serverTimestamp() });
+    await assertFails(batch.commit());
+    const snap = await getDoc(payDoc(db));
+    if (snap.exists()) throw new Error('o recebimento não deveria ter sido gravado (lote não atômico)');
+  });
+
+  it('parcelas: valida schema (principal, número 1..360, status, data, devedor existente)', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(debtDoc(db, 'd2'), debt({ installmentNumber: 360, status: 'late' })));
+    await assertFails(setDoc(debtDoc(db, 'd3'), debt({ principalCents: 0 })));
+    await assertFails(setDoc(debtDoc(db, 'd3'), debt({ installmentNumber: 361 })));
+    await assertFails(setDoc(debtDoc(db, 'd3'), debt({ installmentNumber: 1.5 })));
+    await assertFails(setDoc(debtDoc(db, 'd3'), debt({ status: 'open' })));
+    await assertFails(setDoc(debtDoc(db, 'd3'), debt({ dueDate: '2026-12-10' })));
+    await assertFails(setDoc(debtDoc(db, 'd3'), debt({ debtorId: 'inexistente' })));
+    await assertFails(setDoc(debtDoc(db, 'd3'), debt({ extra: 1 })));
+    await assertSucceeds(updateDoc(debtDoc(db), { status: 'cancelled', updatedAt: serverTimestamp() }));
+  });
+
+  it('recebimentos: valida schema, referências e isolamento', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(payDoc(db), payment()));
+    await assertFails(setDoc(payDoc(db, 'p2'), payment({ amountCents: 0 })));
+    await assertFails(setDoc(payDoc(db, 'p2'), payment({ amountCents: 10.5 })));
+    await assertFails(setDoc(payDoc(db, 'p2'), payment({ date: '2026-11-18' })));
+    await assertFails(setDoc(payDoc(db, 'p2'), payment({ debtId: 'zzz' })));
+    await assertFails(setDoc(payDoc(db, 'p2'), payment({ accountId: 'zzz' })));
+    await assertFails(setDoc(payDoc(db, 'p2'), payment({ extra: 1 })));
+    await assertFails(getDoc(payDoc(asUser(BOB))));
+    await assertFails(setDoc(payDoc(asUser(BOB), 'p3'), payment()));
+    await assertFails(getDoc(payDoc(asAnonymous())));
   });
 });
