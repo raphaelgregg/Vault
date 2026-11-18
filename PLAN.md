@@ -24,7 +24,7 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 ## Débitos técnicos
 
 - ~~[Impacto: Crítico] js/services/firestore.js:144 + firestore.rules:438-449 — `writeAudit` envia `collection/docId/before/after`; as Rules só aceitam `action/entity/entityId/actorUid/createdAt` (schema fechado) → toda gravação de auditoria é negada e o `catch` apenas faz `console.warn`. Auditoria inexistente em produção [C] → alinhar payload ao schema (ou ajustar Rules com teste), e tornar a falha visível.~~ (resolvido em VF-1-01)
-- [Impacto: Alto] js/services/accounts.js:73-87 e js/modules/bancos.js:356 — `deleteAccount` não verifica vínculos; a UI afirma que "as Security Rules impedirão", mas as Rules (`firestore.rules:152`) permitem `delete` ao dono [C]. Excluir conta deixa receitas/despesas/transferências órfãs e distorce `accountBalances` (`js/core/model.js:339-357`, ignora ids desconhecidos) → aplicar o mesmo padrão fail-closed de `deleteCategory` (`js/services/categories.js:140-165`) e corrigir o texto.
+- ~~[Impacto: Alto] js/services/accounts.js:73-87 e js/modules/bancos.js:356 — `deleteAccount` não verifica vínculos; a UI afirma que "as Security Rules impedirão", mas as Rules (`firestore.rules:152`) permitem `delete` ao dono [C]. Excluir conta deixa receitas/despesas/transferências órfãs e distorce `accountBalances` (`js/core/model.js:339-357`, ignora ids desconhecidos) → aplicar o mesmo padrão fail-closed de `deleteCategory` (`js/services/categories.js:140-165`) e corrigir o texto.~~ (resolvido em VF-1-02)
 - ~~[Impacto: Alto] package.json:9 — `node --test tests/rules` (diretório) falha em Node 22 ("Cannot find module") [C, reproduzido para o formato de diretório]; README declara Node 18+ → usar glob `tests/rules/*.mjs` e fixar `engines`.~~ (resolvido em VF-4-01)
 - [Impacto: Médio] js/services/transfers.js:88-110 — `confirmTransfer`/`cancelTransfer` fazem `update` sem ler o estado atual: permite confirmar transferência cancelada e não revalida contas existentes (o `exists()` das Rules cobre a existência, não a transição) [C] → validar transição de status.
 - [Impacto: Médio] vercel.json:3-30 — sem `Content-Security-Policy`; scripts de `unpkg.com` (lucide, `pages/*.html:18`) e `gstatic.com` (SDK) sem SRI [C]; `innerHTML` só com literais próprios (`js/core/ui.js:10`) [sem XSS comprovado] → CSP restritiva + SRI/versão fixa; avaliar vendorizar lucide.
@@ -48,12 +48,13 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Dependências: nenhuma (decisão de produto sobre `before/after` antes de mexer nas Rules).
 - Aceite: teste de Rules cria entrada com o payload real do service e passa; testes de serviço verificam o shape; `npm run test:rules` verde; deploy das Rules documentado.
 
-- [ ] **VF-1-02 — Exclusão de conta com vínculos** (Alto)
+- [x] **VF-1-02 — Exclusão de conta com vínculos** (Alto) — concluída
 - Problema: ver Débitos; contas excluídas deixam referências órfãs.
 - Solução: contar vínculos em incomes/expenses/transfers (origem e destino) fail-closed como `deleteCategory`; corrigir texto de `bancos.js:356`; sugerir arquivar (`status: archived`).
 - Arquivos: `js/services/accounts.js`, `js/modules/bancos.js`, `tests/services/accounts.test.mjs`.
 - Dependências: nenhuma.
 - Aceite: testes cobrem conta em uso (bloqueia), sem uso (exclui) e falha de verificação (bloqueia).
+- Resolução: `deleteAccount` (`js/services/accounts.js`) conta vínculos via `count()` em incomes, expenses, transfers (origem e destino), subscriptions, debtPayments e goalTransactions (todas com `ref(...'accounts')` nas Rules); bloqueia com mensagem por coleção, fail-closed em erro de contagem, sem remover nem auditar. Texto de `bancos.js` corrigido (sugere arquivar). `firestore.rules` NÃO alterado: Rules não consultam/contam coleções no `delete`; teste de Rules documenta o contrato. Limitação: checagem client-side com janela de concorrência (mesma de `deleteCategory`). Sem deploy de Rules necessário. Testes: `test:unit` 109 ok, `test:rules` 28 ok.
 
 - [ ] **VF-1-03 — Cabeçalhos de segurança (CSP/SRI)** (Médio)
 - Solução: CSP em `vercel.json` compatível com importmap injetado por JS e com gstatic/unpkg; SRI ou versão fixa/vendorizada para lucide.

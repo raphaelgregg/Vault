@@ -352,7 +352,7 @@ function openAccountModal(account = null) {
 function confirmDeleteAccount(account) {
   const body = el('div', {}, [
     el('p', { text: `Tem certeza que deseja excluir a conta "${account.name}"?` }),
-    el('p', { class: 'card__hint', text: 'Esta ação não pode ser desfeita. Contas com movimentações vinculadas não podem ser excluídas (as Security Rules impedirão).' }),
+    el('p', { class: 'card__hint', text: 'Esta ação não pode ser desfeita. Contas com movimentações vinculadas não podem ser excluídas — nesse caso, arquive a conta (status "Arquivada").' }),
   ]);
 
   const footer = [

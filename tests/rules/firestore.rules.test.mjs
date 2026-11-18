@@ -202,6 +202,14 @@ describe('Operações válidas', () => {
     await assertSucceeds(getDoc(doc(db, 'users', ALICE, 'accounts', 'acc-main')));
   });
 
+  // VF-1-02: as Rules não têm como contar vínculos na exclusão; a integridade
+  // referencial de contas é garantida por services/accounts.js (fail-closed).
+  // Este teste documenta o contrato: o dono exclui; terceiros não.
+  it('exclusão de conta: dono permitido (integridade no service), outro usuário negado', async () => {
+    await assertFails(deleteDoc(doc(asUser(BOB), 'users', ALICE, 'accounts', 'acc-main')));
+    await assertSucceeds(deleteDoc(doc(asUser(ALICE), 'users', ALICE, 'accounts', 'acc-main')));
+  });
+
   it('permite criar despesa com centavos inteiros e referências válidas', async () => {
     const db = asUser(ALICE);
     await assertSucceeds(
