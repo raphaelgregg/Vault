@@ -85,28 +85,88 @@ export async function deleteTransfer(uid, transferId) {
   return { ok: true };
 }
 
-/** Marca transferência como confirmada (movimenta saldo). */
-export async function confirmTransfer(uid, transferId) {
-  await update(uid, COLLECTION, transferId, { status: 'confirmed' });
-  await writeAudit(uid, {
-    action: 'confirm',
+/**
+ * Transições de status permitidas. `cancelled` é terminal; `confirmed` só pode ser
+ * cancelada (nunca volta a pendente nem é confirmada de novo).
+ */
+export const TRANSFER_TRANSITIONS = Object.freeze({
+  pending: ['confirmed', 'cancelled'],
+  confirmed: ['cancelled'],
+  cancelled: [],
+});
+
+/** Verifica se a transição de status é permitida. Puro. */
+export function canTransitionTransfer(from, to) {
+  return (TRANSFER_TRANSITIONS[from] ?? []).includes(to);
+}
+
+const STATUS_LABELS = { pending: 'pendente', confirmed: 'confirmada', cancelled: 'cancelada' };
+
+/**
+ * Lê o estado atual, valida a transição e (ao confirmar) revalida as contas.
+ * `io` permite injetar dependências nos testes (padrão: services/firestore.js).
+ * Limitação: leitura+escrita não atômica (janela de concorrência; as Rules não
+ * validam transição de status).
+ */
+async function transitionTransfer(uid, transferId, nextStatus, action, io = {}) {
+  const {
+    getById: getFn = getById,
+    update: updateFn = update,
+    writeAudit: auditFn = writeAudit,
+  } = io;
+
+  const transfer = await getFn(uid, COLLECTION, transferId);
+  if (!transfer) return { ok: false, errors: { _form: 'Transferência não encontrada.' } };
+
+  if (!canTransitionTransfer(transfer.status, nextStatus)) {
+    const current = STATUS_LABELS[transfer.status] ?? String(transfer.status);
+    return {
+      ok: false,
+      errors: {
+        _form: `Transferência já está ${current}; não é possível ${nextStatus === 'confirmed' ? 'confirmá-la' : 'cancelá-la'}.`,
+      },
+    };
+  }
+
+  if (nextStatus === 'confirmed') {
+    try {
+      const [from, to] = await Promise.all([
+        getFn(uid, COLLECTIONS.accounts, transfer.fromAccountId),
+        getFn(uid, COLLECTIONS.accounts, transfer.toAccountId),
+      ]);
+      if (!from || !to) {
+        return {
+          ok: false,
+          errors: { _form: 'Conta de origem ou destino não existe mais; não é possível confirmar.' },
+        };
+      }
+    } catch (error) {
+      console.error('[transfers] falha ao verificar contas', error);
+      return {
+        ok: false,
+        errors: { _form: 'Não foi possível verificar as contas da transferência. Tente novamente.' },
+      };
+    }
+  }
+
+  await updateFn(uid, COLLECTION, transferId, { status: nextStatus });
+  await auditFn(uid, {
+    action,
     collection: COLLECTION,
     docId: transferId,
-    after: { status: 'confirmed' },
+    after: { status: nextStatus },
   });
   return { ok: true };
 }
 
-/** Marca transferência como cancelada. */
-export async function cancelTransfer(uid, transferId) {
-  await update(uid, COLLECTION, transferId, { status: 'cancelled' });
-  await writeAudit(uid, {
-    action: 'cancel',
-    collection: COLLECTION,
-    docId: transferId,
-    after: { status: 'cancelled' },
-  });
-  return { ok: true };
+/** Marca transferência como confirmada (movimenta saldo). Retorna { ok, errors }. */
+export async function confirmTransfer(uid, transferId, io) {
+  return transitionTransfer(uid, transferId, 'confirmed', 'confirm', io);
+}
+
+/** Marca transferência como cancelada. Retorna { ok, errors }. */
+export async function cancelTransfer(uid, transferId, io) {
+  return transitionTransfer(uid, transferId, 'cancelled', 'cancel', io);
 }
 
 /** Status options for transfer. */

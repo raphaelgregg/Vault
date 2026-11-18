@@ -487,7 +487,7 @@ async function confirmTransferAction(transfer) {
     await loadData();
     renderPage($('.content') || document.getElementById('page-content'));
   } else {
-    toast('Erro ao confirmar transferência.', 5000);
+    toast(result.errors?._form || 'Erro ao confirmar transferência.', 5000);
   }
 }
 
@@ -499,7 +499,7 @@ async function confirmCancelTransfer(transfer) {
     await loadData();
     renderPage($('.content') || document.getElementById('page-content'));
   } else {
-    toast('Erro ao cancelar.', 5000);
+    toast(result.errors?._form || 'Erro ao cancelar.', 5000);
   }
 }
 

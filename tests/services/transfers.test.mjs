@@ -5,6 +5,9 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   getTransferStatusOptions,
+  confirmTransfer,
+  cancelTransfer,
+  canTransitionTransfer,
   formatCents,
   parseMoneyToCents,
 } from '../../js/services/transfers.js';
@@ -99,5 +102,102 @@ describe('transfers service — validação e helpers', () => {
     const { ok, errors } = buildEntity('transfers', invalid);
     assert.ok(!ok);
     assert.ok(errors.date);
+  });
+});
+
+describe('transfers service — transições de status (VF-2-01)', () => {
+  const uid = 'u1';
+  const transfer = (status) => ({ id: 't1', status, fromAccountId: 'a1', toAccountId: 'a2' });
+
+  function makeIo({ status = 'pending', missing = [], failAccounts = false, exists = true } = {}) {
+    const calls = { update: [], audit: [] };
+    return {
+      calls,
+      io: {
+        getById: async (_uid, collection, id) => {
+          if (collection === 'transfers') return exists ? transfer(status) : null;
+          if (failAccounts) throw new Error('unavailable');
+          return missing.includes(id) ? null : { id };
+        },
+        update: async (_u, _c, id, data) => { calls.update.push({ id, data }); },
+        writeAudit: async (_u, entry) => { calls.audit.push(entry); },
+      },
+    };
+  }
+
+  it('canTransitionTransfer cobre a matriz de transições', () => {
+    assert.ok(canTransitionTransfer('pending', 'confirmed'));
+    assert.ok(canTransitionTransfer('pending', 'cancelled'));
+    assert.ok(canTransitionTransfer('confirmed', 'cancelled'));
+    assert.ok(!canTransitionTransfer('confirmed', 'confirmed'));
+    assert.ok(!canTransitionTransfer('confirmed', 'pending'));
+    assert.ok(!canTransitionTransfer('cancelled', 'confirmed'));
+    assert.ok(!canTransitionTransfer('cancelled', 'cancelled'));
+    assert.ok(!canTransitionTransfer('bogus', 'confirmed'));
+  });
+
+  it('confirma transferência pendente e audita', async () => {
+    const { io, calls } = makeIo();
+    assert.deepEqual(await confirmTransfer(uid, 't1', io), { ok: true });
+    assert.deepEqual(calls.update, [{ id: 't1', data: { status: 'confirmed' } }]);
+    assert.equal(calls.audit.length, 1);
+    assert.equal(calls.audit[0].action, 'confirm');
+  });
+
+  it('rejeita confirmar transferência cancelada (sem update nem auditoria)', async () => {
+    const { io, calls } = makeIo({ status: 'cancelled' });
+    const r = await confirmTransfer(uid, 't1', io);
+    assert.equal(r.ok, false);
+    assert.match(r.errors._form, /cancelada/);
+    assert.equal(calls.update.length, 0);
+    assert.equal(calls.audit.length, 0);
+  });
+
+  it('rejeita confirmar transferência já confirmada', async () => {
+    const { io, calls } = makeIo({ status: 'confirmed' });
+    const r = await confirmTransfer(uid, 't1', io);
+    assert.equal(r.ok, false);
+    assert.equal(calls.update.length, 0);
+  });
+
+  it('rejeita confirmar quando uma das contas não existe mais', async () => {
+    const { io, calls } = makeIo({ missing: ['a2'] });
+    const r = await confirmTransfer(uid, 't1', io);
+    assert.equal(r.ok, false);
+    assert.match(r.errors._form, /não existe mais/);
+    assert.equal(calls.update.length, 0);
+  });
+
+  it('fail-closed: falha ao verificar contas bloqueia a confirmação', async () => {
+    const { io, calls } = makeIo({ failAccounts: true });
+    const r = await confirmTransfer(uid, 't1', io);
+    assert.equal(r.ok, false);
+    assert.equal(calls.update.length, 0);
+  });
+
+  it('cancela pendente e confirmada; rejeita cancelar já cancelada', async () => {
+    for (const status of ['pending', 'confirmed']) {
+      const { io, calls } = makeIo({ status });
+      assert.deepEqual(await cancelTransfer(uid, 't1', io), { ok: true });
+      assert.equal(calls.update[0].data.status, 'cancelled');
+      assert.equal(calls.audit[0].action, 'cancel');
+    }
+    const { io, calls } = makeIo({ status: 'cancelled' });
+    const r = await cancelTransfer(uid, 't1', io);
+    assert.equal(r.ok, false);
+    assert.equal(calls.update.length, 0);
+  });
+
+  it('cancelar não revalida contas (conta removida não impede cancelar)', async () => {
+    const { io } = makeIo({ status: 'confirmed', missing: ['a1', 'a2'] });
+    assert.equal((await cancelTransfer(uid, 't1', io)).ok, true);
+  });
+
+  it('transferência inexistente retorna erro', async () => {
+    const { io, calls } = makeIo({ exists: false });
+    const r = await confirmTransfer(uid, 'nope', io);
+    assert.equal(r.ok, false);
+    assert.match(r.errors._form, /não encontrada/);
+    assert.equal(calls.update.length, 0);
   });
 });
