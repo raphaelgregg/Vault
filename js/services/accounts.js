@@ -4,14 +4,12 @@
  */
 import { COLLECTIONS } from '../utils/constants.js';
 import {
-  create,
   list,
   getById,
-  update,
-  remove,
   count,
-  writeAudit,
-  serverTimestamp,
+  createAudited,
+  updateAudited,
+  removeAudited,
 } from './firestore.js';
 import {
   validateEntity,
@@ -39,17 +37,11 @@ export async function getAccount(uid, accountId) {
  * Cria uma nova conta.
  * Retorna { ok, id, errors }.
  */
-export async function createAccount(uid, rawData) {
+export async function createAccount(uid, rawData, io = {}) {
   const { ok, data, errors } = buildEntity('accounts', rawData);
   if (!ok) return { ok: false, errors };
 
-  const id = await create(uid, COLLECTION, data);
-  await writeAudit(uid, {
-    action: 'create',
-    collection: COLLECTION,
-    docId: id,
-    after: data,
-  });
+  const id = await createAudited(uid, COLLECTION, data, io);
   return { ok: true, id };
 }
 
@@ -57,17 +49,11 @@ export async function createAccount(uid, rawData) {
  * Atualiza uma conta existente.
  * Retorna { ok, errors }.
  */
-export async function updateAccount(uid, accountId, rawData) {
+export async function updateAccount(uid, accountId, rawData, io = {}) {
   const { ok, data, errors } = buildEntity('accounts', rawData);
   if (!ok) return { ok: false, errors };
 
-  await update(uid, COLLECTION, accountId, data);
-  await writeAudit(uid, {
-    action: 'update',
-    collection: COLLECTION,
-    docId: accountId,
-    after: data,
-  });
+  await updateAudited(uid, COLLECTION, accountId, data, io);
   return { ok: true };
 }
 
@@ -127,12 +113,7 @@ export async function countAccountUsage(uid, accountId, countFn = count) {
  * `io` permite injetar dependências nos testes (padrão: services/firestore.js).
  */
 export async function deleteAccount(uid, accountId, io = {}) {
-  const {
-    getById: getFn = getById,
-    count: countFn = count,
-    remove: removeFn = remove,
-    writeAudit: auditFn = writeAudit,
-  } = io;
+  const { getById: getFn = getById, count: countFn = count } = io;
 
   const account = await getFn(uid, COLLECTION, accountId);
   if (!account) return { ok: false, errors: { _form: 'Conta não encontrada.' } };
@@ -159,13 +140,7 @@ export async function deleteAccount(uid, accountId, io = {}) {
     return { ok: false, errors: { _form: buildAccountInUseMessage(usage) } };
   }
 
-  await removeFn(uid, COLLECTION, accountId);
-  await auditFn(uid, {
-    action: 'delete',
-    collection: COLLECTION,
-    docId: accountId,
-    before: account,
-  });
+  await removeAudited(uid, COLLECTION, accountId, account, io);
   return { ok: true };
 }
 

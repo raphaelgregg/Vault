@@ -4,12 +4,11 @@
  */
 import { COLLECTIONS, RECURRENCES } from '../utils/constants.js';
 import {
-  create,
   list,
   getById,
-  update,
-  remove,
-  writeAudit,
+  createAudited,
+  updateAudited,
+  removeAudited,
 } from './firestore.js';
 import {
   validateEntity,
@@ -59,15 +58,7 @@ export async function createExpense(uid, rawData, deps = {}) {
   const categoryCheck = checkCategoryForMovement(category, ALLOWED_CATEGORY_KINDS);
   if (!categoryCheck.ok) return categoryCheck;
 
-  const createDoc = deps.create ?? create;
-  const audit = deps.writeAudit ?? writeAudit;
-  const id = await createDoc(uid, COLLECTION, data);
-  await audit(uid, {
-    action: 'create',
-    collection: COLLECTION,
-    docId: id,
-    after: data,
-  });
+  const id = await createAudited(uid, COLLECTION, data, deps);
   return { ok: true, id };
 }
 
@@ -85,58 +76,29 @@ export async function updateExpense(uid, expenseId, rawData, deps = {}) {
   const categoryCheck = checkCategoryForMovement(category, ALLOWED_CATEGORY_KINDS);
   if (!categoryCheck.ok) return categoryCheck;
 
-  const updateDoc = deps.update ?? update;
-  const audit = deps.writeAudit ?? writeAudit;
-  await updateDoc(uid, COLLECTION, expenseId, data);
-  await audit(uid, {
-    action: 'update',
-    collection: COLLECTION,
-    docId: expenseId,
-    after: data,
-  });
+  await updateAudited(uid, COLLECTION, expenseId, data, deps);
   return { ok: true };
 }
 
 /** Exclui uma despesa. */
-export async function deleteExpense(uid, expenseId) {
-  const expense = await getById(uid, COLLECTION, expenseId);
+export async function deleteExpense(uid, expenseId, io = {}) {
+  const expense = await (io.getById ?? getById)(uid, COLLECTION, expenseId);
   if (!expense) return { ok: false, errors: { _form: 'Despesa não encontrada.' } };
 
-  await remove(uid, COLLECTION, expenseId);
-  await writeAudit(uid, {
-    action: 'delete',
-    collection: COLLECTION,
-    docId: expenseId,
-    before: expense,
-  });
+  await removeAudited(uid, COLLECTION, expenseId, expense, io);
   return { ok: true };
 }
 
 /** Marca despesa como paga (status -> paid + paidDate = hoje). */
-export async function markExpensePaid(uid, expenseId, paidDate = null) {
+export async function markExpensePaid(uid, expenseId, paidDate = null, io = {}) {
   const date = paidDate ?? new Date().toISOString().split('T')[0];
-  await update(uid, COLLECTION, expenseId, {
-    status: 'paid',
-    paidDate: date,
-  });
-  await writeAudit(uid, {
-    action: 'mark_paid',
-    collection: COLLECTION,
-    docId: expenseId,
-    after: { status: 'paid', paidDate: date },
-  });
+  await updateAudited(uid, COLLECTION, expenseId, { status: 'paid', paidDate: date }, io, 'mark_paid');
   return { ok: true };
 }
 
 /** Marca despesa como cancelada. */
-export async function cancelExpense(uid, expenseId) {
-  await update(uid, COLLECTION, expenseId, { status: 'cancelled' });
-  await writeAudit(uid, {
-    action: 'cancel',
-    collection: COLLECTION,
-    docId: expenseId,
-    after: { status: 'cancelled' },
-  });
+export async function cancelExpense(uid, expenseId, io = {}) {
+  await updateAudited(uid, COLLECTION, expenseId, { status: 'cancelled' }, io, 'cancel');
   return { ok: true };
 }
 

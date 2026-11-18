@@ -4,13 +4,12 @@
  */
 import { COLLECTIONS } from '../utils/constants.js';
 import {
-  create,
   list,
   getById,
-  update,
-  remove,
   count,
-  writeAudit,
+  createAudited,
+  updateAudited,
+  removeAudited,
 } from './firestore.js';
 import {
   validateEntity,
@@ -73,12 +72,12 @@ export function buildCategoryInUseMessage(summary) {
  * Conta os vínculos de uma categoria nas quatro coleções.
  * Lança se qualquer contagem falhar — o chamador decide (fail-closed).
  */
-export async function countCategoryUsage(uid, categoryId) {
+export async function countCategoryUsage(uid, categoryId, countFn = count) {
   const counts = await Promise.all(
     CATEGORY_LINK_COLLECTIONS.map(async ({ collection, label }) => ({
       collection,
       label,
-      count: await count(uid, collection, { where: [['categoryId', '==', categoryId]] }),
+      count: await countFn(uid, collection, { where: [['categoryId', '==', categoryId]] }),
     }))
   );
   return summarizeCategoryLinks(counts);
@@ -100,17 +99,11 @@ export async function getCategory(uid, categoryId) {
  * Cria uma nova categoria.
  * Retorna { ok, id, errors }.
  */
-export async function createCategory(uid, rawData) {
+export async function createCategory(uid, rawData, io = {}) {
   const { ok, data, errors } = buildEntity('categories', rawData);
   if (!ok) return { ok: false, errors };
 
-  const id = await create(uid, COLLECTION, data);
-  await writeAudit(uid, {
-    action: 'create',
-    collection: COLLECTION,
-    docId: id,
-    after: data,
-  });
+  const id = await createAudited(uid, COLLECTION, data, io);
   return { ok: true, id };
 }
 
@@ -118,23 +111,17 @@ export async function createCategory(uid, rawData) {
  * Atualiza uma categoria existente.
  * Retorna { ok, errors }.
  */
-export async function updateCategory(uid, categoryId, rawData) {
+export async function updateCategory(uid, categoryId, rawData, io = {}) {
   const { ok, data, errors } = buildEntity('categories', rawData);
   if (!ok) return { ok: false, errors };
 
-  await update(uid, COLLECTION, categoryId, data);
-  await writeAudit(uid, {
-    action: 'update',
-    collection: COLLECTION,
-    docId: categoryId,
-    after: data,
-  });
+  await updateAudited(uid, COLLECTION, categoryId, data, io);
   return { ok: true };
 }
 
 /** Exclui uma categoria. */
-export async function deleteCategory(uid, categoryId) {
-  const category = await getById(uid, COLLECTION, categoryId);
+export async function deleteCategory(uid, categoryId, io = {}) {
+  const category = await (io.getById ?? getById)(uid, COLLECTION, categoryId);
   if (!category) return { ok: false, errors: { _form: 'Categoria não encontrada.' } };
 
   // Exclusão segura: categorias referenciadas por movimentações/orçamentos não
@@ -142,7 +129,7 @@ export async function deleteCategory(uid, categoryId) {
   // validar integridade referencial na exclusão).
   let usage;
   try {
-    usage = await countCategoryUsage(uid, categoryId);
+    usage = await countCategoryUsage(uid, categoryId, io.count);
   } catch (error) {
     // Fail-closed: se não for possível verificar, NÃO exclui.
     console.error('[categories] falha ao verificar vínculos', error);
@@ -163,13 +150,7 @@ export async function deleteCategory(uid, categoryId) {
     return { ok: false, errors: { _form: buildCategoryInUseMessage(usage) } };
   }
 
-  await remove(uid, COLLECTION, categoryId);
-  await writeAudit(uid, {
-    action: 'delete',
-    collection: COLLECTION,
-    docId: categoryId,
-    before: category,
-  });
+  await removeAudited(uid, COLLECTION, categoryId, category, io);
   return { ok: true };
 }
 

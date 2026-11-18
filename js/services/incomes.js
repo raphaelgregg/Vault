@@ -4,12 +4,11 @@
  */
 import { COLLECTIONS, RECURRENCES } from '../utils/constants.js';
 import {
-  create,
   list,
   getById,
-  update,
-  remove,
-  writeAudit,
+  createAudited,
+  updateAudited,
+  removeAudited,
 } from './firestore.js';
 import {
   validateEntity,
@@ -59,15 +58,7 @@ export async function createIncome(uid, rawData, deps = {}) {
   const categoryCheck = checkCategoryForMovement(category, ALLOWED_CATEGORY_KINDS);
   if (!categoryCheck.ok) return categoryCheck;
 
-  const createDoc = deps.create ?? create;
-  const audit = deps.writeAudit ?? writeAudit;
-  const id = await createDoc(uid, COLLECTION, data);
-  await audit(uid, {
-    action: 'create',
-    collection: COLLECTION,
-    docId: id,
-    after: data,
-  });
+  const id = await createAudited(uid, COLLECTION, data, deps);
   return { ok: true, id };
 }
 
@@ -85,58 +76,29 @@ export async function updateIncome(uid, incomeId, rawData, deps = {}) {
   const categoryCheck = checkCategoryForMovement(category, ALLOWED_CATEGORY_KINDS);
   if (!categoryCheck.ok) return categoryCheck;
 
-  const updateDoc = deps.update ?? update;
-  const audit = deps.writeAudit ?? writeAudit;
-  await updateDoc(uid, COLLECTION, incomeId, data);
-  await audit(uid, {
-    action: 'update',
-    collection: COLLECTION,
-    docId: incomeId,
-    after: data,
-  });
+  await updateAudited(uid, COLLECTION, incomeId, data, deps);
   return { ok: true };
 }
 
 /** Exclui uma receita. */
-export async function deleteIncome(uid, incomeId) {
-  const income = await getById(uid, COLLECTION, incomeId);
+export async function deleteIncome(uid, incomeId, io = {}) {
+  const income = await (io.getById ?? getById)(uid, COLLECTION, incomeId);
   if (!income) return { ok: false, errors: { _form: 'Receita não encontrada.' } };
 
-  await remove(uid, COLLECTION, incomeId);
-  await writeAudit(uid, {
-    action: 'delete',
-    collection: COLLECTION,
-    docId: incomeId,
-    before: income,
-  });
+  await removeAudited(uid, COLLECTION, incomeId, income, io);
   return { ok: true };
 }
 
 /** Marca receita como recebida (status -> received + receivedDate = hoje). */
-export async function markIncomeReceived(uid, incomeId, receivedDate = null) {
+export async function markIncomeReceived(uid, incomeId, receivedDate = null, io = {}) {
   const date = receivedDate ?? new Date().toISOString().split('T')[0];
-  await update(uid, COLLECTION, incomeId, {
-    status: 'received',
-    receivedDate: date,
-  });
-  await writeAudit(uid, {
-    action: 'mark_received',
-    collection: COLLECTION,
-    docId: incomeId,
-    after: { status: 'received', receivedDate: date },
-  });
+  await updateAudited(uid, COLLECTION, incomeId, { status: 'received', receivedDate: date }, io, 'mark_received');
   return { ok: true };
 }
 
 /** Marca receita como cancelada. */
-export async function cancelIncome(uid, incomeId) {
-  await update(uid, COLLECTION, incomeId, { status: 'cancelled' });
-  await writeAudit(uid, {
-    action: 'cancel',
-    collection: COLLECTION,
-    docId: incomeId,
-    after: { status: 'cancelled' },
-  });
+export async function cancelIncome(uid, incomeId, io = {}) {
+  await updateAudited(uid, COLLECTION, incomeId, { status: 'cancelled' }, io, 'cancel');
   return { ok: true };
 }
 

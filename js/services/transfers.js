@@ -4,13 +4,11 @@
  */
 import { COLLECTIONS } from '../utils/constants.js';
 import {
-  create,
   list,
   getById,
-  update,
-  remove,
-  writeAudit,
-  newBatch,
+  createAudited,
+  updateAudited,
+  removeAudited,
 } from './firestore.js';
 import {
   validateEntity,
@@ -38,17 +36,11 @@ export async function getTransfer(uid, transferId) {
  * Cria uma nova transferência.
  * Retorna { ok, id, errors }.
  */
-export async function createTransfer(uid, rawData) {
+export async function createTransfer(uid, rawData, io = {}) {
   const { ok, data, errors } = buildEntity('transfers', rawData);
   if (!ok) return { ok: false, errors };
 
-  const id = await create(uid, COLLECTION, data);
-  await writeAudit(uid, {
-    action: 'create',
-    collection: COLLECTION,
-    docId: id,
-    after: data,
-  });
+  const id = await createAudited(uid, COLLECTION, data, io);
   return { ok: true, id };
 }
 
@@ -56,32 +48,20 @@ export async function createTransfer(uid, rawData) {
  * Atualiza uma transferência existente.
  * Retorna { ok, errors }.
  */
-export async function updateTransfer(uid, transferId, rawData) {
+export async function updateTransfer(uid, transferId, rawData, io = {}) {
   const { ok, data, errors } = buildEntity('transfers', rawData);
   if (!ok) return { ok: false, errors };
 
-  await update(uid, COLLECTION, transferId, data);
-  await writeAudit(uid, {
-    action: 'update',
-    collection: COLLECTION,
-    docId: transferId,
-    after: data,
-  });
+  await updateAudited(uid, COLLECTION, transferId, data, io);
   return { ok: true };
 }
 
 /** Exclui uma transferência. */
-export async function deleteTransfer(uid, transferId) {
-  const transfer = await getById(uid, COLLECTION, transferId);
+export async function deleteTransfer(uid, transferId, io = {}) {
+  const transfer = await (io.getById ?? getById)(uid, COLLECTION, transferId);
   if (!transfer) return { ok: false, errors: { _form: 'Transferência não encontrada.' } };
 
-  await remove(uid, COLLECTION, transferId);
-  await writeAudit(uid, {
-    action: 'delete',
-    collection: COLLECTION,
-    docId: transferId,
-    before: transfer,
-  });
+  await removeAudited(uid, COLLECTION, transferId, transfer, io);
   return { ok: true };
 }
 
@@ -109,11 +89,7 @@ const STATUS_LABELS = { pending: 'pendente', confirmed: 'confirmada', cancelled:
  * validam transição de status).
  */
 async function transitionTransfer(uid, transferId, nextStatus, action, io = {}) {
-  const {
-    getById: getFn = getById,
-    update: updateFn = update,
-    writeAudit: auditFn = writeAudit,
-  } = io;
+  const { getById: getFn = getById } = io;
 
   const transfer = await getFn(uid, COLLECTION, transferId);
   if (!transfer) return { ok: false, errors: { _form: 'Transferência não encontrada.' } };
@@ -149,13 +125,7 @@ async function transitionTransfer(uid, transferId, nextStatus, action, io = {}) 
     }
   }
 
-  await updateFn(uid, COLLECTION, transferId, { status: nextStatus });
-  await auditFn(uid, {
-    action,
-    collection: COLLECTION,
-    docId: transferId,
-    after: { status: nextStatus },
-  });
+  await updateAudited(uid, COLLECTION, transferId, { status: nextStatus }, io, action);
   return { ok: true };
 }
 

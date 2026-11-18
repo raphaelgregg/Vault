@@ -74,7 +74,8 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 
 ### Fase 3 — Arquitetura, qualidade e refatoração
 
-**VF-3-01 — Reduzir duplicação nos services** (Médio): extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
+- [x] **VF-3-01 — Reduzir duplicação nos services** (Médio) — CONCLUÍDA 2026-11-18: extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
+- Resolução: `createAudited`/`updateAudited`/`removeAudited` em `js/services/firestore.js` (`io` injetável; `updateAudited` aceita `action` para `confirm`/`cancel`/`mark_*`). `accounts`, `categories`, `transfers`, `incomes`, `expenses` os usam; payload de auditoria idêntico ao anterior (Rules inalteradas). Compatível: `deps` de incomes/expenses e `io` de transfers/deleteAccount continuam valendo; novos parâmetros opcionais `io` em create/update/delete/mark/cancel e `countCategoryUsage(…, countFn)`. Diff líquido do código: −125 linhas (83+/208−, sem contar testes). Testes: `test:unit` 172 ok (27 novos em `tests/services/crud-audit.test.mjs`; os 143 anteriores sem alteração), `test:rules` 35 ok. Fora de escopo: `preferences.js` (singleton) e `markIncomeReceived/markExpensePaid/cancel*` sem leitura prévia de estado (ver débito de concorrência). **Desbloqueia VF-2-03.**
 **VF-3-02 — Dividir módulos extensos** (Baixo): separar render/estado/handlers em `receitas.js`, `despesas.js`, `transferencias.js`, `bancos.js` apenas se for tocar nesses arquivos por outra tarefa (evitar refatoração oportunista). Aceite: comportamento idêntico, testes verdes.
 **VF-3-03 — Tratamento de datas** (Médio): restringir conversão ISO→Timestamp a campos de data conhecidos (por schema) e tratar fuso. Arquivos: `js/services/firestore.js`, `js/core/model.js`. Aceite: testes para strings livres e para virada de dia.
 **VF-3-04 — Atualizar README e mensagens defasadas** (Baixo). Arquivos: `README.md`, `js/core/ui.js:43`, `js/components/topbar.js:21`. Aceite: README descreve fase atual, testes reais e Node suportado.
@@ -101,5 +102,6 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 
 ## Histórico
 
+- 2026-11-18 — VF-3-01 concluída (helpers CRUD+auditoria; desbloqueia VF-2-03).
 - 2026-11-18 — VF-4-01 e VF-1-01 concluídas (ver Registro de execução).
 - 2026-11-18 — Criado `CLAUDE.md` (commit 062e13b) e primeira versão deste plano. 16 tarefas: 3 (Fase 1), 4 (Fase 2), 4 (Fase 3), 5 (Fase 4) — ver IDs acima.

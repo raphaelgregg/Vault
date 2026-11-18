@@ -178,6 +178,31 @@ export async function writeAudit(uid, entry) {
   }
 }
 
+/**
+ * Helpers CRUD + auditoria usados pelos services (VF-3-01). `io` permite injetar
+ * create/update/remove/writeAudit nos testes. A auditoria nunca lança (ver writeAudit).
+ */
+export async function createAudited(uid, collectionName, data, io = {}) {
+  const { create: createFn = create, writeAudit: auditFn = writeAudit } = io;
+  const id = await createFn(uid, collectionName, data);
+  await auditFn(uid, { action: 'create', collection: collectionName, docId: id, after: data });
+  return id;
+}
+
+/** `action` padrão 'update'; `after` = campos gravados (patch). */
+export async function updateAudited(uid, collectionName, docId, data, io = {}, action = 'update') {
+  const { update: updateFn = update, writeAudit: auditFn = writeAudit } = io;
+  await updateFn(uid, collectionName, docId, data);
+  await auditFn(uid, { action, collection: collectionName, docId, after: data });
+}
+
+/** `before` = documento lido antes da exclusão. */
+export async function removeAudited(uid, collectionName, docId, before, io = {}) {
+  const { remove: removeFn = remove, writeAudit: auditFn = writeAudit } = io;
+  await removeFn(uid, collectionName, docId);
+  await auditFn(uid, { action: 'delete', collection: collectionName, docId, before });
+}
+
 /** Lote para operações que precisam ser atômicas na Fase 3. */
 export function newBatch() {
   return writeBatch(db);
