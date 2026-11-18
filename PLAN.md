@@ -80,7 +80,8 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - [ ] **VF-2-03d — Cartões/faturas**.
 - [ ] **VF-2-03e — Orçamentos**.
 - [ ] **VF-2-03f — Dashboard** (agrega módulos anteriores) e **VF-2-03g — Relatórios** (por último).
-- [ ] **VF-2-03h — Follow-ups de assinaturas**: avançar `nextChargeDate` ao registrar cobrança; `deleteCategory` contar `subscriptions`.
+- [x] **VF-2-03h — Follow-ups de assinaturas** (feature) — CONCLUÍDA 2026-11-18.
+- Resolução: (1) puro `advanceChargeDate` em `js/core/model.js` (semanal +7 dias; mensal/anual mantêm o dia com clamp ao fim do mês — 31/01→28/02, 29/02→28/02; UTC meio-dia; `null` p/ entrada inválida) e `registerSubscriptionCharge` em `js/services/subscriptions.js` (só assinatura ativa; grava só `nextChargeDate` via `updateAudited`, auditoria `charge`, `io` injetável). (2) `deleteCategory` JÁ contava `subscriptions` (`CATEGORY_LINK_COLLECTIONS`, `categories.js:30`, fail-closed); a decisão foi manter a contagem de TODAS as assinaturas, não só ativas, porque as Rules exigem `ref` à categoria também em pausadas/canceladas — o item do plano estava defasado; agora coberto por teste. `firestore.rules` NÃO alterado; 1 teste de Rules novo (patch de `nextChargeDate`). Testes: `test:unit` 261 ok (11 novos em `tests/services/subscription-charge.test.mjs`), `test:rules` 54 ok. Não verificado: UI. Limitações: sem botão de cobrança na UI de assinaturas; não gera despesa; o clamp não preserva o dia original (31/01→28/02→28/03); leitura+escrita não atômica.
 - [x] **VF-2-04 — Rota limpa `/categorias`** (Baixo): adicionar rewrite em `vercel.json`. Aceite: `/categorias` abre a página no preview. — CONCLUÍDA 2026-11-18
 - Resolução: rewrite `/categorias` → `/pages/categorias.html` adicionado em `vercel.json` (mesmo padrão das demais). Validado só o JSON/arquivo de destino; **abrir no deploy preview** (aceite).
 
@@ -123,3 +124,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-18 — Criado `CLAUDE.md` (commit 062e13b) e primeira versão deste plano. 16 tarefas: 3 (Fase 1), 4 (Fase 2), 4 (Fase 3), 5 (Fase 4) — ver IDs acima.
 - 2026-11-18 — VF-2-03b2 concluída (parcelas e recebimentos: modelo, service atômico, testes); UI de parcelas/recebimentos ainda pendente.
 - 2026-11-18 — VF-2-03c concluída (metas: modelo, service atômico, testes); UI de metas pendente.
+- 2026-11-18 — VF-2-03h concluída (avanço de nextChargeDate; deleteCategory já bloqueava assinaturas).

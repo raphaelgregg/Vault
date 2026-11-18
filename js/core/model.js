@@ -519,6 +519,26 @@ export function summarizeSubscriptions(items = []) {
   return { activeCount, monthlyCents: Math.round(annualCents / 12), annualCents };
 }
 
+/**
+ * Próxima data de cobrança a partir de "YYYY-MM-DD" (puro, UTC, meio-dia).
+ * weekly +7 dias; monthly/yearly mantêm o dia e fazem clamp ao último dia do mês
+ * destino (31/01 → 28/02; 29/02 → 28/02). O clamp não "lembra" o dia original
+ * (31/01 → 28/02 → 28/03). Retorna null para data/periodicidade inválidas.
+ */
+export function advanceChargeDate(isoDate, periodicity) {
+  const base = parseIsoDate(isoDate);
+  if (!base || !CHARGES_PER_YEAR[periodicity]) return null;
+  if (periodicity === 'weekly') {
+    return new Date(base.getTime() + 7 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  }
+  const months = periodicity === 'monthly' ? 1 : 12;
+  const y = base.getUTCFullYear();
+  const m = base.getUTCMonth() + months;
+  const lastDay = new Date(Date.UTC(y, m + 1, 0, 12)).getUTCDate();
+  const day = Math.min(base.getUTCDate(), lastDay);
+  return new Date(Date.UTC(y, m, day, 12)).toISOString().slice(0, 10);
+}
+
 // ---------------------------------------------------------------------------
 // Devedores (VF-2-03b) — cálculos puros
 // ---------------------------------------------------------------------------

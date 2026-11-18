@@ -16,6 +16,7 @@ import {
   SCHEMAS,
   SUBSCRIPTION_PERIODICITIES,
   SUBSCRIPTION_STATUSES,
+  advanceChargeDate,
   summarizeSubscriptions,
   formatCents,
   parseMoneyToCents,
@@ -102,6 +103,25 @@ export async function setSubscriptionStatus(uid, subscriptionId, status, io = {}
 export const pauseSubscription = (uid, id, io) => setSubscriptionStatus(uid, id, 'paused', io);
 export const resumeSubscription = (uid, id, io) => setSubscriptionStatus(uid, id, 'active', io);
 export const cancelSubscription = (uid, id, io) => setSubscriptionStatus(uid, id, 'cancelled', io);
+
+/**
+ * Registra a cobrança de uma assinatura ATIVA avançando `nextChargeDate` um período
+ * (auditoria `charge`). Não gera despesa (fora do escopo). Retorna { ok, nextChargeDate, errors }.
+ * Leitura+escrita não atômica: duas cobranças simultâneas avançariam uma só vez.
+ */
+export async function registerSubscriptionCharge(uid, subscriptionId, io = {}) {
+  const current = await (io.getById ?? getById)(uid, COLLECTION, subscriptionId);
+  if (!current) return { ok: false, errors: { _form: 'Assinatura não encontrada.' } };
+  if (current.status !== 'active') {
+    return { ok: false, errors: { _form: 'Só é possível registrar cobrança de assinaturas ativas.' } };
+  }
+  const nextChargeDate = advanceChargeDate(current.nextChargeDate, current.periodicity);
+  if (!nextChargeDate) {
+    return { ok: false, errors: { _form: 'Data ou periodicidade da assinatura inválida.' } };
+  }
+  await updateAudited(uid, COLLECTION, subscriptionId, { nextChargeDate }, io, 'charge');
+  return { ok: true, nextChargeDate };
+}
 
 export function getPeriodicityOptions() {
   return SUBSCRIPTION_PERIODICITIES.map((p) => ({ value: p.value, label: p.label }));

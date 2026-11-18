@@ -466,6 +466,13 @@ describe('Assinaturas (VF-2-03a)', () => {
     await assertSucceeds(deleteDoc(subDoc(db)));
   });
 
+  it('permite avançar nextChargeDate (patch de registerSubscriptionCharge) e nega data string', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(subDoc(db), sub()));
+    await assertSucceeds(updateDoc(subDoc(db), { nextChargeDate: new Date('2027-01-05T12:00:00.000Z'), updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(subDoc(db), { nextChargeDate: '2027-02-05', updatedAt: serverTimestamp() }));
+  });
+
   it('nega valor não positivo/fracionário, periodicidade e status inválidos, campo extra', async () => {
     const db = asUser(ALICE);
     await assertFails(setDoc(subDoc(db), sub({ amountCents: 0 })));
