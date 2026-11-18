@@ -70,6 +70,17 @@ export const DEBT_STATUSES = Object.freeze([
   { value: 'cancelled', label: 'Cancelada' },
 ]);
 
+export const GOAL_STATUSES = Object.freeze([
+  { value: 'active', label: 'Ativa' },
+  { value: 'completed', label: 'Concluída' },
+  { value: 'cancelled', label: 'Cancelada' },
+]);
+
+export const GOAL_TRANSACTION_TYPES = Object.freeze([
+  { value: 'deposit', label: 'Aporte' },
+  { value: 'withdraw', label: 'Resgate' },
+]);
+
 export const DOC_STATUS = Object.freeze({
   active: 'active',
   inactive: 'inactive',

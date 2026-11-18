@@ -622,3 +622,80 @@ describe('Parcelas e recebimentos de devedores (VF-2-03b2)', () => {
     await assertFails(getDoc(payDoc(asAnonymous())));
   });
 });
+
+describe('Metas e movimentações (VF-2-03c)', () => {
+  const goalDoc = (db, id = 'g1') => doc(db, 'users', ALICE, 'goals', id);
+  const txDoc = (db, id = 't1') => doc(db, 'users', ALICE, 'goalTransactions', id);
+  const accountDoc = (db) => doc(db, 'users', ALICE, 'accounts', 'acc1');
+  const noon = (d) => new Date(`${d}T12:00:00.000Z`);
+  // Payloads equivalentes aos gravados por js/services/goals.js (datas = meio-dia UTC).
+  const goal = (o = {}) => ({
+    name: 'Viagem', targetCents: 100000, deadline: noon('2027-01-10'), accountId: 'acc1', status: 'active',
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...o,
+  });
+  const tx = (o = {}) => ({
+    goalId: 'g1', type: 'deposit', amountCents: 30000, date: noon('2026-11-18'), accountId: 'acc1',
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...o,
+  });
+  async function seed() {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(accountDoc(db), account));
+    await assertSucceeds(setDoc(goalDoc(db), goal()));
+    return db;
+  }
+
+  it('metas: cria (com e sem opcionais), edita, cancela e exclui', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(goalDoc(db, 'g2'), { name: 'Reserva', targetCents: 5000, status: 'active', createdAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(goalDoc(db), { targetCents: 200000, updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(goalDoc(db), { status: 'cancelled', updatedAt: serverTimestamp() }));
+    await assertSucceeds(deleteDoc(goalDoc(db, 'g2')));
+  });
+
+  it('metas: nega alvo <= 0, status inválido, prazo string, conta inexistente e campo extra', async () => {
+    const db = await seed();
+    await assertFails(setDoc(goalDoc(db, 'g3'), goal({ targetCents: 0 })));
+    await assertFails(setDoc(goalDoc(db, 'g3'), goal({ status: 'paid' })));
+    await assertFails(setDoc(goalDoc(db, 'g3'), goal({ deadline: '2027-01-10' })));
+    await assertFails(setDoc(goalDoc(db, 'g3'), goal({ accountId: 'zzz' })));
+    await assertFails(setDoc(goalDoc(db, 'g3'), goal({ extra: 1 })));
+  });
+
+  it('lote atômico do aporte que conclui a meta: movimentação + status', async () => {
+    const db = await seed();
+    const batch = writeBatch(db);
+    batch.set(txDoc(db), tx({ amountCents: 100000, notes: 'bônus' }));
+    batch.update(goalDoc(db), { status: 'completed', updatedAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+    const resgate = writeBatch(db);
+    resgate.set(txDoc(db, 't2'), tx({ type: 'withdraw', amountCents: 1000 }));
+    resgate.update(goalDoc(db), { status: 'active', updatedAt: serverTimestamp() });
+    await assertSucceeds(resgate.commit());
+  });
+
+  it('lote inteiro falha se uma operação é inválida (nada gravado)', async () => {
+    const db = await seed();
+    const batch = writeBatch(db);
+    batch.set(txDoc(db), tx());
+    batch.update(goalDoc(db), { status: 'paid', updatedAt: serverTimestamp() });
+    await assertFails(batch.commit());
+    if ((await getDoc(txDoc(db))).exists()) throw new Error('movimentação gravada apesar do lote inválido');
+  });
+
+  it('movimentações: valida schema, referências e isolamento', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(txDoc(db), tx()));
+    await assertFails(setDoc(txDoc(db, 't2'), tx({ type: 'transfer' })));
+    await assertFails(setDoc(txDoc(db, 't2'), tx({ amountCents: 0 })));
+    await assertFails(setDoc(txDoc(db, 't2'), tx({ amountCents: 10.5 })));
+    await assertFails(setDoc(txDoc(db, 't2'), tx({ date: '2026-11-18' })));
+    await assertFails(setDoc(txDoc(db, 't2'), tx({ goalId: 'zzz' })));
+    await assertFails(setDoc(txDoc(db, 't2'), tx({ accountId: 'zzz' })));
+    await assertFails(setDoc(txDoc(db, 't2'), tx({ notes: 'x'.repeat(301) })));
+    await assertFails(setDoc(txDoc(db, 't2'), tx({ extra: 1 })));
+    await assertFails(getDoc(txDoc(asUser(BOB))));
+    await assertFails(setDoc(doc(asUser(BOB), 'users', ALICE, 'goalTransactions', 't9'), tx()));
+    await assertFails(getDoc(txDoc(asAnonymous())));
+  });
+});
+

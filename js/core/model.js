@@ -17,11 +17,13 @@ import {
   SUBSCRIPTION_STATUSES,
   DEBTOR_STATUSES,
   DEBT_STATUSES,
+  GOAL_STATUSES,
+  GOAL_TRANSACTION_TYPES,
 } from '../utils/constants.js';
 import { parseIsoDate } from '../utils/dates.js';
 
 // Re-exporta as enumerações para os serviços que as consomem via modelo.
-export { ACCOUNT_TYPES, RECURRENCES, SUBSCRIPTION_PERIODICITIES, SUBSCRIPTION_STATUSES, DEBTOR_STATUSES, DEBT_STATUSES };
+export { ACCOUNT_TYPES, RECURRENCES, SUBSCRIPTION_PERIODICITIES, SUBSCRIPTION_STATUSES, DEBTOR_STATUSES, DEBT_STATUSES, GOAL_STATUSES, GOAL_TRANSACTION_TYPES };
 
 // ---------------------------------------------------------------------------
 // Dinheiro
@@ -194,6 +196,30 @@ export const SCHEMAS = Object.freeze({
       status: { kind: 'enum', required: true, values: DEBT_STATUSES.map((s) => s.value) },
     },
   },
+  // Metas (VF-2-03c) — espelha firestore.rules `goals`. Valor guardado é derivado.
+  goals: {
+    dateFields: ['deadline'],
+    fields: {
+      name: text(80),
+      description: optionalText(300),
+      targetCents: money(),
+      deadline: optionalDate(),
+      accountId: refField(false),
+      status: { kind: 'enum', required: true, values: GOAL_STATUSES.map((s) => s.value) },
+    },
+  },
+  // Movimentações de metas — espelha firestore.rules `goalTransactions`.
+  goalTransactions: {
+    dateFields: ['date'],
+    fields: {
+      goalId: refField(),
+      type: { kind: 'enum', required: true, values: GOAL_TRANSACTION_TYPES.map((t) => t.value) },
+      amountCents: money(),
+      date: date(),
+      accountId: refField(),
+      notes: optionalText(300),
+    },
+  },
   // Recebimentos — espelha firestore.rules `debtPayments`.
   debtPayments: {
     dateFields: ['date'],
@@ -217,6 +243,8 @@ export const REF_FIELDS = Object.freeze({
   transfers: ['fromAccountId', 'toAccountId'],
   subscriptions: ['accountId', 'categoryId'],
   debtors: [],
+  goals: ['accountId'],
+  goalTransactions: ['goalId', 'accountId'],
   debts: ['debtorId'],
   debtPayments: ['debtId', 'debtorId', 'accountId'],
 });
@@ -417,10 +445,11 @@ export function filterMovements(items, filters = {}, { dateField } = {}) {
  *         + receitas recebidas (status received)
  *         - despesas pagas (status paid)
  *         + transferências confirmadas recebidas - confirmadas enviadas
-         + recebimentos de devedores (debtPayments).
+         + recebimentos de devedores (debtPayments)
+         - aportes em metas + resgates (goalTransactions).
  * Transferências pendentes/canceladas não movem dinheiro.
  */
-export function accountBalances(accounts, { incomes = [], expenses = [], transfers = [], debtPayments = [] } = {}) {
+export function accountBalances(accounts, { incomes = [], expenses = [], transfers = [], debtPayments = [], goalTransactions = [] } = {}) {
   const balances = new Map();
   for (const account of accounts) {
     balances.set(account.id, Number(account.initialBalanceCents) || 0);
@@ -437,6 +466,8 @@ export function accountBalances(accounts, { incomes = [], expenses = [], transfe
   }
   // Recebimentos de devedores entram na conta de destino (existir já = dinheiro recebido).
   for (const payment of debtPayments) bump(payment.accountId, payment.amountCents);
+  // Aporte em meta tira dinheiro da conta; resgate devolve.
+  for (const t of goalTransactions) bump(t.accountId, t.type === 'deposit' ? -t.amountCents : t.amountCents);
   for (const transfer of transfers) {
     if (transfer.status !== 'confirmed') continue;
     bump(transfer.fromAccountId, -transfer.amountCents);
@@ -534,4 +565,43 @@ export function applyPaymentToDebtor(debtor, amountCents) {
   if (amountCents > pending) return { ok: false, error: 'O valor excede o saldo pendente do devedor.' };
   const receivedCents = (Number(debtor.receivedCents) || 0) + amountCents;
   return { ok: true, receivedCents, status: receivedCents >= debtor.lentCents ? 'paid' : 'open' };
+}
+
+// ---------------------------------------------------------------------------
+// Metas (VF-2-03c) — puros
+// ---------------------------------------------------------------------------
+
+/** Valor guardado da meta (aportes − resgates), derivado; nunca gravado. */
+export function goalSavedCents(transactions = []) {
+  return transactions.reduce((total, t) => {
+    const amount = Number(t?.amountCents) || 0;
+    return total + (t?.type === 'deposit' ? amount : t?.type === 'withdraw' ? -amount : 0);
+  }, 0);
+}
+
+/** Progresso 0..100 (inteiro, truncado) do guardado sobre a meta. */
+export function goalProgressPercent(savedCents, targetCents) {
+  if (!Number.isInteger(targetCents) || targetCents <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.floor((savedCents * 100) / targetCents)));
+}
+
+/**
+ * Aplica aporte/resgate. Retorna { ok, savedCents, status, error }.
+ * Aporte só em meta ativa; resgate em ativa ou concluída e nunca acima do guardado.
+ * Atingir a meta conclui; resgatar de meta concluída abaixo da meta reativa.
+ */
+export function applyGoalTransaction(goal, savedCents, type, amountCents) {
+  if (!Number.isInteger(amountCents) || amountCents <= 0) return { ok: false, error: 'O valor deve ser maior que zero.' };
+  if (type === 'deposit') {
+    if (goal?.status !== 'active') return { ok: false, error: 'Só é possível aportar em metas ativas.' };
+    const next = savedCents + amountCents;
+    return { ok: true, savedCents: next, status: next >= goal.targetCents ? 'completed' : 'active' };
+  }
+  if (type === 'withdraw') {
+    if (!['active', 'completed'].includes(goal?.status)) return { ok: false, error: 'Só é possível resgatar de metas ativas ou concluídas.' };
+    if (amountCents > savedCents) return { ok: false, error: 'O resgate excede o valor guardado na meta.' };
+    const next = savedCents - amountCents;
+    return { ok: true, savedCents: next, status: next >= goal.targetCents ? 'completed' : 'active' };
+  }
+  return { ok: false, error: 'Tipo de movimentação inválido.' };
 }
