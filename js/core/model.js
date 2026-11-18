@@ -10,11 +10,16 @@
  * Datas: strings ISO "YYYY-MM-DD" (a conversão para Timestamp do Firestore é
  * feita na camada de serviço, porque este módulo é puro e testável em Node).
  */
-import { ACCOUNT_TYPES, RECURRENCES } from '../utils/constants.js';
+import {
+  ACCOUNT_TYPES,
+  RECURRENCES,
+  SUBSCRIPTION_PERIODICITIES,
+  SUBSCRIPTION_STATUSES,
+} from '../utils/constants.js';
 import { parseIsoDate } from '../utils/dates.js';
 
 // Re-exporta as enumerações para os serviços que as consomem via modelo.
-export { ACCOUNT_TYPES, RECURRENCES };
+export { ACCOUNT_TYPES, RECURRENCES, SUBSCRIPTION_PERIODICITIES, SUBSCRIPTION_STATUSES };
 
 // ---------------------------------------------------------------------------
 // Dinheiro
@@ -137,6 +142,20 @@ export const SCHEMAS = Object.freeze({
       status: { kind: 'enum', required: true, values: ['pending', 'confirmed', 'cancelled'] },
     },
   },
+  subscriptions: {
+    dateFields: ['nextChargeDate'],
+    fields: {
+      name: text(80),
+      amountCents: money(),
+      periodicity: { kind: 'enum', required: true, values: SUBSCRIPTION_PERIODICITIES.map((p) => p.value) },
+      nextChargeDate: date(),
+      accountId: refField(),
+      // Assinaturas são cobradas como despesa: categoria de despesa ou "ambos".
+      categoryId: refField(true, ['expense', 'both']),
+      status: { kind: 'enum', required: true, values: SUBSCRIPTION_STATUSES.map((s) => s.value) },
+      notes: optionalText(500),
+    },
+  },
 });
 
 /** Campos de referência por schema (IDs de docs da própria árvore). */
@@ -146,6 +165,7 @@ export const REF_FIELDS = Object.freeze({
   incomes: ['categoryId', 'accountId'],
   expenses: ['categoryId', 'accountId'],
   transfers: ['fromAccountId', 'toAccountId'],
+  subscriptions: ['accountId', 'categoryId'],
 });
 
 // ---------------------------------------------------------------------------
@@ -359,4 +379,40 @@ export function sumAmounts(items, status) {
   return items
     .filter((item) => (status ? item.status === status : true))
     .reduce((total, item) => total + (Number(item.amountCents) || 0), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Assinaturas (VF-2-03a) — cálculos puros
+// ---------------------------------------------------------------------------
+
+/** Cobranças por ano de cada periodicidade (semana = 52, mês = 12). */
+const CHARGES_PER_YEAR = Object.freeze({ weekly: 52, monthly: 12, yearly: 1 });
+
+/** Custo anual em centavos inteiros (valor × cobranças por ano). */
+export function subscriptionAnnualCents(amountCents, periodicity) {
+  const perYear = CHARGES_PER_YEAR[periodicity];
+  const amount = Number(amountCents);
+  if (!perYear || !Number.isInteger(amount)) return 0;
+  return amount * perYear;
+}
+
+/** Equivalente mensal em centavos inteiros (anual ÷ 12, arredondado). */
+export function subscriptionMonthlyCents(amountCents, periodicity) {
+  return Math.round(subscriptionAnnualCents(amountCents, periodicity) / 12);
+}
+
+/**
+ * Totais das assinaturas ATIVAS: pausadas e canceladas não entram.
+ * Retorna { activeCount, monthlyCents, annualCents }. A projeção anual soma os
+ * valores anuais exatos (não monthlyCents × 12), evitando acumular arredondamento.
+ */
+export function summarizeSubscriptions(items = []) {
+  let activeCount = 0;
+  let annualCents = 0;
+  for (const item of items) {
+    if (item?.status !== 'active') continue;
+    activeCount += 1;
+    annualCents += subscriptionAnnualCents(item.amountCents, item.periodicity);
+  }
+  return { activeCount, monthlyCents: Math.round(annualCents / 12), annualCents };
 }

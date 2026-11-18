@@ -45,6 +45,18 @@ export const RECURRENCES = Object.freeze([
   { value: 'yearly', label: 'Anual' },
 ]);
 
+export const SUBSCRIPTION_PERIODICITIES = Object.freeze([
+  { value: 'monthly', label: 'Mensal' },
+  { value: 'weekly', label: 'Semanal' },
+  { value: 'yearly', label: 'Anual' },
+]);
+
+export const SUBSCRIPTION_STATUSES = Object.freeze([
+  { value: 'active', label: 'Ativa' },
+  { value: 'paused', label: 'Pausada' },
+  { value: 'cancelled', label: 'Cancelada' },
+]);
+
 export const DOC_STATUS = Object.freeze({
   active: 'active',
   inactive: 'inactive',

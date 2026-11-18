@@ -8,7 +8,7 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 
 - Propósito: controle financeiro pessoal (contas, receitas, despesas, transferências, categorias) por usuário.
 - Stack: HTML/CSS/JS ES Modules puro, Firebase Auth + Firestore (SDK 10.12.2 via CDN/importmap), Vercel estático, npm só para dev.
-- Maturidade: fases 2–4 (etapa 2) entregues; 7 módulos ainda são casca (dashboard, assinaturas, devedores, metas, cartões, relatórios, configurações).
+- Maturidade: fases 2–4 (etapa 2) entregues; 6 módulos ainda são casca (dashboard, devedores, metas, cartões, relatórios, orçamentos); assinaturas entregue (VF-2-03a).
 - Testes: 44 de modelo passam (executado); testes de serviço e Rules **não executados** (sem `node_modules`; emulador exige instalação).
 - Sem lint, sem CI, sem build.
 
@@ -69,6 +69,14 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - [x] **VF-2-02 — Persistir perfil/settings/tema** (Médio): implementar `profile/main` e `settings/main` (Rules já existem). Arquivos: `js/modules/configuracoes.js`, `js/components/theme.js`, `js/services/firestore.js`. Dependências: VF-1-01. Aceite: tema e perfil sobrevivem a reload e a novo dispositivo. — CONCLUÍDA 2026-11-18
 - Resolução: novo `js/services/preferences.js` (`getProfile/getSettings/saveProfile/saveSettings`, validação espelhando as Rules, `io` injetável, auditoria `create`/`update` com entidade `profile`/`settings`; na criação grava `createdAt` e defaults exigidos pelas Rules — `theme: 'system'`, `currency BRL`, `locale pt-BR`; no update não reenvia `createdAt`; e-mail do perfil vem do Auth e não é editável). `js/components/theme.js`: preferência `light|dark|system` (`resolveTheme`, `applyThemePreference`), cache em localStorage só contra flash e `setThemePersister`; `js/app.js` aplica o tema salvo na conta após a sessão (novo dispositivo) e o botão da barra persiste em `settings/main`. `js/modules/configuracoes.js`: formulário real de nome + tema. `firestore.rules` NÃO alterado; 7 testes de Rules novos documentam o contrato. Testes: `test:unit` 143 ok, `test:rules` 35 ok. Fora de escopo: `hideValues`/`firstWeekday` têm suporte no service mas não na UI. Pendente: validar reload/novo dispositivo em navegador com emulador.
 **VF-2-03 — Módulos pendentes** (feature): assinaturas, devedores, metas, cartões, dashboard, relatórios, orçamentos conforme roadmap do README (fases 3–5). Cada módulo vira tarefa própria (`VF-2-03a…`) quando priorizado. Dependências: VF-1-01, VF-3-01.
+- [x] **VF-2-03a — Assinaturas** (feature) — CONCLUÍDA 2026-11-18. Primeiro da fila: schema já fechado em `firestore.rules:238` e a página de assinaturas é a menos acoplada (sem saldo/fatura).
+- Resolução: schema `subscriptions` em `js/core/model.js` (+ `REF_FIELDS`; enums `SUBSCRIPTION_PERIODICITIES/STATUSES` em `js/utils/constants.js`); cálculos puros `subscriptionAnnualCents/MonthlyCents/summarizeSubscriptions` (só ativas; semanal ×52, anual ÷12, centavos inteiros, projeção anual soma exata). Novo `js/services/subscriptions.js`: `list/get/create/update/delete` via `createAudited/updateAudited/removeAudited` (`io`/`deps` injetáveis; categoria lida do Firestore e restrita a `expense|both`), `pause/resume/cancel` com leitura prévia e transição validada (ativa⇄pausada, cancelada terminal, fail-closed, auditoria `pause|resume|cancel`). Campo de data `nextChargeDate` (convenção `*Date`, meio-dia UTC). UI: `js/modules/assinaturas.js` (cards mensal/anual, tabela, modal criar/editar, pausar/retomar/cancelar/excluir). `firestore.rules` NÃO alterado; 4 testes de Rules novos documentam o contrato (payload real do service). `deleteAccount` já bloqueia conta com assinaturas (VF-1-02). Testes: `test:unit` 205 ok (17 novos em `tests/services/subscriptions.test.mjs`), `test:rules` 39 ok. Não verificado: UI em navegador com emulador; sem testes de UI. Limitações: `nextChargeDate` não avança sozinha após a cobrança (sem geração de despesa) e `deleteCategory` não conta assinaturas (ver VF-2-03b+).
+- [ ] **VF-2-03b — Devedores/dívidas** (próximo): schema `debtors` (`firestore.rules:~265`, `loanDate`) + subcoleção `debtPayments` (confere `receivedCents <= lentCents`). Dependências: VF-2-03a (padrão).
+- [ ] **VF-2-03c — Metas** (`goals`/`goalTransactions`; saldo de meta derivado).
+- [ ] **VF-2-03d — Cartões/faturas**.
+- [ ] **VF-2-03e — Orçamentos**.
+- [ ] **VF-2-03f — Dashboard** (agrega módulos anteriores) e **VF-2-03g — Relatórios** (por último).
+- [ ] **VF-2-03h — Follow-ups de assinaturas**: avançar `nextChargeDate` ao registrar cobrança; `deleteCategory` contar `subscriptions`.
 - [x] **VF-2-04 — Rota limpa `/categorias`** (Baixo): adicionar rewrite em `vercel.json`. Aceite: `/categorias` abre a página no preview. — CONCLUÍDA 2026-11-18
 - Resolução: rewrite `/categorias` → `/pages/categorias.html` adicionado em `vercel.json` (mesmo padrão das demais). Validado só o JSON/arquivo de destino; **abrir no deploy preview** (aceite).
 
@@ -103,6 +111,7 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 
 ## Histórico
 
+- 2026-11-18 — VF-2-03a concluída (Assinaturas: modelo, service, UI, testes); VF-2-03b…h listadas.
 - 2026-11-18 — VF-3-03 concluída (datas: só campos de data, meio-dia UTC).
 - 2026-11-18 — VF-3-01 concluída (helpers CRUD+auditoria; desbloqueia VF-2-03).
 - 2026-11-18 — VF-4-01 e VF-1-01 concluídas (ver Registro de execução).

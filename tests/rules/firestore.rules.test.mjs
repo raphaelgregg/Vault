@@ -442,3 +442,54 @@ describe('Perfil e configurações (VF-2-02)', () => {
     await assertFails(getDoc(doc(asUser(BOB), 'users', ALICE, 'profile', 'main')));
   });
 });
+
+describe('Assinaturas (VF-2-03a)', () => {
+  const subDoc = (db, id = 'sub1') => doc(db, 'users', ALICE, 'subscriptions', id);
+  // Payload equivalente ao gravado por js/services/subscriptions.js (datas = meio-dia UTC).
+  const sub = (overrides = {}) => ({
+    name: 'Netflix',
+    amountCents: 3990,
+    periodicity: 'monthly',
+    nextChargeDate: new Date('2026-12-05T12:00:00.000Z'),
+    accountId: 'acc-main',
+    categoryId: 'cat-casa',
+    status: 'active',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides,
+  });
+
+  it('permite criar, pausar (patch de status) e excluir', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(subDoc(db), sub({ notes: 'plano padrão' })));
+    await assertSucceeds(updateDoc(subDoc(db), { status: 'paused', updatedAt: serverTimestamp() }));
+    await assertSucceeds(deleteDoc(subDoc(db)));
+  });
+
+  it('nega valor não positivo/fracionário, periodicidade e status inválidos, campo extra', async () => {
+    const db = asUser(ALICE);
+    await assertFails(setDoc(subDoc(db), sub({ amountCents: 0 })));
+    await assertFails(setDoc(subDoc(db), sub({ amountCents: 39.9 })));
+    await assertFails(setDoc(subDoc(db), sub({ periodicity: 'daily' })));
+    await assertFails(setDoc(subDoc(db), sub({ status: 'none' })));
+    await assertFails(setDoc(subDoc(db), sub({ extra: 1 })));
+  });
+
+  it('nega data como string, conta/categoria inexistentes e conta de outro usuário', async () => {
+    const db = asUser(ALICE);
+    await assertFails(setDoc(subDoc(db), sub({ nextChargeDate: '2026-12-05' })));
+    await assertFails(setDoc(subDoc(db), sub({ accountId: 'nao-existe' })));
+    await assertFails(setDoc(subDoc(db), sub({ categoryId: 'nao-existe' })));
+    await assertFails(setDoc(subDoc(db), sub({ accountId: 'acc-bob' })));
+  });
+
+  it('nega alterar createdAt e acesso de outro usuário/anônimo', async () => {
+    await assertSucceeds(setDoc(subDoc(asUser(ALICE)), sub()));
+    await assertFails(
+      updateDoc(subDoc(asUser(ALICE)), { createdAt: new Date('2000-01-01'), updatedAt: serverTimestamp() })
+    );
+    await assertFails(getDoc(subDoc(asUser(BOB))));
+    await assertFails(setDoc(subDoc(asUser(BOB), 'sub2'), sub()));
+    await assertFails(getDoc(subDoc(asAnonymous())));
+  });
+});
