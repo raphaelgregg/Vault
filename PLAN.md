@@ -56,10 +56,11 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Aceite: testes cobrem conta em uso (bloqueia), sem uso (exclui) e falha de verificação (bloqueia).
 - Resolução: `deleteAccount` (`js/services/accounts.js`) conta vínculos via `count()` em incomes, expenses, transfers (origem e destino), subscriptions, debtPayments e goalTransactions (todas com `ref(...'accounts')` nas Rules); bloqueia com mensagem por coleção, fail-closed em erro de contagem, sem remover nem auditar. Texto de `bancos.js` corrigido (sugere arquivar). `firestore.rules` NÃO alterado: Rules não consultam/contam coleções no `delete`; teste de Rules documenta o contrato. Limitação: checagem client-side com janela de concorrência (mesma de `deleteCategory`). Sem deploy de Rules necessário. Testes: `test:unit` 109 ok, `test:rules` 28 ok.
 
-- [ ] **VF-1-03 — Cabeçalhos de segurança (CSP/SRI)** (Médio)
+- [x] **VF-1-03 — Cabeçalhos de segurança (CSP/SRI)** (Médio) — concluída
 - Solução: CSP em `vercel.json` compatível com importmap injetado por JS e com gstatic/unpkg; SRI ou versão fixa/vendorizada para lucide.
 - Arquivos: `vercel.json`, `pages/*.html`, `js/importmap.js`.
 - Dependências: validar em deploy preview. Aceite: páginas carregam sem violação CSP no console; `X-Frame-Options`/CSP presentes.
+- Resolução: CSP em `vercel.json` (default-src 'self'; script-src 'self' + hash sha256 do import map injetado + gstatic/unpkg/apis.google.com, sem unsafe-inline/eval; connect-src só Firebase; object-src 'none'; frame-ancestors 'none'; form-action/base-uri 'self'). SRI sha384 + `crossorigin="anonymous"` no lucide (12 páginas em `pages/*.html`) e `integrity` no import map (`js/importmap.js`) para os 3 módulos Firebase 10.12.2 (hashes calculados do pacote npm `firebase@10.12.2`). Teste de sincronia: `tests/services/security-headers.test.mjs` (6 ok). Validação local (Chromium + servidor com o CSP, CDNs servidos via cópia npm): sem violações de CSP, módulos Firebase e lucide carregam com SRI. Ressalvas: `style-src 'unsafe-inline'` mantido (atributos `style=` em `index.html`); o gstatic estava inacessível no sandbox, então os hashes do Firebase assumem arquivo idêntico ao pacote npm — **confirmar em deploy preview** (aceite original). Ao trocar `FIREBASE_VERSION`, recalcular hashes e o hash CSP (o teste falha se divergirem).
 
 ### Fase 2 — Funcionalidades incompletas e correções
 
