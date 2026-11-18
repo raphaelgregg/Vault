@@ -68,6 +68,7 @@ export const ACCOUNT_LINK_QUERIES = Object.freeze([
   { collection: COLLECTIONS.transfers, field: 'toAccountId', label: 'transferências (destino)' },
   { collection: COLLECTIONS.subscriptions, field: 'accountId', label: 'assinaturas' },
   { collection: COLLECTIONS.debtPayments, field: 'accountId', label: 'pagamentos de dívidas' },
+  { collection: COLLECTIONS.creditCards, field: 'accountId', label: 'cartões' },
   { collection: COLLECTIONS.goals, field: 'accountId', label: 'metas' },
   { collection: COLLECTIONS.goalTransactions, field: 'accountId', label: 'movimentações de metas' },
 ]);

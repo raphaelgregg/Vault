@@ -28,6 +28,7 @@ export const CATEGORY_LINK_COLLECTIONS = Object.freeze([
   { collection: COLLECTIONS.expenses, label: 'despesas' },
   { collection: COLLECTIONS.budgets, label: 'orçamentos' },
   { collection: COLLECTIONS.subscriptions, label: 'assinaturas' },
+  { collection: COLLECTIONS.cardPurchases, label: 'compras no cartão' },
 ]);
 
 /**

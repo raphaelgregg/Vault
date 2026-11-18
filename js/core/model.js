@@ -19,11 +19,13 @@ import {
   DEBT_STATUSES,
   GOAL_STATUSES,
   GOAL_TRANSACTION_TYPES,
+  CARD_STATUSES,
+  INVOICE_STATUSES,
 } from '../utils/constants.js';
 import { parseIsoDate } from '../utils/dates.js';
 
 // Re-exporta as enumerações para os serviços que as consomem via modelo.
-export { ACCOUNT_TYPES, RECURRENCES, SUBSCRIPTION_PERIODICITIES, SUBSCRIPTION_STATUSES, DEBTOR_STATUSES, DEBT_STATUSES, GOAL_STATUSES, GOAL_TRANSACTION_TYPES };
+export { ACCOUNT_TYPES, RECURRENCES, SUBSCRIPTION_PERIODICITIES, SUBSCRIPTION_STATUSES, DEBTOR_STATUSES, DEBT_STATUSES, GOAL_STATUSES, GOAL_TRANSACTION_TYPES, CARD_STATUSES, INVOICE_STATUSES };
 
 // ---------------------------------------------------------------------------
 // Dinheiro
@@ -92,6 +94,8 @@ const money = () => ({ kind: 'cents', required: true, positive: true });
 const cents0 = () => ({ kind: 'cents', required: true, positive: false });
 const centsNonNegative = () => ({ kind: 'cents', required: true, positive: false, nonNegative: true });
 const intRange = (min, max) => ({ kind: 'int', required: true, min, max });
+const monthKey = () => ({ kind: 'month', required: true });
+const optionalCentsNonNegative = () => ({ kind: 'cents', required: false, positive: false, nonNegative: true });
 const optionalText = (max) => ({ kind: 'text', max, required: false });
 
 export const SCHEMAS = Object.freeze({
@@ -220,6 +224,48 @@ export const SCHEMAS = Object.freeze({
       notes: optionalText(300),
     },
   },
+  // Cartões (VF-2-03d) — espelha firestore.rules `creditCards`.
+  creditCards: {
+    dateFields: [],
+    fields: {
+      name: text(80),
+      brand: text(40),
+      limitCents: money(),
+      closingDay: intRange(1, 31),
+      dueDay: intRange(1, 31),
+      accountId: refField(false),
+      color: optionalText(32),
+      status: { kind: 'enum', required: true, values: CARD_STATUSES.map((s) => s.value) },
+    },
+  },
+  // Compras no cartão (cada parcela é um documento) — espelha `cardPurchases`.
+  cardPurchases: {
+    dateFields: ['purchaseDate'],
+    fields: {
+      cardId: refField(),
+      description: text(120),
+      amountCents: money(),
+      purchaseDate: date(),
+      installmentsTotal: intRange(1, 48),
+      installmentNumber: intRange(1, 48),
+      categoryId: refField(false, ['expense', 'both']),
+      invoiceId: refField(false),
+      notes: optionalText(300),
+    },
+  },
+  // Faturas — espelha `invoices`. totalCents/paidCents só são gravados no fechamento/pagamento.
+  invoices: {
+    dateFields: ['closingDate', 'dueDate'],
+    fields: {
+      cardId: refField(),
+      referenceMonth: monthKey(),
+      closingDate: optionalDate(),
+      dueDate: date(),
+      totalCents: optionalCentsNonNegative(),
+      paidCents: optionalCentsNonNegative(),
+      status: { kind: 'enum', required: true, values: INVOICE_STATUSES.map((s) => s.value) },
+    },
+  },
   // Recebimentos — espelha firestore.rules `debtPayments`.
   debtPayments: {
     dateFields: ['date'],
@@ -243,6 +289,9 @@ export const REF_FIELDS = Object.freeze({
   transfers: ['fromAccountId', 'toAccountId'],
   subscriptions: ['accountId', 'categoryId'],
   debtors: [],
+  creditCards: ['accountId'],
+  cardPurchases: ['cardId', 'categoryId', 'invoiceId'],
+  invoices: ['cardId'],
   goals: ['accountId'],
   goalTransactions: ['goalId', 'accountId'],
   debts: ['debtorId'],
@@ -349,6 +398,10 @@ export function validateEntity(kind, data, context = {}) {
       if (!Number.isInteger(n) || n < rule.min || n > rule.max) {
         errors[field] = `Informe um número inteiro entre ${rule.min} e ${rule.max}.`;
       }
+    } else if (rule.kind === 'month') {
+      if (typeof value !== 'string' || !/^[0-9]{4}-(0[1-9]|1[0-2])$/.test(value)) {
+        errors[field] = 'Mês inválido (use AAAA-MM).';
+      }
     } else if (rule.kind === 'date') {
       if (!isValidIsoDate(value)) errors[field] = 'Data inválida (use AAAA-MM-DD).';
     } else if (rule.kind === 'ref') {
@@ -367,6 +420,12 @@ export function validateEntity(kind, data, context = {}) {
   if (kind === 'transfers' && data.fromAccountId && data.toAccountId
     && data.fromAccountId === data.toAccountId) {
     errors.toAccountId = 'A conta de destino deve ser diferente da conta de origem.';
+  }
+
+  if (kind === 'cardPurchases' && !errors.installmentNumber && !errors.installmentsTotal
+    && data.installmentNumber !== undefined && data.installmentsTotal !== undefined
+    && Number(data.installmentNumber) > Number(data.installmentsTotal)) {
+    errors.installmentNumber = 'A parcela não pode ser maior que o total de parcelas.';
   }
 
   if (kind === 'debtors' && !errors.lentCents && !errors.receivedCents
@@ -624,4 +683,71 @@ export function applyGoalTransaction(goal, savedCents, type, amountCents) {
     return { ok: true, savedCents: next, status: next >= goal.targetCents ? 'completed' : 'active' };
   }
   return { ok: false, error: 'Tipo de movimentação inválido.' };
+}
+
+// ---------------------------------------------------------------------------
+// Cartões e faturas (VF-2-03d) — puros
+// ---------------------------------------------------------------------------
+
+const MONTH_KEY = /^(\d{4})-(0[1-9]|1[0-2])$/;
+
+/** "YYYY-MM" + n meses → "YYYY-MM" (n pode ser negativo); null se inválido. */
+export function addMonths(month, n) {
+  const m = MONTH_KEY.exec(month ?? '');
+  if (!m || !Number.isInteger(n)) return null;
+  const index = Number(m[1]) * 12 + (Number(m[2]) - 1) + n;
+  return `${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, '0')}`;
+}
+
+/** Dia `day` do mês "YYYY-MM" com clamp ao último dia (31 em fevereiro → 28/29). */
+export function clampDayInMonth(month, day) {
+  const m = MONTH_KEY.exec(month ?? '');
+  if (!m || !Number.isInteger(day) || day < 1) return null;
+  const last = new Date(Date.UTC(Number(m[1]), Number(m[2]), 0, 12)).getUTCDate();
+  return `${month}-${String(Math.min(day, last)).padStart(2, '0')}`;
+}
+
+/**
+ * Fechamento e vencimento da fatura do mês de referência. Vence no mesmo mês se
+ * dueDay > closingDay; senão, no mês seguinte.
+ */
+export function invoiceDatesFor(card, referenceMonth) {
+  const closingDate = clampDayInMonth(referenceMonth, Number(card?.closingDay));
+  const dueMonth = Number(card?.dueDay) > Number(card?.closingDay) ? referenceMonth : addMonths(referenceMonth, 1);
+  const dueDate = clampDayInMonth(dueMonth, Number(card?.dueDay));
+  return closingDate && dueDate ? { closingDate, dueDate } : null;
+}
+
+/** Mês da fatura que recebe uma compra: após o fechamento do mês, vai para o seguinte. */
+export function invoiceMonthForPurchase(card, purchaseDate) {
+  if (!isValidIsoDate(purchaseDate)) return null;
+  const month = purchaseDate.slice(0, 7);
+  const closing = clampDayInMonth(month, Number(card?.closingDay));
+  if (!closing) return null;
+  return purchaseDate > closing ? addMonths(month, 1) : month;
+}
+
+/** Divide o total em n parcelas inteiras; o resto vai para a primeira. null se total < n. */
+export function splitInstallments(totalCents, n) {
+  if (!Number.isInteger(totalCents) || !Number.isInteger(n) || n < 1 || totalCents < n) return null;
+  const base = Math.floor(totalCents / n);
+  const parts = Array(n).fill(base);
+  parts[0] += totalCents - base * n;
+  return parts;
+}
+
+/**
+ * Limite usado = compras de faturas ainda não pagas/canceladas (ou sem fatura).
+ * Retorna { usedCents, availableCents } (disponível nunca negativo). Derivado, não gravado.
+ */
+export function cardLimitUsage(card, purchases = [], invoices = []) {
+  const settled = new Set(invoices.filter((i) => i.status === 'paid' || i.status === 'cancelled').map((i) => i.id));
+  const usedCents = purchases.reduce(
+    (total, p) => (p.invoiceId && settled.has(p.invoiceId) ? total : total + (Number(p.amountCents) || 0)), 0);
+  return { usedCents, availableCents: Math.max(0, (Number(card?.limitCents) || 0) - usedCents) };
+}
+
+/** Total derivado de uma fatura aberta (soma das parcelas vinculadas). */
+export function invoiceTotalCents(purchases = []) {
+  return purchases.reduce((total, p) => total + (Number(p?.amountCents) || 0), 0);
 }

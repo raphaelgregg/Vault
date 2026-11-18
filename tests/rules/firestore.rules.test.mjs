@@ -706,3 +706,97 @@ describe('Metas e movimentações (VF-2-03c)', () => {
   });
 });
 
+describe('Cartões, compras e faturas (VF-2-03d)', () => {
+  const cardDoc = (db, id = 'c1') => doc(db, 'users', ALICE, 'creditCards', id);
+  const invDoc = (db, id = 'c1_2026-11') => doc(db, 'users', ALICE, 'invoices', id);
+  const buyDoc = (db, id = 'p1') => doc(db, 'users', ALICE, 'cardPurchases', id);
+  const accountDoc = (db) => doc(db, 'users', ALICE, 'accounts', 'acc1');
+  const noon = (d) => new Date(`${d}T12:00:00.000Z`);
+  const stamps = () => ({ createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+  // Payloads equivalentes aos gravados por js/services/creditCards.js (datas = meio-dia UTC).
+  const card = (o = {}) => ({ name: 'Nubank', brand: 'Mastercard', limitCents: 500000, closingDay: 10, dueDay: 17, accountId: 'acc1', status: 'active', ...stamps(), ...o });
+  const invoice = (o = {}) => ({ cardId: 'c1', referenceMonth: '2026-11', closingDate: noon('2026-11-10'), dueDate: noon('2026-11-17'), status: 'open', ...stamps(), ...o });
+  const purchase = (o = {}) => ({ cardId: 'c1', description: 'Notebook', amountCents: 33334, purchaseDate: noon('2026-11-05'), installmentsTotal: 3, installmentNumber: 1, invoiceId: 'c1_2026-11', ...stamps(), ...o });
+  async function seed() {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(accountDoc(db), account));
+    await assertSucceeds(setDoc(cardDoc(db), card()));
+    return db;
+  }
+
+  it('cartão: cria (com e sem opcionais), bloqueia (patch) e exclui', async () => {
+    const db = await seed();
+    const { accountId, ...semConta } = card();
+    await assertSucceeds(setDoc(cardDoc(db, 'c2'), { ...semConta, color: '#fff' }));
+    await assertSucceeds(updateDoc(cardDoc(db), { status: 'blocked', updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(cardDoc(db), { limitCents: 800000, updatedAt: serverTimestamp() }));
+    await assertSucceeds(deleteDoc(cardDoc(db, 'c2')));
+  });
+
+  it('cartão: nega limite <= 0, dias fora de 1..31/fracionários, status inválido, conta inexistente, extra', async () => {
+    const db = await seed();
+    for (const bad of [{ limitCents: 0 }, { closingDay: 0 }, { closingDay: 32 }, { dueDay: 10.5 }, { status: 'paid' }, { accountId: 'zzz' }, { extra: 1 }]) {
+      await assertFails(setDoc(cardDoc(db, 'c9'), card(bad)));
+    }
+  });
+
+  it('compra parcelada em 2 lotes: 1) faturas novas, 2) parcelas referenciando-as', async () => {
+    const db = await seed();
+    const faturas = writeBatch(db);
+    faturas.set(invDoc(db), invoice());
+    faturas.set(invDoc(db, 'c1_2026-12'), invoice({ referenceMonth: '2026-12', closingDate: noon('2026-12-10'), dueDate: noon('2026-12-17') }));
+    await assertSucceeds(faturas.commit());
+    const parcelas = writeBatch(db);
+    parcelas.set(buyDoc(db, 'p1'), purchase());
+    parcelas.set(buyDoc(db, 'p2'), purchase({ installmentNumber: 2, amountCents: 33333, invoiceId: 'c1_2026-12', notes: 'x' }));
+    await assertSucceeds(parcelas.commit());
+  });
+
+  it('contrato: parcela NÃO pode referenciar fatura criada no mesmo lote (exists() vê o estado anterior)', async () => {
+    const db = await seed();
+    const batch = writeBatch(db);
+    batch.set(invDoc(db), invoice());
+    batch.set(buyDoc(db), purchase());
+    await assertFails(batch.commit());
+  });
+
+  it('lote de parcelas falha inteiro se uma parcela é inválida (nada gravado)', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(invDoc(db), invoice()));
+    const batch = writeBatch(db);
+    batch.set(buyDoc(db, 'p1'), purchase());
+    batch.set(buyDoc(db, 'p2'), purchase({ installmentNumber: 4 })); // > installmentsTotal
+    await assertFails(batch.commit());
+    if ((await getDoc(buyDoc(db, 'p1'))).exists()) throw new Error('parcela gravada apesar do lote inválido');
+  });
+
+  it('compras: valida parcelas, valor, data, referências e campo extra', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(invDoc(db), invoice()));
+    await assertSucceeds(setDoc(buyDoc(db), purchase()));
+    for (const bad of [{ amountCents: 0 }, { amountCents: 10.5 }, { installmentsTotal: 49 }, { installmentsTotal: 0 }, { installmentNumber: 0 },
+      { installmentNumber: 4 }, { purchaseDate: '2026-11-05' }, { cardId: 'zzz' }, { invoiceId: 'zzz' }, { categoryId: 'zzz' }, { notes: 'x'.repeat(301) }, { extra: 1 }]) {
+      await assertFails(setDoc(buyDoc(db, 'p9'), purchase(bad)));
+    }
+  });
+
+  it('faturas: cria sem total, fecha (patch com total) e paga; valida mês, status, datas e valores', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(invDoc(db), invoice()));
+    await assertSucceeds(updateDoc(invDoc(db), { status: 'closed', totalCents: 33334, updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(invDoc(db), { status: 'paid', paidCents: 33334, updatedAt: serverTimestamp() }));
+    for (const bad of [{ referenceMonth: '2026-13' }, { referenceMonth: '2026-1' }, { status: 'late' }, { dueDate: '2026-11-17' }, { closingDate: '2026-11-10' },
+      { totalCents: -1 }, { paidCents: 1.5 }, { cardId: 'zzz' }, { extra: 1 }]) {
+      await assertFails(setDoc(invDoc(db, 'c1_9'), invoice(bad)));
+    }
+  });
+
+  it('isolamento: outro usuário e anônimo não leem nem escrevem', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(invDoc(db), invoice()));
+    await assertFails(getDoc(invDoc(asUser(BOB))));
+    await assertFails(getDoc(cardDoc(asAnonymous())));
+    await assertFails(setDoc(doc(asUser(BOB), 'users', ALICE, 'cardPurchases', 'px'), purchase()));
+  });
+});
+

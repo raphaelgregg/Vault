@@ -49,9 +49,9 @@ describe('categories service — validação', () => {
 });
 
 describe('categories service — exclusão segura (checagem de vínculos)', () => {
-  it('CATEGORY_LINK_COLLECTIONS cobre as quatro coleções exigidas', () => {
+  it('CATEGORY_LINK_COLLECTIONS cobre as coleções exigidas', () => {
     const names = CATEGORY_LINK_COLLECTIONS.map((item) => item.collection);
-    assert.deepEqual(names, ['incomes', 'expenses', 'budgets', 'subscriptions']);
+    assert.deepEqual(names, ['incomes', 'expenses', 'budgets', 'subscriptions', 'cardPurchases']);
     // Cada coleção precisa de um rótulo legível para a mensagem ao usuário.
     for (const item of CATEGORY_LINK_COLLECTIONS) {
       assert.equal(typeof item.label, 'string');

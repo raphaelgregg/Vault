@@ -81,6 +81,19 @@ export const GOAL_TRANSACTION_TYPES = Object.freeze([
   { value: 'withdraw', label: 'Resgate' },
 ]);
 
+export const CARD_STATUSES = Object.freeze([
+  { value: 'active', label: 'Ativo' },
+  { value: 'blocked', label: 'Bloqueado' },
+  { value: 'cancelled', label: 'Cancelado' },
+]);
+
+export const INVOICE_STATUSES = Object.freeze([
+  { value: 'open', label: 'Aberta' },
+  { value: 'closed', label: 'Fechada' },
+  { value: 'paid', label: 'Paga' },
+  { value: 'cancelled', label: 'Cancelada' },
+]);
+
 export const DOC_STATUS = Object.freeze({
   active: 'active',
   inactive: 'inactive',
