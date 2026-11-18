@@ -117,8 +117,9 @@ Em review/auditoria completa, avalie (somente o aplicável à stack): arquitetur
 - Execute `git status` antes de alterar e de commitar; preserve alterações preexistentes.
 - Revise diffs; não inclua arquivos fora do escopo.
 - Sem comandos destrutivos sem autorização.
-- Sem push automático. Sem alterar branches ou histórico sem autorização.
-- Branch de trabalho desta sessão: `claude` (ambiente remoto também prevê `bigboss`; confirme com o usuário antes de push).
+- Branch de trabalho: usar **sempre e apenas** `claude`. Não criar, trocar nem enviar para outras branches (inclusive `bigboss`).
+- Push para `origin claude` e abertura de Pull Requests (a partir de `claude`) estão autorizados sem pedir confirmação a cada vez.
+- Sem reescrever histórico (rebase/force push/reset) sem autorização.
 
 ## 9. Continuidade e contexto
 
