@@ -281,6 +281,48 @@ describe('auditLog imutável', () => {
     );
   });
 
+  it('permite entrada com before e after (payload do writeAudit)', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(
+      addDoc(collection(db, 'users', ALICE, 'auditLog'), {
+        action: 'update',
+        entity: 'accounts',
+        entityId: 'acc-main',
+        before: { name: 'Antes', initialBalanceCents: 100 },
+        after: { name: 'Depois', initialBalanceCents: 200 },
+        actorUid: ALICE,
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('nega before/after que não sejam mapa', async () => {
+    const db = asUser(ALICE);
+    await assertFails(
+      addDoc(collection(db, 'users', ALICE, 'auditLog'), {
+        action: 'update',
+        entity: 'accounts',
+        entityId: 'acc-main',
+        after: 'texto',
+        actorUid: ALICE,
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('nega campos fora do schema (formato antigo collection/docId)', async () => {
+    const db = asUser(ALICE);
+    await assertFails(
+      addDoc(collection(db, 'users', ALICE, 'auditLog'), {
+        action: 'create',
+        collection: 'accounts',
+        docId: 'acc-main',
+        actorUid: ALICE,
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
   it('nega update', async () => {
     const db = asUser(ALICE);
     await assertFails(

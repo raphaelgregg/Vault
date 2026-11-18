@@ -438,11 +438,13 @@ service cloud.firestore {
     match /users/{userId}/auditLog/{entryId} {
       allow read: if isOwner(userId);
       allow create: if isOwner(userId)
-        && keysOk(['action', 'entity', 'entityId', 'actorUid', 'createdAt'])
+        && keysOk(['action', 'entity', 'entityId', 'before', 'after', 'actorUid', 'createdAt'])
         && requiredOk(['action', 'entity', 'entityId', 'actorUid', 'createdAt'])
         && text('action', 60)
         && text('entity', 60)
         && text('entityId', 128)
+        && (!('before' in data()) || data().before is map)
+        && (!('after' in data()) || data().after is map)
         && data().actorUid == request.auth.uid
         && data().createdAt == request.time;
       allow update, delete: if false;

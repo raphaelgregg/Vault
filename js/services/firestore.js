@@ -135,19 +135,46 @@ export async function saveSingleton(uid, collectionName, data, docId = 'main') {
   );
 }
 
+/** Remove `undefined` (o Firestore rejeita) de forma rasa e recursiva em objetos simples. */
+function stripUndefined(value) {
+  if (Array.isArray(value)) return value.map(stripUndefined);
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => [k, stripUndefined(v)])
+    );
+  }
+  return value;
+}
+
 /**
  * Registro de auditoria imutável (create-only nas Rules).
- * Nunca lança para o fluxo principal: falha de log não deve impedir a operação.
+ * Entrada: { action, collection, docId, before?, after? } — gravada como
+ * { action, entity, entityId, before?, after?, actorUid, createdAt }, o schema
+ * fechado de auditLog em firestore.rules.
+ *
+ * Não lança: a operação principal já foi gravada e não deve parecer falha ao usuário.
+ * A falha NÃO é silenciosa: é registrada com console.error e devolvida em
+ * { ok: false, error } para quem quiser tratá-la.
  */
 export async function writeAudit(uid, entry) {
+  const { action, collection: entity, docId: entityId, before, after } = entry ?? {};
+  const payload = stripUndefined({
+    action,
+    entity,
+    entityId,
+    before,
+    after,
+    actorUid: uid,
+    createdAt: serverTimestamp(),
+  });
   try {
-    await addDoc(userCollection(uid, 'auditLog'), {
-      ...entry,
-      actorUid: uid,
-      createdAt: serverTimestamp(),
-    });
+    await addDoc(userCollection(uid, 'auditLog'), payload);
+    return { ok: true };
   } catch (error) {
-    console.warn('[audit] falha ao registrar auditoria', error);
+    console.error('[audit] falha ao registrar auditoria — a operação principal foi concluída', error);
+    return { ok: false, error };
   }
 }
 

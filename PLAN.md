@@ -23,9 +23,9 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 
 ## Débitos técnicos
 
-- [Impacto: Crítico] js/services/firestore.js:144 + firestore.rules:438-449 — `writeAudit` envia `collection/docId/before/after`; as Rules só aceitam `action/entity/entityId/actorUid/createdAt` (schema fechado) → toda gravação de auditoria é negada e o `catch` apenas faz `console.warn`. Auditoria inexistente em produção [C] → alinhar payload ao schema (ou ajustar Rules com teste), e tornar a falha visível.
+- ~~[Impacto: Crítico] js/services/firestore.js:144 + firestore.rules:438-449 — `writeAudit` envia `collection/docId/before/after`; as Rules só aceitam `action/entity/entityId/actorUid/createdAt` (schema fechado) → toda gravação de auditoria é negada e o `catch` apenas faz `console.warn`. Auditoria inexistente em produção [C] → alinhar payload ao schema (ou ajustar Rules com teste), e tornar a falha visível.~~ (resolvido em VF-1-01)
 - [Impacto: Alto] js/services/accounts.js:73-87 e js/modules/bancos.js:356 — `deleteAccount` não verifica vínculos; a UI afirma que "as Security Rules impedirão", mas as Rules (`firestore.rules:152`) permitem `delete` ao dono [C]. Excluir conta deixa receitas/despesas/transferências órfãs e distorce `accountBalances` (`js/core/model.js:339-357`, ignora ids desconhecidos) → aplicar o mesmo padrão fail-closed de `deleteCategory` (`js/services/categories.js:140-165`) e corrigir o texto.
-- [Impacto: Alto] package.json:9 — `node --test tests/rules` (diretório) falha em Node 22 ("Cannot find module") [C, reproduzido para o formato de diretório]; README declara Node 18+ → usar glob `tests/rules/*.mjs` e fixar `engines`.
+- ~~[Impacto: Alto] package.json:9 — `node --test tests/rules` (diretório) falha em Node 22 ("Cannot find module") [C, reproduzido para o formato de diretório]; README declara Node 18+ → usar glob `tests/rules/*.mjs` e fixar `engines`.~~ (resolvido em VF-4-01)
 - [Impacto: Médio] js/services/transfers.js:88-110 — `confirmTransfer`/`cancelTransfer` fazem `update` sem ler o estado atual: permite confirmar transferência cancelada e não revalida contas existentes (o `exists()` das Rules cobre a existência, não a transição) [C] → validar transição de status.
 - [Impacto: Médio] vercel.json:3-30 — sem `Content-Security-Policy`; scripts de `unpkg.com` (lucide, `pages/*.html:18`) e `gstatic.com` (SDK) sem SRI [C]; `innerHTML` só com literais próprios (`js/core/ui.js:10`) [sem XSS comprovado] → CSP restritiva + SRI/versão fixa; avaliar vendorizar lucide.
 - [Impacto: Médio] vercel.json:16-27 — não há rewrite para `/categorias` apesar de existir em `js/utils/nav.js` [R]: com `cleanUrls` os links relativos `categorias.html` funcionam, mas a rota limpa fica inconsistente com as demais [NV em deploy].
@@ -41,21 +41,21 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 
 ### Fase 1 — Segurança, integridade e falhas críticas
 
-**VF-1-01 — Auditoria nunca persiste** (Crítico)
+- [x] **VF-1-01 — Auditoria nunca persiste** (Crítico) — CONCLUÍDA 2026-11-18
 - Problema: payload de `writeAudit` viola schema fechado de `auditLog`; falha engolida.
 - Solução: padronizar `entry` como `{action, entity, entityId}` (e decidir se `before/after` entram na Rule com limite de tamanho); manter `try/catch` mas expor falha ao usuário/log; ajustar chamadas em 5 services.
 - Arquivos: `js/services/firestore.js`, `js/services/{accounts,categories,incomes,expenses,transfers}.js`, `firestore.rules`, `tests/rules/firestore.rules.test.mjs`, `tests/services/*`.
 - Dependências: nenhuma (decisão de produto sobre `before/after` antes de mexer nas Rules).
 - Aceite: teste de Rules cria entrada com o payload real do service e passa; testes de serviço verificam o shape; `npm run test:rules` verde; deploy das Rules documentado.
 
-**VF-1-02 — Exclusão de conta com vínculos** (Alto)
+- [ ] **VF-1-02 — Exclusão de conta com vínculos** (Alto)
 - Problema: ver Débitos; contas excluídas deixam referências órfãs.
 - Solução: contar vínculos em incomes/expenses/transfers (origem e destino) fail-closed como `deleteCategory`; corrigir texto de `bancos.js:356`; sugerir arquivar (`status: archived`).
 - Arquivos: `js/services/accounts.js`, `js/modules/bancos.js`, `tests/services/accounts.test.mjs`.
 - Dependências: nenhuma.
 - Aceite: testes cobrem conta em uso (bloqueia), sem uso (exclui) e falha de verificação (bloqueia).
 
-**VF-1-03 — Cabeçalhos de segurança (CSP/SRI)** (Médio)
+- [ ] **VF-1-03 — Cabeçalhos de segurança (CSP/SRI)** (Médio)
 - Solução: CSP em `vercel.json` compatível com importmap injetado por JS e com gstatic/unpkg; SRI ou versão fixa/vendorizada para lucide.
 - Arquivos: `vercel.json`, `pages/*.html`, `js/importmap.js`.
 - Dependências: validar em deploy preview. Aceite: páginas carregam sem violação CSP no console; `X-Frame-Options`/CSP presentes.
@@ -76,19 +76,25 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 
 ### Fase 4 — Testes, performance e otimização
 
-**VF-4-01 — Scripts de teste confiáveis** (Alto, pode ser antecipada): scripts `test:model`, `test:services` e `test:rules` com glob, `engines.node`, sem alterar dependências. Arquivos: `package.json`. Aceite: `npm test` roda os três em Node 18 e 22 (sem alterar lockfile).
+- [x] **VF-4-01 — Scripts de teste confiáveis** (Alto) — CONCLUÍDA 2026-11-18: scripts `test:model`, `test:services` e `test:rules` com glob, `engines.node`, sem alterar dependências. Arquivos: `package.json`. Aceite: `npm test` roda os três em Node 18 e 22 (sem alterar lockfile).
 **VF-4-02 — CI** (Médio): workflow rodando testes de modelo/serviço e Rules no emulador. Dependências: VF-4-01 e aprovação de nova ferramenta/arquivo. Aceite: pipeline verde no PR.
 **VF-4-03 — Paginação e limites de leitura** (Médio): `limit`/filtro por mês nas listagens; saldo incremental/cache revalidado. Arquivos: módulos e services listados. Aceite: leituras por carga de página medidas e dentro de orçamento definido.
 **VF-4-04 — Testes de UI (Playwright)** (Baixo): fluxos login → criar conta → receita → saldo. Dependências: aprovação de dependência.
 **VF-4-05 — Lint/formatação** (Baixo): avaliar ESLint/Prettier (requer aprovação).
 
+### Registro de execução
+
+- **VF-1-01** (opção A, `before`/`after` completos): `writeAudit` (`js/services/firestore.js`) agora grava `{action, entity, entityId, before?, after?, actorUid, createdAt}` mapeando `collection→entity` e `docId→entityId` (call sites dos 5 services inalterados), remove `undefined` e, em falha, registra `console.error` e devolve `{ok:false, error}` (não lança, para não sinalizar erro após a escrita principal ter sucesso). `firestore.rules` aceita `before`/`after` opcionais do tipo map. Validação: 3 novos testes de Rules (payload com before/after, não-map negado, formato antigo negado). Limite conhecido: sem teste unitário do `writeAudit` contra o SDK (a cobertura do payload está nas Rules). **As Rules precisam ser publicadas** (`firebase deploy --only firestore:rules`) para valer em produção — não executado.
+- **VF-4-01**: scripts `test`, `test:unit` (modelo + serviços, 98 testes) e `test:rules` com glob; `engines.node >=18`. Validação: `npm run test:unit` 98/98; `npm run test:rules` 27/27 no Node 22. Node 18 não testado.
+
 ## Itens não verificados
 
-- `npm run test:rules` e testes de `tests/services` (sem `node_modules`/emulador; instalação não autorizada nesta missão).
+- Node 18 (suíte só executada no Node 22); deploy das Rules em produção.
 - Comportamento real em Vercel (headers, rotas) e Firestore de produção (Rules publicadas podem divergir de `firestore.rules`).
 - Acessibilidade e responsividade (CSS/HTML não auditados em detalhe).
 - Módulos `receitas.js`, `despesas.js`, `transferencias.js`, `categorias.js` e `model.js` lidos apenas por busca/trechos.
 
 ## Histórico
 
+- 2026-11-18 — VF-4-01 e VF-1-01 concluídas (ver Registro de execução).
 - 2026-11-18 — Criado `CLAUDE.md` (commit 062e13b) e primeira versão deste plano. 16 tarefas: 3 (Fase 1), 4 (Fase 2), 4 (Fase 3), 5 (Fase 4) — ver IDs acima.
