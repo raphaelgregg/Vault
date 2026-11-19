@@ -57,7 +57,7 @@ try {
   await page.getByRole('button', { name: 'Parcelas e recebimentos de Maria' }).click();
   await page.waitForSelector('#statement-month');
   const modal = page.locator('.modal');
-  await modal.getByText('Geladeira').waitFor();
+  await modal.getByText('Geladeira').first().waitFor();
   const detail = await modal.innerText();
   assert.match(detail, /1\/3/);
   assert.match(detail, /Cartão E2E/);
@@ -91,7 +91,7 @@ try {
   // a fatura pode cair no mês seguinte (fechamento dia 28): escolhe o último mês listado
   const monthValues = await page.locator('#statement-month option').evaluateAll((opts) => opts.map((o) => o.value));
   await page.selectOption('#statement-month', monthValues.at(-1));
-  await page.locator('.modal').getByText('Fogão').waitFor();
+  await page.locator('.modal').getByText('Fogão').first().waitFor();
 
   log('VF-2-03m: dívida parcelada pela UI convive com a de cartão (lista única, total em aberto somado)');
   await page.goto(`${app.base}/pages/devedores.html`);
@@ -110,6 +110,34 @@ try {
   for (const re of [/Moto\s+1\/3/, /Moto\s+2\/3/, /Moto\s+3\/3/, /Geladeira/, /Parcelada/, /Cartão/]) assert.match(all, re);
   assert.match(all, /Total em aberto\s+R\$\s?1\.900,00/); // 1.000 + 300 (cartão) + 600 (dívida)
   assert.doesNotMatch(all, /duplicidade/i);
+
+  log('VF-2-03n: antecipar a parcela 3/3 e quitar o restante da dívida (cartão intacto)');
+  const accountId = await page.evaluate(async () => {
+    const { createAccount } = await import('/js/services/accounts.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const r = await createAccount(auth.currentUser.uid, { institution: 'Banco E2E', name: 'Corrente', type: 'checking', initialBalanceCents: '0,00', color: '#1f7a5c', status: 'active' });
+    return r.id;
+  });
+  const modalText = () => page.locator('.modal').innerText();
+  // o modal carrega as contas ao abrir: reabre para enxergar a conta recém-criada
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Parcelas e recebimentos de Maria' }).click();
+  await page.waitForSelector('#statement-month');
+  await page.getByRole('button', { name: 'Antecipar parcela 3 de Moto' }).click();
+  await page.selectOption('#accountId', accountId);
+  await page.locator('#debt-pay-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Parcela antecipada registrada/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForFunction(() => /Total em aberto\s+R\$\s?1\.700,00/.test(document.querySelector('.modal')?.innerText ?? '')); // 1.900 − 200
+  assert.match(await modalText(), /Moto\s+3\/3[^\n]*R\$\s?200,00[^\n]*R\$\s?200,00[^\n]*Paga/);
+  await page.getByRole('button', { name: 'Quitar dívida Moto' }).first().click();
+  await page.selectOption('#accountId', accountId);
+  await page.locator('#debt-settle-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Dívida quitada/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForFunction(() => /Total em aberto\s+R\$\s?1\.300,00/.test(document.querySelector('.modal')?.innerText ?? '')); // 1.000 + 300 de cartão
+  const after = await modalText();
+  assert.equal((after.match(/Moto\s+\d\/3[^\n]*Paga/g) ?? []).length, 3);
+  assert.match(after, /Geladeira[^\n]*Pendente/); // compras de cartão intactas
+  assert.equal(await page.getByRole('button', { name: /Quitar dívida Moto/ }).count(), 0);
 
   assert.deepEqual(app.problems, [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E devedores OK');

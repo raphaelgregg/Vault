@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { registerCardPurchase, deleteCardPurchase } from '../../js/services/creditCards.js';
-import { createDebtPlan } from '../../js/services/debtPayments.js';
+import { createDebtPlan, settleDebts, registerDebtPayment } from '../../js/services/debtPayments.js';
 import { deleteDebtor, getDebtorOverview, listOpenDebtors, loadDebtorStatements, getDebtorStatement, DEBTOR_LINK_QUERIES } from '../../js/services/debtors.js';
 import { debtorOverview, debtorMonthStatement, debtorObligations } from '../../js/core/model.js';
 import { describeError } from '../../js/utils/errors.js';
@@ -305,5 +305,82 @@ describe('dívidas do devedor (VF-2-03m)', () => {
     assert.ok(o.listedCents + o.unlistedCents === o.openCents);
     // restante listado acima do em aberto é limitado (sem negativo)
     assert.equal(debtorObligations({ debtor: debtor({ lentCents: 1000, receivedCents: 0 }), purchases: [{ id: 'p', amountCents: 5000 }] }).unlistedCents, 0);
+  });
+});
+
+describe('antecipar e quitar (VF-2-03n)', () => {
+  const dv = (o = {}) => ({ id: 'd1', name: 'João', status: 'open', lentCents: 100000, receivedCents: 0, ...o });
+  const pd = (id, n, principal, due, o = {}) => ({ id, debtorId: 'd1', description: 'Moto', principalCents: principal, installmentNumber: n, installmentsTotal: 3, debtGroupId: 'g1', dueDate: due, status: 'pending', ...o });
+  const make = ({ debtor = dv(), debts = [], payments = [], accounts = [{ id: 'a1', status: 'active' }] } = {}) => {
+    const atomic = [];
+    return {
+      atomic,
+      io: {
+        getById: async (u, c, id) => ({ debtors: [debtor], debts, accounts }[c] ?? []).find((x) => x.id === id) ?? null,
+        list: async (u, c) => (c === 'debtPayments' ? payments : debts),
+        commitAtomic: async (u, ops) => { atomic.push(ops); return ['x']; },
+      },
+    };
+  };
+  const rawS = (o = {}) => ({ date: '2026-11-19', accountId: 'a1', ...o });
+
+  it('antecipação: pagar parcela futura (parcial e total) sinaliza `anticipated` e atualiza parcela e devedor', async () => {
+    const future = pd('f1', 3, 30000, '2027-01-10');
+    const { io, atomic } = make({ debts: [future] });
+    const part = await registerDebtPayment(uid, 'f1', { amountCents: '100,00', date: '2026-11-19', accountId: 'a1' }, { ...io, list: async () => [] });
+    assert.deepEqual([part.ok, part.anticipated, part.debtPaid], [true, true, false]);
+    assert.equal(atomic.at(-1).find((o) => o.collection === 'debtors').data.receivedCents, 10000);
+    const full = await registerDebtPayment(uid, 'f1', { amountCents: '300,00', date: '2026-11-19', accountId: 'a1' }, { ...io, list: async () => [] });
+    assert.deepEqual([full.ok, full.anticipated, full.debtPaid], [true, true, true]);
+    assert.ok(atomic.at(-1).some((o) => o.collection === 'debts' && o.data.status === 'paid'));
+    const late = await registerDebtPayment(uid, 'f1', { amountCents: '300,00', date: '2027-01-10', accountId: 'a1' }, { ...io, list: async () => [] });
+    assert.equal(late.anticipated, false); // no vencimento não é antecipação
+  });
+
+  it('quitar dívida (grupo): um recebimento por parcela com o restante, parcelas pagas, devedor soma o total', async () => {
+    const debts = [pd('p1', 1, 33335, '2026-11-10'), pd('p2', 2, 33333, '2026-12-10'), pd('p3', 3, 33333, '2027-01-10'),
+      pd('q1', 1, 20000, '2026-11-10', { debtGroupId: 'g2' }), pd('c1', 1, 5000, '2026-11-10', { debtGroupId: 'g1', status: 'cancelled' })];
+    const payments = [{ debtId: 'p1', debtorId: 'd1', amountCents: 10000 }]; // p1 já recebeu 100,00
+    const { io, atomic } = make({ debts, payments });
+    const r = await settleDebts(uid, 'd1', { groupId: 'g1' }, rawS({ notes: 'quitação' }), io);
+    assert.equal(r.ok, true);
+    assert.equal(r.count, 3);
+    assert.equal(r.totalCents, 23335 + 33333 + 33333);
+    const ops = atomic[0];
+    assert.deepEqual(ops.filter((o) => o.collection === 'debtPayments').map((o) => [o.data.debtId, o.data.amountCents]),
+      [['p1', 23335], ['p2', 33333], ['p3', 33333]]);
+    assert.deepEqual(ops.filter((o) => o.collection === 'debts').map((o) => o.docId), ['p1', 'p2', 'p3']); // g2 e cancelada intactas
+    assert.ok(ops.filter((o) => o.collection === 'debts').every((o) => o.data.status === 'paid'));
+    assert.deepEqual(ops.at(-1).data, { receivedCents: 90001, status: 'open' }); // 100000 emprestado: cartão/restante mantém aberto
+    assert.equal(r.debtorPaid, false);
+  });
+
+  it('quitar todas as dívidas e quitar o devedor inteiro quando recebido == emprestado', async () => {
+    const debts = [pd('p1', 1, 60000, '2026-11-10', { debtGroupId: undefined, installmentsTotal: undefined }), pd('q1', 1, 40000, '2026-12-10', { debtGroupId: 'g2' })];
+    const { io, atomic } = make({ debts });
+    const r = await settleDebts(uid, 'd1', {}, rawS(), io);
+    assert.deepEqual([r.ok, r.count, r.totalCents, r.debtorPaid], [true, 2, 100000, true]);
+    assert.deepEqual(atomic[0].at(-1).data, { receivedCents: 100000, status: 'paid' });
+    const legacy = await settleDebts(uid, 'd1', { groupId: 'p1' }, rawS(), make({ debts }).io); // parcela legada: grupo = próprio id
+    assert.equal(legacy.count, 1);
+  });
+
+  it('não quita sem parcelas pendentes, com conta inválida/inativa, devedor fechado, acima do pendente ou > 120 parcelas; nada é gravado', async () => {
+    const one = [pd('p1', 1, 30000, '2026-11-10')];
+    const cases = [
+      [make({ debts: [pd('p1', 1, 1, '2026-11-10', { status: 'paid' })] }), rawS(), '_form'],
+      [make({ debts: one, accounts: [] }), rawS(), 'accountId'],
+      [make({ debts: one, accounts: [{ id: 'a1', status: 'archived' }] }), rawS(), 'accountId'],
+      [make({ debts: one }), rawS({ date: '2026-02-30' }), 'date'],
+      [make({ debts: one, debtor: dv({ status: 'cancelled' }) }), rawS(), '_form'],
+      [make({ debts: one, debtor: dv({ lentCents: 10000 }) }), rawS(), '_form'], // restante 300 > pendente 100
+      [make({ debts: Array.from({ length: 121 }, (_, i) => pd(`z${i}`, i + 1, 100, '2026-11-10')), debtor: dv({ lentCents: 99999999 }) }), rawS(), '_form'],
+    ];
+    for (const [{ io, atomic }, raw, field] of cases) {
+      const r = await settleDebts(uid, 'd1', {}, raw, io);
+      assert.equal(r.ok, false, field);
+      assert.ok(r.errors[field], field);
+      assert.equal(atomic.length, 0);
+    }
   });
 });

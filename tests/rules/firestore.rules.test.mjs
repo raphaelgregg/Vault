@@ -606,6 +606,18 @@ describe('Parcelas e recebimentos de devedores (VF-2-03b2)', () => {
     await assertSucceeds(batch.commit());
   });
 
+  it('quitar dívida (VF-2-03n): N recebimentos + N parcelas pagas + devedor atualizado no MESMO lote', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(debtDoc(db, 'q2'), debt({ installmentNumber: 2, installmentsTotal: 2, debtGroupId: 'g' })));
+    const batch = writeBatch(db);
+    batch.set(payDoc(db, 'pa'), payment({ debtId: 'd1', amountCents: 50000 }));
+    batch.set(payDoc(db, 'pb'), payment({ debtId: 'q2', amountCents: 50000 }));
+    batch.update(debtDoc(db, 'd1'), { status: 'paid', updatedAt: serverTimestamp() });
+    batch.update(debtDoc(db, 'q2'), { status: 'paid', updatedAt: serverTimestamp() });
+    batch.update(debtorDoc(db), { receivedCents: 50000, status: 'paid', updatedAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+  });
+
   it('dívida: nega installmentsTotal inválido (< parcela, 0, > 360, não inteiro), debtGroupId longo/não texto e campo extra', async () => {
     const db = await seed();
     for (const bad of [{ installmentNumber: 3, installmentsTotal: 2 }, { installmentsTotal: 0 }, { installmentsTotal: 361 }, { installmentsTotal: 2.5 },

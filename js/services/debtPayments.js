@@ -33,6 +33,7 @@ const DEBTS = COLLECTIONS.debts;
 const PAYMENTS = COLLECTIONS.debtPayments;
 const DEBTORS = COLLECTIONS.debtors;
 const MAX_INSTALLMENT = 360;
+const MAX_SETTLE_INSTALLMENTS = 120; // 4 escritas por parcela (recebimento+auditoria, parcela+auditoria) no lote de 500
 const MAX_PLAN_INSTALLMENTS = 120; // 2 escritas por parcela (+ devedor) no mesmo lote (limite de 500)
 
 export async function listDebts(uid, debtorId) {
@@ -112,6 +113,68 @@ export async function createDebtPlan(uid, rawData, io = {}) {
   return { ok: true, ids, groupId, installments: rawN, totalCents: total };
 }
 
+/**
+ * Quita (dá baixa no restante de) as parcelas pendentes de um devedor em UM lote atômico (VF-2-03n).
+ * `scope.groupId` limita a uma dívida (`debtGroupId`; parcela legada sem grupo usa o próprio id);
+ * sem `groupId`, quita todas as dívidas em aberto. Cada parcela recebe um recebimento com o restante
+ * (principal − já recebido), vira `paid`, e o devedor soma o total em `receivedCents`
+ * (`applyPaymentToDebtor`: nunca acima do pendente; `paid` só quando recebido == emprestado — compras de
+ * cartão e valor sem parcela mantêm o devedor em aberto). Parcelas pagas/canceladas e compras de cartão
+ * não são tocadas. `rawData`: { date, accountId, notes? }. Retorna { ok, count, totalCents, debtorPaid, errors }.
+ */
+export async function settleDebts(uid, debtorId, scope = {}, rawData = {}, io = {}) {
+  const fetch = io.getById ?? getById;
+  const fetchList = io.list ?? list;
+  const debtor = await fetch(uid, DEBTORS, debtorId);
+  if (!debtor) return { ok: false, errors: { _form: 'Devedor não encontrado.' } };
+  if (debtor.status !== 'open') return { ok: false, errors: { _form: 'Só é possível quitar dívidas de devedor em aberto.' } };
+
+  const [debts, payments] = await Promise.all([
+    fetchList(uid, DEBTS, { where: [['debtorId', '==', debtorId]] }),
+    fetchList(uid, PAYMENTS, { where: [['debtorId', '==', debtorId]] }),
+  ]);
+  const received = new Map();
+  for (const p of payments) received.set(p.debtId, (received.get(p.debtId) ?? 0) + (Number(p.amountCents) || 0));
+  const targets = debts
+    .filter((d) => ['pending', 'late'].includes(d.status) && (!scope.groupId || (d.debtGroupId ?? d.id) === scope.groupId))
+    .map((d) => ({ debt: d, remaining: (Number(d.principalCents) || 0) - (received.get(d.id) ?? 0) }))
+    .sort((a, b) => (a.debt.dueDate < b.debt.dueDate ? -1 : 1));
+  if (!targets.length) return { ok: false, errors: { _form: 'Não há parcelas pendentes para quitar.' } };
+  if (targets.length > MAX_SETTLE_INSTALLMENTS) {
+    return { ok: false, errors: { _form: `Quite em partes: máximo de ${MAX_SETTLE_INSTALLMENTS} parcelas por vez.` } };
+  }
+
+  const probe = buildEntity('debtPayments', { ...rawData, amountCents: '0,01', debtId: targets[0].debt.id, debtorId });
+  if (!probe.ok) return { ok: false, errors: probe.errors }; // valida data/conta/observações uma vez
+  const account = await fetch(uid, COLLECTIONS.accounts, rawData.accountId);
+  if (!account) return { ok: false, errors: { accountId: 'Conta não encontrada.' } };
+  if (account.status !== 'active') return { ok: false, errors: { accountId: 'A conta precisa estar ativa.' } };
+
+  const ops = [];
+  let totalCents = 0;
+  for (const { debt, remaining } of targets) {
+    if (remaining > 0) {
+      const built = buildEntity('debtPayments', { ...rawData, amountCents: centsToMoneyString(remaining), debtId: debt.id, debtorId });
+      if (!built.ok) return { ok: false, errors: built.errors };
+      ops.push({ type: 'create', collection: PAYMENTS, data: built.data });
+      totalCents += remaining;
+    }
+    ops.push({ type: 'update', collection: DEBTS, docId: debt.id, data: { status: 'paid' }, action: 'settle' });
+  }
+  if (totalCents > 0) {
+    const applied = applyPaymentToDebtor(debtor, totalCents);
+    if (!applied.ok) return { ok: false, errors: { _form: applied.error } };
+    ops.push({
+      type: 'update', collection: DEBTORS, docId: debtorId, action: 'receive',
+      data: { receivedCents: applied.receivedCents, status: applied.status },
+    });
+    await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
+    return { ok: true, count: targets.length, totalCents, debtorPaid: applied.status === 'paid' };
+  }
+  await (io.commitAtomic ?? commitAtomic)(uid, ops, io); // só marca como pagas parcelas já integralmente recebidas
+  return { ok: true, count: targets.length, totalCents, debtorPaid: false };
+}
+
 /** Cancela parcela pendente/atrasada sem recebimentos. `paid` só nasce de recebimentos. */
 export async function cancelDebt(uid, debtId, io = {}) {
   const debt = await (io.getById ?? getById)(uid, DEBTS, debtId);
@@ -175,7 +238,9 @@ export async function registerDebtPayment(uid, debtId, rawData, io = {}) {
   });
 
   const [id] = await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
-  return { ok: true, id, debtPaid, debtorPaid: applied.status === 'paid' };
+  // Antecipação (VF-2-03n): recebimento (total ou parcial) antes do vencimento da parcela.
+  const anticipated = typeof debt.dueDate === 'string' && typeof data.date === 'string' && data.date < debt.dueDate;
+  return { ok: true, id, debtPaid, debtorPaid: applied.status === 'paid', anticipated };
 }
 
 export function getDebtStatusOptions() {

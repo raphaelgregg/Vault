@@ -10,7 +10,7 @@ import {
   formatDate, formatMonth, formatCentsInput, selectOptions, todayIso,
 } from '../components/form-kit.js';
 import {
-  listDebts, listDebtPayments, createDebtPlan, cancelDebt, registerDebtPayment, formatCents,
+  listDebts, listDebtPayments, createDebtPlan, cancelDebt, registerDebtPayment, settleDebts, formatCents,
 } from '../services/debtPayments.js';
 import { debtorPendingCents, debtorObligations } from '../core/model.js';
 import { getDebtor, getDebtorStatement } from '../services/debtors.js';
@@ -27,7 +27,7 @@ export function displayDebtStatus(debt, today = todayIso()) {
 /**
  * @param {{ user: {uid:string}, debtor: object, onChange: () => Promise<void> }} ctx
  */
-export async function openDebtorInstallments({ user, debtor, onChange, month = todayIso().slice(0, 7) }) {
+export async function openDebtorInstallments({ user, debtor, onChange, month = 'all' }) {
   const [debts, payments, accounts, statement, cards] = await Promise.all([
     listDebts(user.uid, debtor.id),
     listDebtPayments(user.uid, { where: [['debtorId', '==', debtor.id]] }),
@@ -49,6 +49,31 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = t
   };
 
   const reopen = () => { closeModal(); openDebtorInstallments({ user, debtor, onChange, month }); };
+
+  // Quitar dívida (VF-2-03n): baixa do restante de todas as parcelas pendentes de uma dívida (ou de todas), em lote.
+  const openSettle = (groupId, label) => {
+    const pending = debts.filter((d) => ['pending', 'late'].includes(d.status) && (!groupId || (d.debtGroupId ?? d.id) === groupId));
+    const total = pending.reduce((t, d) => t + Math.max(0, d.principalCents - (receivedBy.get(d.id) ?? 0)), 0);
+    formModal({
+      title: `Quitar — ${label}`,
+      formId: 'debt-settle-form',
+      submitLabel: 'Quitar',
+      focusId: 'accountId',
+      fields: [
+        el('p', { class: 'card__hint', text: `${pending.length} parcela(s) pendente(s) serão quitadas, totalizando ${formatCents(total)}. As compras de cartão não são afetadas.` }),
+        field('Data *', 'date', el('input', { type: 'date', id: 'date', name: 'date', value: todayIso() })),
+        field('Conta que recebe *', 'accountId', el('select', { id: 'accountId', name: 'accountId' }, selectOptions(activeAccounts, '', { placeholder: 'Selecione uma conta' }))),
+        field('Observações', 'notes', el('textarea', { id: 'notes', name: 'notes', maxlength: 500, rows: 2 })),
+      ],
+      submit: (d) => settleDebts(user.uid, debtor.id, groupId ? { groupId } : {}, {
+        date: d.get('date'), accountId: d.get('accountId'), notes: d.get('notes').trim() || undefined,
+      }),
+      onDone: async (r) => {
+        toast(r.debtorPaid ? 'Dívida quitada — devedor quitado!' : `Dívida quitada (${r.count} parcela(s), ${formatCents(r.totalCents)}).`);
+        await refresh();
+      },
+    });
+  };
 
   // Nova dívida (VF-2-03m): à vista (1 parcela) ou parcelada; soma ao emprestado do devedor.
   const openCreate = () => formModal({
@@ -76,9 +101,9 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = t
     const remaining = debt.principalCents - (receivedBy.get(debt.id) ?? 0);
     const suggested = Math.min(remaining, debtorPendingCents(debtor));
     formModal({
-      title: `Receber — parcela ${debt.installmentNumber}`,
+      title: `${debt.dueDate > todayIso() ? 'Antecipar' : 'Receber'} — parcela ${debt.installmentNumber}`,
       formId: 'debt-pay-form',
-      submitLabel: 'Registrar recebimento',
+      submitLabel: debt.dueDate > todayIso() ? 'Registrar antecipação' : 'Registrar recebimento',
       focusId: 'amountCents',
       fields: [
         el('p', { class: 'card__hint', text: `Restante da parcela: ${formatCents(remaining)} · pendente do devedor: ${formatCents(debtorPendingCents(debtor))}.` }),
@@ -91,7 +116,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = t
         amountCents: d.get('amountCents'), date: d.get('date'), accountId: d.get('accountId'), notes: d.get('notes').trim() || undefined,
       }),
       onDone: async (r) => {
-        toast(r.debtorPaid ? 'Recebimento registrado — devedor quitado!' : 'Recebimento registrado.');
+        toast(r.debtorPaid ? 'Recebimento registrado — devedor quitado!' : r.anticipated ? 'Parcela antecipada registrada.' : 'Recebimento registrado.');
         await refresh();
       },
     });
@@ -135,7 +160,11 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = t
         if (item.source !== 'debt') return [];
         const debt = debts.find((d) => d.id === item.id);
         if (!isOpen || !debt || !['pending', 'late'].includes(debt.status)) return [];
-        const acts = [iconButton(`Receber parcela ${debt.installmentNumber} de ${debt.description}`, 'hand-coins', () => openReceive(debt), 'btn--success')];
+        const early = debt.dueDate > todayIso();
+        const acts = [
+          iconButton(`${early ? 'Antecipar' : 'Receber'} parcela ${debt.installmentNumber} de ${debt.description}`, early ? 'fast-forward' : 'hand-coins', () => openReceive(debt), 'btn--success'),
+          iconButton(`Quitar dívida ${debt.description}`, 'check-check', () => openSettle(debt.debtGroupId ?? debt.id, debt.description), 'btn--success'),
+        ];
         if (!(receivedBy.get(debt.id) > 0)) {
           acts.push(iconButton(`Cancelar parcela ${debt.installmentNumber} de ${debt.description}`, 'x-circle', () => confirmModal({
             title: 'Cancelar parcela', message: `Cancelar a parcela ${debt.installmentNumber} de ${debtor.name}?`, confirmLabel: 'Cancelar parcela',
@@ -168,6 +197,8 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = t
       !isOpen ? el('p', { class: 'card__hint', text: 'Devedor não está em aberto: somente consulta.' }) : null,
       el('div', { class: 'form__field' }, [el('label', { for: 'statement-month', text: 'Mês de referência' }), monthSelect]),
       isOpen ? el('button', { type: 'button', class: 'btn btn--primary', onClick: openCreate, text: 'Nova dívida' }) : null,
+      isOpen && debts.some((d) => ['pending', 'late'].includes(d.status))
+        ? el('button', { type: 'button', class: 'btn btn--secondary', onClick: () => openSettle(null, `todas as dívidas de ${debtor.name}`), text: 'Quitar todas as dívidas' }) : null,
       table,
     ]),
     footer: [el('button', { type: 'button', class: 'btn btn--secondary', onClick: closeModal, text: 'Fechar' })],
