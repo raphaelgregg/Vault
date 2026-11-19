@@ -5,7 +5,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseCsv, toCsv, csvField, detectDelimiter, normalizeMoneyText, normalizeDateText, normalizeName } from '../../js/utils/csv.js';
 import { mapImportRow, resolveRef, IMPORT_ENTITIES, IMPORT_ENTITY_KEYS, MAX_IMPORT_ROWS, templateRows } from '../../js/core/importSchema.js';
-import { dryRunImport, applyImport, templateCsv, exportCsv, loadImportContext } from '../../js/services/importer.js';
+import { dryRunImport, applyImport, templateCsv, exportCsv, exportAllCsv, loadImportContext } from '../../js/services/importer.js';
+import { makeZip, crc32 } from '../../js/utils/zip.js';
 import { clearCollection, clearUserData, clearWholeDatabase, DOMAIN_COLLECTIONS, BATCH_LIMIT } from '../../js/services/maintenance.js';
 import { isMaintenanceAuthorized, CONFIRM_PHRASES } from '../../js/utils/maintenance-config.js';
 
@@ -217,5 +218,59 @@ describe('trava de acesso e confirmações', () => {
     assert.equal(isMaintenanceAuthorized({ hostname: 'vault.vercel.app' }, ['']), false);
     assert.deepEqual(Object.keys(CONFIRM_PHRASES).sort(), ['database', 'reset', 'user']);
     assert.equal(CONFIRM_PHRASES.database, 'LIMPAR BANCO INTEIRO');
+  });
+});
+
+describe('modelo vazio × exportação × exportação completa (VF-2-03v)', () => {
+  it('modelo CSV é VAZIO (só cabeçalhos); exemplo só sob pedido', () => {
+    for (const key of IMPORT_ENTITY_KEYS) {
+      const parsed = parseCsv(templateCsv(key));
+      assert.equal(parsed.headers.length, IMPORT_ENTITIES[key].columns.length, key);
+      assert.equal(parsed.rows.length, 0, `${key}: sem linhas de dados`);
+      assert.equal(parseCsv(templateCsv(key, { withExample: true })).rows.length, 1);
+    }
+  });
+  it('zip: assinaturas, CRC-32 conhecido, nomes UTF-8 e rejeita nome repetido', () => {
+    assert.equal(crc32(new TextEncoder().encode('123456789')), 0xcbf43926); // vetor de teste padrão
+    const zip = makeZip([{ name: 'a.csv', data: 'x;y\r\n1;2\r\n' }, { name: 'ação.txt', data: 'olá' }], { now: new Date('2026-11-19T12:00:00Z') });
+    const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+    assert.equal(view.getUint32(0, true), 0x04034b50);
+    assert.equal(view.getUint32(zip.length - 22, true), 0x06054b50);
+    assert.equal(view.getUint16(zip.length - 22 + 10, true), 2); // 2 entradas
+    assert.throws(() => makeZip([{ name: 'a', data: '' }, { name: 'a', data: '' }]), /repetido/);
+  });
+  const tables = {
+    accounts: [{ id: 'a1', institution: 'Nubank', name: 'Corrente', type: 'checking', initialBalanceCents: 150000, color: '#1f7a5c', status: 'active' }],
+    categories: [{ id: 'c1', name: 'Mercado', kind: 'expense', color: '#c0392b' }],
+  };
+  it('exporta as 11 entidades num único pacote e resume; entidade sem registros sai só com cabeçalho', async () => {
+    const logs = [];
+    const res = await exportAllCsv(uid, { io: { list: async (u, c) => tables[c] ?? [] }, onLog: (r) => logs.push(r), now: new Date('2026-11-19T12:00:00Z') });
+    assert.equal(logs.length, IMPORT_ENTITY_KEYS.length);
+    assert.deepEqual([res.exported, res.failed, res.totalRows], [11, 0, 2]);
+    assert.equal(res.filename, 'vault-exportacao-completa-2026-11-19.zip');
+    const text = new TextDecoder().decode(res.zip);
+    for (const key of IMPORT_ENTITY_KEYS) assert.ok(text.includes(`vault-${key}.csv`), key);
+    assert.ok(text.includes('_resumo.txt') && text.includes('Total: 11/11 entidade(s), 2 linha(s).'));
+    assert.ok(text.includes('Nubank — Corrente'.length ? 'Corrente' : ''));
+  });
+  it('falha de leitura de UMA entidade (permission-denied) não derruba as outras e fica no log e no resumo', async () => {
+    const logs = [];
+    const io = { list: async (u, c) => { if (c === 'expenses') throw Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' }); return tables[c] ?? []; } };
+    const res = await exportAllCsv(uid, { io, onLog: (r) => logs.push(r) });
+    assert.deepEqual([res.exported, res.failed], [10, 1]);
+    const bad = logs.find((r) => !r.ok);
+    assert.deepEqual([bad.key, bad.permissionDenied], ['despesas', true]);
+    const text = new TextDecoder().decode(res.zip);
+    assert.ok(!text.includes('vault-despesas.csv'));
+    assert.match(text, /FALHA {2}despesas — permission-denied/);
+    // tudo falha (ex.: sem permissão): nada a baixar
+    const none = await exportAllCsv(uid, { io: { list: async () => { throw Object.assign(new Error('x'), { code: 'permission-denied' }); } } });
+    assert.equal(none.exported, 0);
+  });
+  it('lê as referências UMA vez (contexto compartilhado), não 4 listas por entidade', async () => {
+    const calls = [];
+    await exportAllCsv(uid, { io: { list: async (u, c) => { calls.push(c); return tables[c] ?? []; } } });
+    assert.equal(calls.filter((c) => c === 'accounts').length <= 2, true); // ctx (1) + export de contas (1)
   });
 });

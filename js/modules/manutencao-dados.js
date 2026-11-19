@@ -10,7 +10,7 @@ import { clearUserData, clearWholeDatabase, auditUserClear } from '../services/m
 import { seedFullTestSuite, MAX_VOLUME } from '../services/seed.js';
 import {
   IMPORT_ENTITIES, IMPORT_ENTITY_KEYS, MAX_IMPORT_ROWS,
-  templateCsv, loadImportContext, dryRunImport, applyImport, exportCsv,
+  templateCsv, loadImportContext, dryRunImport, applyImport, exportCsv, exportAllCsv,
 } from '../services/importer.js';
 import { describeError } from '../utils/errors.js';
 
@@ -21,7 +21,11 @@ let lastPlan = null; // resultado do dry-run da última validação
 let lastPlanText = null;
 
 function downloadText(filename, text) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
+  downloadBlob(filename, text, 'text/csv;charset=utf-8');
+}
+
+function downloadBlob(filename, data, type) {
+  const url = URL.createObjectURL(new Blob([data], { type }));
   const a = el('a', { href: url, download: filename });
   document.body.append(a);
   a.click();
@@ -194,13 +198,27 @@ export async function render(container, ctx) {
     invalidatePlan();
   }));
 
-  const templateBtn = el('button', { type: 'button', id: 'btn-template', class: 'btn btn--secondary', text: 'Baixar modelo CSV' });
-  templateBtn.addEventListener('click', () => downloadText(`modelo-${entitySelect.value}.csv`, templateCsv(entitySelect.value, { delimiter: delimSelect.value })));
-  const exportBtn = el('button', { type: 'button', id: 'btn-export', class: 'btn btn--secondary', text: 'Exportar CSV da base atual' });
+  const templateBtn = el('button', { type: 'button', id: 'btn-template', class: 'btn btn--secondary', text: 'Baixar modelo CSV (vazio — só cabeçalhos)' });
+  templateBtn.addEventListener('click', () => {
+    downloadText(`modelo-${entitySelect.value}.csv`, templateCsv(entitySelect.value, { delimiter: delimSelect.value }));
+    importLog.write(`Modelo VAZIO de "${IMPORT_ENTITIES[entitySelect.value].label}" baixado (somente cabeçalhos, nenhum dado).`);
+  });
+  const exportBtn = el('button', { type: 'button', id: 'btn-export', class: 'btn btn--secondary', text: 'Exportar CSV da base atual (registros existentes)' });
   exportBtn.addEventListener('click', guard(exportBtn, async () => {
     const r = await exportCsv(user.uid, entitySelect.value, { delimiter: delimSelect.value });
     downloadText(r.filename, r.text);
-    importLog.write(`Exportadas ${r.rowCount} linha(s) de "${IMPORT_ENTITIES[entitySelect.value].label}" (${r.filename}).`, 'ok');
+    importLog.write(`Exportados ${r.rowCount} registro(s) existente(s) de "${IMPORT_ENTITIES[entitySelect.value].label}" (${r.filename}).`, 'ok');
+  }));
+  const exportAllBtn = el('button', { type: 'button', id: 'btn-export-all', class: 'btn btn--primary', text: 'Exportar TODAS as entidades (.zip)' });
+  exportAllBtn.addEventListener('click', guard(exportAllBtn, async () => {
+    importLog.clear();
+    importLog.write(`Exportando as ${IMPORT_ENTITY_KEYS.length} entidades (registros existentes)…`);
+    const res = await exportAllCsv(user.uid, {
+      delimiter: delimSelect.value,
+      onLog: (r) => importLog.write(r.ok ? `✔ ${r.label}: ${r.rowCount} registro(s) → ${r.filename}` : `✖ ${r.label}: FALHA — ${r.error}`, r.ok ? 'ok' : 'error'),
+    });
+    if (res.exported) downloadBlob(res.filename, res.zip, 'application/zip');
+    importLog.write(`Fim: ${res.exported}/${IMPORT_ENTITY_KEYS.length} entidade(s) exportada(s), ${res.totalRows} registro(s) no total${res.failed ? `, ${res.failed} com falha (fora do pacote)` : ''}${res.exported ? ` — arquivo ${res.filename}` : ''}.`, res.failed ? 'error' : 'ok');
   }));
 
   const hint = () => IMPORT_ENTITIES[entitySelect.value].columns.map((c) => `${c.name}${c.required ? '*' : ''}${c.help ? ` (${c.help})` : ''}`).join(' · ');
@@ -214,7 +232,8 @@ export async function render(container, ctx) {
       field('Entidade', 'import-entity', entitySelect),
       columnsHint,
       field('Delimitador do modelo/exportação', 'import-delim', delimSelect),
-      el('div', {}, [templateBtn, ' ', exportBtn]),
+      el('p', { class: 'card__hint', id: 'import-explain', text: 'Modelo CSV = arquivo VAZIO, só com os cabeçalhos da entidade (nenhum dado). Exportar CSV da base atual = os REGISTROS JÁ EXISTENTES da entidade selecionada. "Exportar todas" gera um .zip com um CSV por entidade (as 11) mais _resumo.txt.' }),
+      el('div', {}, [templateBtn, ' ', exportBtn, ' ', exportAllBtn]),
       field('Arquivo CSV', 'import-file', fileInput),
       field('Ou cole o CSV', 'import-text', csvText),
       el('div', {}, [validateBtn, ' ', applyBtn]),

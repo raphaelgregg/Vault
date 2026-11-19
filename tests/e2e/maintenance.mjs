@@ -125,7 +125,12 @@ try {
   log('importação CSV: modelo, dry-run sem gravar e efetivação só das válidas');
   await page.selectOption('#import-entity', 'categorias');
   const [tplDownload] = await Promise.all([page.waitForEvent('download'), page.click('#btn-template')]);
-  assert.match(await readFile(await tplDownload.path(), 'utf8'), /nome;tipo;cor/);
+  const tplText = await readFile(await tplDownload.path(), 'utf8');
+  assert.match(tplText, /nome;tipo;cor/);
+  assert.equal(tplText.trim().split(/\r?\n/).length, 1); // modelo VAZIO: só o cabeçalho, nenhum dado
+  assert.match(await page.locator('#import-explain').innerText(), /VAZIO[\s\S]*REGISTROS JÁ EXISTENTES/);
+  assert.match(await page.locator('#btn-template').innerText(), /vazio/i);
+  assert.match(await page.locator('#btn-export').innerText(), /registros existentes/i);
   const catsBefore = (await counts()).categories;
   await page.fill('#import-text', 'nome;tipo;cor\nImport A;expense;#112233\nImport B;both;\nRuim;invalido;\n');
   await page.click('#btn-validate');
@@ -138,6 +143,20 @@ try {
   const [expDownload] = await Promise.all([page.waitForEvent('download'), page.click('#btn-export')]);
   const exported = await readFile(await expDownload.path(), 'utf8');
   assert.match(exported, /Import A;expense;#112233/);
+
+  log('exportar TODAS as entidades: um .zip com as 11 + _resumo.txt e log por entidade');
+  const [zipDownload] = await Promise.all([page.waitForEvent('download'), page.click('#btn-export-all')]);
+  await waitLog('import-log', /Fim: 11\/11 entidade\(s\) exportada\(s\)/);
+  const exportLog = await logText('import-log');
+  assert.match(exportLog, /Categorias: \d+ registro\(s\) → vault-categorias\.csv/);
+  assert.match(exportLog, /Contas: 3 registro\(s\)/);
+  assert.match(zipDownload.suggestedFilename(), /^vault-exportacao-completa-\d{4}-\d{2}-\d{2}\.zip$/);
+  const zipBytes = await readFile(await zipDownload.path());
+  assert.equal(zipBytes.readUInt32LE(0), 0x04034b50);
+  const zipText = zipBytes.toString('latin1');
+  for (const name of ['contas', 'categorias', 'receitas', 'despesas', 'transferencias', 'assinaturas', 'devedores', 'dividas', 'metas', 'cartoes', 'compras_cartao']) assert.ok(zipText.includes(`vault-${name}.csv`), name);
+  assert.ok(zipText.includes('_resumo.txt') && zipText.includes('Total: 11/11 entidade(s)'));
+  assert.ok(zipText.includes('Import A')); // registros existentes dentro do pacote
 
   assert.deepEqual(app.problems.filter((p) => !/permission|PERMISSION|insufficient/i.test(p)), [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E manutenção OK');

@@ -8,6 +8,7 @@
 import { COLLECTIONS } from '../utils/constants.js';
 import { list } from './firestore.js';
 import { parseCsv, toCsv } from '../utils/csv.js';
+import { makeZip } from '../utils/zip.js';
 import { centsToMoneyString } from '../core/model.js';
 import { IMPORT_ENTITIES, IMPORT_ENTITY_KEYS, MAX_IMPORT_ROWS, mapImportRow, templateRows } from '../core/importSchema.js';
 import { createAccount } from './accounts.js';
@@ -40,10 +41,13 @@ const CREATORS = {
   },
 };
 
-/** Modelo CSV (cabeçalho + linha de exemplo) como texto. */
-export function templateCsv(key, { delimiter = ';' } = {}) {
+/**
+ * Modelo CSV VAZIO: só os cabeçalhos (sem dados e sem exemplo). Os registros existentes saem em `exportCsv`.
+ * `withExample: true` acrescenta 1 linha de exemplo (uso interno/testes).
+ */
+export function templateCsv(key, { delimiter = ';', withExample = false } = {}) {
   const { headers, rows } = templateRows(key);
-  return toCsv(headers, rows, { delimiter });
+  return toCsv(headers, withExample ? rows : [], { delimiter });
 }
 
 /** Referências existentes para resolver nomes (contas, categorias, cartões, devedores). */
@@ -159,11 +163,11 @@ function groupRows(key, docs) {
 }
 
 /** CSV da base atual (mesmas colunas do modelo, referências por nome). Retorna { filename, text, rowCount }. */
-export async function exportCsv(uid, key, { delimiter = ';', io = {} } = {}) {
+export async function exportCsv(uid, key, { delimiter = ';', io = {}, ctx: sharedCtx = null } = {}) {
   const def = IMPORT_ENTITIES[key];
   if (!def) throw new Error('Entidade desconhecida.');
   const fetchList = io.list ?? list;
-  const [docs, ctx] = await Promise.all([fetchList(uid, EXPORT_COLLECTION[key], {}), loadImportContext(uid, io)]);
+  const [docs, ctx] = await Promise.all([fetchList(uid, EXPORT_COLLECTION[key], {}), sharedCtx ?? loadImportContext(uid, io)]);
   const rows = groupRows(key, docs).map((doc) => def.columns.map((c) => {
     const value = doc[c.field];
     if (value === undefined || value === null) return '';
@@ -173,4 +177,39 @@ export async function exportCsv(uid, key, { delimiter = ';', io = {} } = {}) {
     return value;
   }));
   return { filename: `vault-${key}.csv`, text: toCsv(def.columns.map((c) => c.name), rows, { delimiter }), rowCount: rows.length };
+}
+
+/**
+ * Exporta TODAS as entidades (VF-2-03v): lê cada uma isoladamente — falha de leitura de uma (ex.:
+ * `permission-denied`) não interrompe as demais. Reúne os CSVs num único .zip (+ `_resumo.txt`).
+ * `onLog({ key, label, ok, rowCount?, filename?, error?, permissionDenied? })` por entidade.
+ * Retorna { filename, zip (Uint8Array), results, exported, failed, totalRows }.
+ */
+export async function exportAllCsv(uid, { delimiter = ';', onLog, io = {}, now = new Date() } = {}) {
+  const results = [];
+  const files = [];
+  // Referências (nomes de conta/categoria/cartão/devedor) lidas UMA vez; se falhar, cada entidade tenta por conta própria.
+  const ctx = await loadImportContext(uid, io).catch(() => null);
+  for (const key of IMPORT_ENTITY_KEYS) {
+    const label = IMPORT_ENTITIES[key].label;
+    try {
+      const r = await exportCsv(uid, key, { delimiter, io, ctx });
+      files.push({ name: r.filename, data: r.text });
+      results.push({ key, label, ok: true, rowCount: r.rowCount, filename: r.filename });
+    } catch (error) {
+      results.push({ key, label, ok: false, error: `${error?.code ? `${error.code}: ` : ''}${error?.message ?? error}`, permissionDenied: String(error?.code ?? '').includes('permission-denied') });
+    }
+    onLog?.(results.at(-1));
+  }
+  const exported = results.filter((r) => r.ok).length;
+  const totalRows = results.reduce((t, r) => t + (r.rowCount ?? 0), 0);
+  const summary = [
+    `Exportação completa — ${now.toISOString()}`,
+    `Delimitador: "${delimiter}" · UTF-8 com BOM`,
+    ...results.map((r) => (r.ok ? `OK     ${r.filename} — ${r.rowCount} linha(s) (${r.label})` : `FALHA  ${r.key} — ${r.error} (${r.label})`)),
+    `Total: ${exported}/${results.length} entidade(s), ${totalRows} linha(s).`,
+  ].join('\r\n');
+  files.push({ name: '_resumo.txt', data: `${summary}\r\n` });
+  const stamp = now.toISOString().slice(0, 10);
+  return { filename: `vault-exportacao-completa-${stamp}.zip`, zip: makeZip(files, { now }), results, exported, failed: results.length - exported, totalRows };
 }

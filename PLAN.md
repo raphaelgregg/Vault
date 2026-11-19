@@ -9,7 +9,7 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Propósito: controle financeiro pessoal (contas, receitas, despesas, transferências, categorias) por usuário.
 - Stack: HTML/CSS/JS ES Modules puro, Firebase Auth + Firestore (SDK 10.12.2 via CDN/importmap), Vercel estático, npm só para dev.
 - Maturidade: etapa 2 entregue — todos os módulos (contas, receitas, despesas, transferências, categorias, assinaturas, devedores+parcelas/recebimentos, metas, cartões/faturas, orçamentos, dashboard, relatórios) têm service e UI; pendem importação/backup, publicação e verificações em produção (ver Itens não verificados).
-- Testes (executados em 2026-11-19, Node 22): `test:unit` 406 ok · `test:rules` 74 ok (emulador) · `npm run lint` OK · `npm run test:e2e` OK (Chromium, emuladores; inclui devedores/cartão). Node 18.20.8: lint OK · `test:unit` 406 ok. CI no GitHub: runs #1/#2 falharam só no job Node 18 (corrigido; ver Histórico). Rules/índices em produção e Vercel: **não verificados** (deploy bloqueado, ver Itens não verificados).
+- Testes (executados em 2026-11-19, Node 22): `test:unit` 411 ok · `test:rules` 74 ok (emulador) · `npm run lint` OK · `npm run test:e2e` OK (Chromium, emuladores; inclui devedores/cartão). Node 18.20.8: lint OK · `test:unit` 411 ok. CI no GitHub: runs #1/#2 falharam só no job Node 18 (corrigido; ver Histórico). Rules/índices em produção e Vercel: **não verificados** (deploy bloqueado, ver Itens não verificados).
 - Lint próprio (`scripts/lint.mjs`), CI (`.github/workflows/ci.yml`, não executado no GitHub), sem build.
 
 ## Gap Analysis
@@ -165,6 +165,13 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
   - Limitações: importa uma entidade por vez (referências apenas a registros já existentes — importe contas → categorias → cartões → devedores antes do resto); sem importação de orçamentos/aportes/faturas; `auditLog` nunca é apagado; não é transação única (cada linha é um service).
   - Arquivos: utils/{csv,maintenance-config}.js, core/importSchema.js, services/{maintenance,seed,importer}.js, modules/{manutencao-dados,configuracoes}.js, pages/manutencao-dados.html, app.js, vercel.json, css/components.css, tests/{services/{maintenance,routes},e2e/maintenance}, package.json.
 
+- [x] **VF-2-03v — Usabilidade do CSV (modelo vazio × exportação) e exportação de todas as entidades** (melhoria) — CONCLUÍDA 2026-11-19 (validada localmente; **`firestore.rules` e `firestore.indexes.json` NÃO alterados — sem novo deploy**).
+  - **Clareza na UI** (`js/modules/manutencao-dados.js`): botões rotulados "Baixar modelo CSV (vazio — só cabeçalhos)" e "Exportar CSV da base atual (registros existentes)", texto explicativo fixo (`#import-explain`) e linha de log própria. O modelo (`templateCsv`, `js/services/importer.js`) agora é de fato VAZIO — só cabeçalhos; antes trazia 1 linha de exemplo (`withExample: true` mantém o exemplo sob pedido).
+  - **Exportar todas** (`exportAllCsv`, `js/services/importer.js`): as 11 entidades em UM `.zip` (`vault-exportacao-completa-AAAA-MM-DD.zip`) com `vault-<entidade>.csv` + `_resumo.txt`; leitura isolada por entidade (falha, inclusive `permission-denied`, não derruba as demais e aparece no log e no resumo; entidade sem registros sai só com cabeçalho); referências (nomes) lidas UMA vez. `js/utils/zip.js` (puro, método "store", CRC-32, UTF-8, sem dependências — validado com `zipfile` do Python).
+  - Testes: `tests/services/maintenance.test.mjs` (modelo vazio, zip/CRC, 11 entidades, falha isolada, contexto compartilhado) e E2E `tests/e2e/maintenance.mjs` (modelo só com cabeçalho, textos, download do .zip com as 11 + resumo).
+  - Limitações: o pacote é um .zip sem compressão (CSVs pequenos) e sem ZIP64 (limite de 4 GiB); entidades que falham ficam fora do pacote (só no log/resumo); exportação lê as coleções inteiras (observar cota de leituras em bases grandes).
+  - Arquivos: utils/zip.js, services/importer.js, modules/manutencao-dados.js, tests/{services/maintenance,e2e/maintenance}.
+
 ### Fase 3 — Arquitetura, qualidade e refatoração
 
 - [x] **VF-3-01 — Reduzir duplicação nos services** (Médio) — CONCLUÍDA 2026-11-18: extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
@@ -223,3 +230,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-19 — VF-2-03r concluída (assinatura no cartão vira parcela na fatura no mesmo lote; fatura liquidada intacta; consolidado de fatura; upcomingDue sem duplicar). Republicar `firestore.rules` (subscriptions.cardId). VF-2-03s registrada.
 - 2026-11-19 — VF-2-03t concluída (cartão com faturas canceladas/zeradas pode ser excluído; fatura cancelada/vazia pode ser ocultada ou excluída). Sem mudança em Rules/índices.
 - 2026-11-19 — VF-2-03u concluída (painel `/manutencao-dados`: limpeza por usuário/banco inteiro com limites das Rules, massa de testes completa, importação/exportação CSV com dry-run). Sem mudança em Rules/índices.
+- 2026-11-19 — VF-2-03v concluída (modelo CSV vazio × exportação explicitados; exportar todas as entidades em .zip com log e resumo). Sem mudança em Rules/índices.
