@@ -9,7 +9,7 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Propósito: controle financeiro pessoal (contas, receitas, despesas, transferências, categorias) por usuário.
 - Stack: HTML/CSS/JS ES Modules puro, Firebase Auth + Firestore (SDK 10.12.2 via CDN/importmap), Vercel estático, npm só para dev.
 - Maturidade: etapa 2 entregue — todos os módulos (contas, receitas, despesas, transferências, categorias, assinaturas, devedores+parcelas/recebimentos, metas, cartões/faturas, orçamentos, dashboard, relatórios) têm service e UI; pendem importação/backup, publicação e verificações em produção (ver Itens não verificados).
-- Testes (executados em 2026-11-19, Node 22): `test:unit` 426 ok · `test:rules` 79 ok (emulador) · `npm run lint` OK · `npm run test:e2e` OK (Chromium, emuladores; inclui devedores/cartão). Node 18.20.8: lint OK · `test:unit` 426 ok. CI no GitHub: runs #1/#2 falharam só no job Node 18 (corrigido; ver Histórico). Rules/índices em produção e Vercel: **não verificados** (deploy bloqueado, ver Itens não verificados).
+- Testes (executados em 2026-11-19, Node 22): `test:unit` 428 ok · `test:rules` 79 ok (emulador) · `npm run lint` OK · `npm run test:e2e` OK (Chromium, emuladores; inclui devedores/cartão). Node 18.20.8: lint OK · `test:unit` 426 ok. CI no GitHub: runs #1/#2 falharam só no job Node 18 (corrigido; ver Histórico). Rules/índices em produção e Vercel: **não verificados** (deploy bloqueado, ver Itens não verificados).
 - Lint próprio (`scripts/lint.mjs`), CI (`.github/workflows/ci.yml`, não executado no GitHub), sem build.
 
 ## Gap Analysis
@@ -190,6 +190,12 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
   - Não verificado: o fluxo de provedor externo (Google) só tem teste unitário (sem login social no emulador desta suíte); entrega real do e-mail de redefinição (o emulador só gera o link); modelo de e-mail e domínio autorizado ficam no Console do Firebase.
   - Arquivos: utils/password.js, services/auth.js, modules/configuracoes.js, tests/{services/auth-password,e2e/auth}, package.json.
 
+- [x] **VF-2-03y — `404` em rotas limpas da Vercel (`/manutencao-dados`, `/metas`, …) e violações de CSP** (correção) — CONCLUÍDA 2026-11-19 (correção local validada; **confirmar no preview/produção após o deploy**; `firestore.rules`/índices NÃO alterados).
+  - **Causa raiz do 404 (comprovada no deploy de produção `cc11b7c` via Vercel MCP):** `vercel.json` tem `cleanUrls: true` e os rewrites apontavam para `/pages/<x>.html`; com `cleanUrls` a Vercel serve o arquivo SEM extensão (`/pages/metas` = 200, `/pages/manutencao-dados.html` só funciona por redirecionamento) e o destino `.html` não resolve → `NOT_FOUND` em TODAS as rotas limpas (`/manutencao-dados`, `/metas`, `/configuracoes` testadas: 404; `/pages/metas`: 200). Era o item "abrir `/categorias` no preview" nunca verificado (VF-2-04). Correção: destinos sem `.html` (`/pages/<x>`) nas 14 rotas (`vercel.json`) e teste que impede destino `.html` enquanto `cleanUrls` estiver ligado (`tests/services/routes.test.mjs`).
+  - **CSP (inline script nas linhas 2 e 15, `inline event handler`, hashes `sha256-UYSUP…`/`sha256-im4Kq…`): não vêm do nosso código** — nenhuma página/`index.html`/módulo tem `<script>` inline nem `on*=` (verificado por busca e agora por teste); os hashes não correspondem a nada do repositório. São da página de ERRO HTML da própria Vercel (NOT_FOUND), que usa scripts/handlers inline e é bloqueada pela nossa CSP (`script-src` sem `unsafe-inline`, mantida). Sem o 404, os avisos desaparecem. A CSP NÃO foi enfraquecida nem ganhou hashes.
+  - Observação: a navegação interna usa `metas.html` etc. (redirecionadas por `cleanUrls`), por isso só quem digitava a URL limpa via o 404.
+  - Arquivos: vercel.json, tests/services/routes.test.mjs.
+
 ### Fase 3 — Arquitetura, qualidade e refatoração
 
 - [x] **VF-3-01 — Reduzir duplicação nos services** (Médio) — CONCLUÍDA 2026-11-18: extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
@@ -251,3 +257,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-19 — VF-2-03v concluída (modelo CSV vazio × exportação explicitados; exportar todas as entidades em .zip com log e resumo). Sem mudança em Rules/índices.
 - 2026-11-19 — VF-2-03w concluída (claim admin nas Rules com poderes mínimos de ler/apagar domínio; escopos own/target_uid/all_users; auditoria do executor). **Republicar `firestore.rules`** e configurar a claim via Admin SDK.
 - 2026-11-19 — VF-2-03x concluída (troca de senha com reautenticação, aviso para provedor externo, e-mail de redefinição). Sem mudança em Rules/índices.
+- 2026-11-19 — VF-2-03y concluída (rewrites sem `.html` por causa de `cleanUrls`; CSP inalterada — violações vinham da página de erro 404 da Vercel). Confirmar no preview e promover para main.
