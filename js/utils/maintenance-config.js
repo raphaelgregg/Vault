@@ -18,6 +18,7 @@ export function isMaintenanceAuthorized({ email, hostname } = {}, allowed = MAIN
 /** Frases de confirmação digitadas (reforço contra clique acidental). */
 export const CONFIRM_PHRASES = Object.freeze({
   user: 'LIMPAR MEUS DADOS',
+  target: 'LIMPAR USUARIO ALVO',
   database: 'LIMPAR BANCO INTEIRO',
   reset: 'RESETAR E GERAR',
 });

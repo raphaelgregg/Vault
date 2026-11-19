@@ -9,7 +9,11 @@ rules_version = '2';
  *  - Campos fechados: cada coleção lista os campos permitidos e os obrigatórios.
  *  - Dinheiro em centavos inteiros (is int, >= 0; movimentações > 0).
  *  - Datas como timestamp; createdAt/updatedAt só pelo servidor.
- *  - auditLog: create-only (sem update/delete).
+ *  - auditLog: create-only (sem update/delete) — nem o administrador altera ou apaga auditoria.
+ *  - Administrador (VF-2-03w): custom claim `admin == true` (definido SÓ pelo Admin SDK/Console — o cliente não
+ *    consegue se auto-promover). Poderes MÍNIMOS: LER e APAGAR documentos das coleções de DOMÍNIO de qualquer uid
+ *    (para limpeza administrativa sem entrar na conta do usuário). Não cria, não edita, não toca perfil,
+ *    configurações nem auditLog. Usuário comum continua restrito ao próprio uid.
  *  - Referências: IDs de documentos da própria árvore do usuário, validados com exists().
  */
 service cloud.firestore {
@@ -22,6 +26,11 @@ service cloud.firestore {
 
     function isOwner(userId) {
       return signedIn() && request.auth.uid == userId;
+    }
+
+    // Administrador: claim de token definida pelo Admin SDK (`setCustomUserClaims(uid, { admin: true })`).
+    function isAdmin() {
+      return signedIn() && request.auth.token.admin == true;
     }
 
     function data() {
@@ -137,7 +146,7 @@ service cloud.firestore {
 
     // ---------- contas ----------
     match /users/{userId}/accounts/{accountId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['institution', 'name', 'type', 'initialBalanceCents', 'color', 'status', 'createdAt', 'updatedAt'])
         && requiredOk(['institution', 'name', 'type', 'initialBalanceCents', 'color', 'status', 'createdAt', 'updatedAt'])
@@ -149,12 +158,12 @@ service cloud.firestore {
         && oneOf('status', ['active', 'inactive', 'archived'])
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- categorias ----------
     match /users/{userId}/categories/{categoryId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['name', 'kind', 'color', 'createdAt', 'updatedAt'])
         && requiredOk(['name', 'kind', 'color', 'createdAt', 'updatedAt'])
@@ -163,12 +172,12 @@ service cloud.firestore {
         && text('color', 32)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- receitas ----------
     match /users/{userId}/incomes/{incomeId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['description', 'categoryId', 'amountCents', 'expectedDate', 'receivedDate',
                    'accountId', 'status', 'recurrence', 'notes', 'createdAt', 'updatedAt'])
@@ -185,12 +194,12 @@ service cloud.firestore {
         && optionalString('notes', 500)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- despesas ----------
     match /users/{userId}/expenses/{expenseId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['description', 'categoryId', 'amountCents', 'accountId', 'purchaseDate',
                    'dueDate', 'paidDate', 'status', 'recurrence', 'notes',
@@ -210,12 +219,12 @@ service cloud.firestore {
         && optionalString('installmentGroupId', 128)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- transferências ----------
     match /users/{userId}/transfers/{transferId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['fromAccountId', 'toAccountId', 'amountCents', 'date', 'reason',
                    'notes', 'status', 'createdAt', 'updatedAt'])
@@ -231,12 +240,12 @@ service cloud.firestore {
         && oneOf('status', ['pending', 'confirmed', 'cancelled'])
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- assinaturas ----------
     match /users/{userId}/subscriptions/{subscriptionId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['name', 'amountCents', 'periodicity', 'nextChargeDate', 'accountId',
                    'cardId', 'categoryId', 'status', 'notes', 'createdAt', 'updatedAt'])
@@ -253,12 +262,12 @@ service cloud.firestore {
         && optionalString('notes', 500)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- devedores ----------
     match /users/{userId}/debtors/{debtorId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['name', 'loanDate', 'lentCents', 'receivedCents', 'status', 'notes',
                    'createdAt', 'updatedAt'])
@@ -273,12 +282,12 @@ service cloud.firestore {
         && optionalString('notes', 500)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- dívidas (parcelas) ----------
     match /users/{userId}/debts/{debtId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['debtorId', 'description', 'principalCents', 'dueDate',
                    'installmentNumber', 'installmentsTotal', 'debtGroupId', 'status',
@@ -300,12 +309,12 @@ service cloud.firestore {
         && oneOf('status', ['pending', 'paid', 'late', 'cancelled'])
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- recebimentos de dívidas ----------
     match /users/{userId}/debtPayments/{paymentId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['debtId', 'debtorId', 'amountCents', 'date', 'accountId', 'notes',
                    'createdAt', 'updatedAt'])
@@ -319,12 +328,12 @@ service cloud.firestore {
         && optionalString('notes', 500)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- metas ----------
     match /users/{userId}/goals/{goalId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['name', 'description', 'targetCents', 'deadline', 'accountId',
                    'status', 'createdAt', 'updatedAt'])
@@ -337,12 +346,12 @@ service cloud.firestore {
         && oneOf('status', ['active', 'completed', 'cancelled'])
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- movimentações de metas ----------
     match /users/{userId}/goalTransactions/{transactionId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['goalId', 'type', 'amountCents', 'date', 'accountId', 'notes',
                    'createdAt', 'updatedAt'])
@@ -356,12 +365,12 @@ service cloud.firestore {
         && optionalString('notes', 300)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- cartões ----------
     match /users/{userId}/creditCards/{cardId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['name', 'brand', 'limitCents', 'closingDay', 'dueDay', 'accountId',
                    'color', 'status', 'createdAt', 'updatedAt'])
@@ -377,12 +386,12 @@ service cloud.firestore {
         && oneOf('status', ['active', 'blocked', 'cancelled'])
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- compras no cartão ----------
     match /users/{userId}/cardPurchases/{purchaseId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['cardId', 'description', 'amountCents', 'purchaseDate', 'installmentsTotal',
                    'installmentNumber', 'categoryId', 'invoiceId', 'debtorId', 'notes',
@@ -404,12 +413,12 @@ service cloud.firestore {
         && optionalString('notes', 300)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- faturas ----------
     match /users/{userId}/invoices/{invoiceId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['cardId', 'referenceMonth', 'closingDate', 'dueDate', 'totalCents',
                    'paidCents', 'accountId', 'paidAt', 'status', 'createdAt', 'updatedAt'])
@@ -426,12 +435,12 @@ service cloud.firestore {
         && oneOf('status', ['open', 'closed', 'paid', 'cancelled'])
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- orçamentos ----------
     match /users/{userId}/budgets/{budgetId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['categoryId', 'month', 'limitCents', 'createdAt', 'updatedAt'])
         && requiredOk(['categoryId', 'month', 'limitCents', 'createdAt', 'updatedAt'])
@@ -441,7 +450,7 @@ service cloud.firestore {
         && positiveCents(data().limitCents)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId);
+      allow delete: if isOwner(userId) || isAdmin();
     }
 
     // ---------- auditoria (imutável) ----------
@@ -458,6 +467,54 @@ service cloud.firestore {
         && data().actorUid == request.auth.uid
         && data().createdAt == request.time;
       allow update, delete: if false;
+    }
+
+    // ---------- consulta de grupo de coleções (SOMENTE administrador, só leitura) ----------
+    // Permite à limpeza global descobrir documentos de todos os usuários sem enumerar uids.
+    match /{path=**}/accounts/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/categories/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/incomes/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/expenses/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/transfers/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/subscriptions/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/debtors/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/debts/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/debtPayments/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/goals/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/goalTransactions/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/creditCards/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/cardPurchases/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/invoices/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/budgets/{docId} {
+      allow read: if isAdmin();
     }
 
     // ---------- negação padrão ----------

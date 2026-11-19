@@ -7,7 +7,7 @@ import { parseCsv, toCsv, csvField, detectDelimiter, normalizeMoneyText, normali
 import { mapImportRow, resolveRef, IMPORT_ENTITIES, IMPORT_ENTITY_KEYS, MAX_IMPORT_ROWS, templateRows } from '../../js/core/importSchema.js';
 import { dryRunImport, applyImport, templateCsv, exportCsv, exportAllCsv, loadImportContext } from '../../js/services/importer.js';
 import { makeZip, crc32 } from '../../js/utils/zip.js';
-import { clearCollection, clearUserData, clearWholeDatabase, DOMAIN_COLLECTIONS, BATCH_LIMIT } from '../../js/services/maintenance.js';
+import { clearCollection, clearUserData, clearScope, clearAllUsersData, discoverUsers, isAdminUser, SCOPES, DOMAIN_COLLECTIONS, BATCH_LIMIT } from '../../js/services/maintenance.js';
 import { isMaintenanceAuthorized, CONFIRM_PHRASES } from '../../js/utils/maintenance-config.js';
 
 const uid = 'u1';
@@ -192,20 +192,97 @@ describe('limpeza em lotes (≤ 500) e banco inteiro', () => {
     assert.deepEqual([res.failures, res.permissionDenied], [1, 1]);
     assert.ok(DOMAIN_COLLECTIONS.every((c) => !['profile', 'settings', 'auditLog'].includes(c)));
   });
-  it('banco inteiro: limpa o uid atual, TENTA uids extras (permission-denied destacado) e grava auditoria-resumo', async () => {
+  it('escopo own: limpa só o uid do executor e audita no log dele (adminUid, escopo, totais)', async () => {
     const audits = [];
-    const { io } = makeIo({ perCollection: { goals: 2 } });
+    const { io } = makeIo({ perCollection: { goals: 2, accounts: 1 } });
+    io.writeAudit = async (u, e) => { audits.push([u, e]); return { ok: true }; };
+    const res = await clearScope({ scope: SCOPES.OWN, adminUid: 'me', io });
+    assert.deepEqual([res.scope, res.adminUid, res.targetUid, res.deleted], ['own', 'me', null, 3]);
+    assert.equal(audits[0][0], 'me');
+    assert.equal(audits[0][1].action, 'maintenance_clear_own');
+    assert.deepEqual([audits[0][1].after.scope, audits[0][1].after.adminUid, audits[0][1].after.deleted], ['own', 'me', 3]);
+  });
+  it('escopo target_uid: só admin; apaga o uid alvo SEM tentar auditLog; auditoria no log do admin com targetUid', async () => {
+    const audits = [];
+    const seenUids = [];
+    const { io } = makeIo({ perCollection: { expenses: 4 } });
     const base = io.list;
-    io.list = async (u, c, o) => { if (u === 'outro') throw Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' }); return base(u, c, o); };
-    io.writeAudit = async (u, e) => { audits.push(e); };
+    io.list = async (u, c, o) => { seenUids.push(u); return base(u, c, o); };
+    io.writeAudit = async (u, e) => { audits.push([u, e]); return { ok: true }; };
+    const refused = await clearScope({ scope: SCOPES.TARGET, adminUid: 'adm', targetUid: 'alvo', admin: false, io });
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /claim/);
+    assert.equal(seenUids.length, 0); // nada é enviado ao Firestore sem a claim
+    assert.equal(audits.length, 0);
     const logs = [];
-    const res = await clearWholeDatabase(uid, { extraUids: ['outro', 'outro', uid, ' '], io, onLog: (r) => logs.push(r) });
-    const foreign = logs.filter((l) => l.uid === 'outro');
-    assert.equal(foreign.length, 1);
-    assert.equal(foreign[0].permissionDenied, true);
-    assert.equal(res.runs.length, 2);
-    assert.equal(res.deleted, 2);
-    assert.equal(audits[0].action, 'maintenance_clear_all');
+    const res = await clearScope({ scope: SCOPES.TARGET, adminUid: 'adm', targetUid: ' alvo ', admin: true, io, onLog: (r) => logs.push(r.collection) });
+    assert.deepEqual([res.ok, res.scope, res.adminUid, res.targetUid, res.deleted], [true, 'target_uid', 'adm', 'alvo', 4]);
+    assert.ok(new Set(seenUids).size === 1 && seenUids[0] === 'alvo');
+    assert.equal(logs.includes('auditLog'), false);
+    assert.equal(audits[0][0], 'adm'); // o log é do EXECUTOR
+    assert.deepEqual([audits[0][1].docId, audits[0][1].after.targetUid, audits[0][1].action], ['alvo', 'alvo', 'maintenance_clear_target_uid']);
+    assert.equal((await clearScope({ scope: SCOPES.TARGET, adminUid: 'adm', targetUid: '  ', admin: true, io })).ok, false);
+    assert.equal((await clearScope({ scope: 'tudo', adminUid: 'adm', admin: true, io })).ok, false);
+  });
+  it('escopo all_users: só admin; consulta de grupo em lotes de 500 apagando docs de vários uids; log por uid e por coleção', async () => {
+    const store = [
+      ...Array.from({ length: 700 }, (_, i) => ({ path: `users/u${i % 3}/expenses/e${i}`, uid: `u${i % 3}` })),
+      { path: 'users/u9/accounts/a1', uid: 'u9' },
+    ];
+    const batches = [];
+    const io = {
+      listGroup: async (c, max) => store.filter((d) => d.path.includes(`/${c}/`)).slice(0, max),
+      docAtPath: (path) => ({ path }),
+      newBatch: () => {
+        const ops = [];
+        return { delete: (r) => ops.push(r.path), commit: async () => { batches.push(ops.length); for (const p of ops) store.splice(store.findIndex((d) => d.path === p), 1); } };
+      },
+      writeAudit: async () => ({ ok: true }),
+    };
+    const refused = await clearScope({ scope: SCOPES.ALL, adminUid: 'adm', admin: false, io });
+    assert.equal(refused.ok, false);
+    assert.equal(batches.length, 0);
+    const res = await clearScope({ scope: SCOPES.ALL, adminUid: 'adm', admin: true, io });
+    assert.equal(res.ok, true);
+    assert.equal(res.deleted, 701);
+    assert.deepEqual(batches, [500, 200, 1]);
+    assert.deepEqual(res.byUid, { u0: 234, u1: 233, u2: 233, u9: 1 });
+    assert.equal(store.length, 0);
+  });
+  it('permission-denied de uma coleção no escopo global é destacado e as demais seguem; auditoria-resumo registra', async () => {
+    const audits = [];
+    const io = {
+      listGroup: async (c) => { if (c === 'budgets') throw Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' }); return []; },
+      docAtPath: (p) => ({ path: p }), newBatch: () => ({ delete() {}, commit: async () => {} }),
+      writeAudit: async (u, e) => { audits.push(e); return { ok: true }; },
+    };
+    const logs = [];
+    const res = await clearAllUsersData({ io, onLog: (r) => logs.push(r) });
+    assert.equal(logs.length, DOMAIN_COLLECTIONS.length);
+    assert.deepEqual([res.failures, res.permissionDenied], [1, 1]);
+    const out = await clearScope({ scope: SCOPES.ALL, adminUid: 'adm', admin: true, io });
+    assert.equal(out.ok, false);
+    assert.equal(out.permissionDenied, 1);
+    assert.equal(audits.at(-1).after.permissionDenied, 1);
+  });
+  it('discoverUsers: amostra por consulta de grupo, agrupada por uid; falha por coleção é listada', async () => {
+    const io = { listGroup: async (c) => { if (c === 'goals') throw new Error('x'); return c === 'accounts' ? [{ uid: 'a', path: '' }, { uid: 'b', path: '' }, { uid: 'a', path: '' }] : c === 'expenses' ? [{ uid: 'b', path: '' }] : []; } };
+    const r = await discoverUsers({ io });
+    assert.deepEqual(r.users.map((u) => [u.uid, u.docs]), [['b', 2], ['a', 2]].sort((x, y) => y[1] - x[1] || 0).map((x) => x));
+    assert.deepEqual(r.users.find((u) => u.uid === 'b').collections, ['accounts', 'expenses']);
+    assert.equal(r.errors[0].collection, 'goals');
+    assert.equal(r.sampled, true);
+  });
+  it('isAdminUser: só claim booleana admin === true (token renovado)', async () => {
+    const withClaims = (claims, spy) => ({ getIdTokenResult: async (refresh) => { spy?.push(refresh); return { claims }; } });
+    const spy = [];
+    assert.equal(await isAdminUser(withClaims({ admin: true }, spy)), true);
+    assert.deepEqual(spy, [true]); // força renovar o token para enxergar claim recém-definida
+    for (const c of [{}, { admin: 'true' }, { admin: 1 }, { admin: false }]) assert.equal(await isAdminUser(withClaims(c)), false);
+    assert.equal(await isAdminUser(null), false);
+    const orig = console.error; console.error = () => {};
+    assert.equal(await isAdminUser({ getIdTokenResult: async () => { throw new Error('x'); } }), false);
+    console.error = orig;
   });
 });
 
@@ -216,7 +293,7 @@ describe('trava de acesso e confirmações', () => {
     assert.equal(isMaintenanceAuthorized({ hostname: 'vault.vercel.app', email: 'a@b.c' }), false);
     assert.equal(isMaintenanceAuthorized({ hostname: 'vault.vercel.app', email: ' A@B.C ' }, ['a@b.c']), true);
     assert.equal(isMaintenanceAuthorized({ hostname: 'vault.vercel.app' }, ['']), false);
-    assert.deepEqual(Object.keys(CONFIRM_PHRASES).sort(), ['database', 'reset', 'user']);
+    assert.deepEqual(Object.keys(CONFIRM_PHRASES).sort(), ['database', 'reset', 'target', 'user']);
     assert.equal(CONFIRM_PHRASES.database, 'LIMPAR BANCO INTEIRO');
   });
 });

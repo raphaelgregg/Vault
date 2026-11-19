@@ -18,6 +18,7 @@ import {
   limit as limitTo,
   startAfter,
   getCountFromServer,
+  collectionGroup,
   serverTimestamp,
   deleteField,
   Timestamp,
@@ -53,6 +54,20 @@ export function fromFirestoreDoc(id, data) {
     }
   }
   return out;
+}
+
+/**
+ * Consulta de GRUPO de coleções (todas as `users/{uid}/<coleção>`) — só o administrador tem regra de leitura
+ * (VF-2-03w). Retorna [{ id, uid, path }] (primeiros `max` documentos, sem filtro/índice).
+ */
+export async function listCollectionGroup(collectionName, max = 500) {
+  const snapshot = await getDocs(query(collectionGroup(db, collectionName), limitTo(max)));
+  return snapshot.docs.map((item) => ({ id: item.id, uid: item.ref.path.split('/')[1], path: item.ref.path }));
+}
+
+/** Referência de documento por caminho completo (usada na limpeza global por consulta de grupo). */
+export function docAtPath(path) {
+  return doc(db, path);
 }
 
 export function userCollection(uid, collectionName) {

@@ -6,13 +6,12 @@
 import { el, $, toast, refreshIcons } from '../core/ui.js';
 import { field, mount, emptyBlock } from '../components/form-kit.js';
 import { isMaintenanceAuthorized, CONFIRM_PHRASES } from '../utils/maintenance-config.js';
-import { clearUserData, clearWholeDatabase, auditUserClear } from '../services/maintenance.js';
+import { clearUserData, clearScope, discoverUsers, isAdminUser, SCOPES } from '../services/maintenance.js';
 import { seedFullTestSuite, MAX_VOLUME } from '../services/seed.js';
 import {
   IMPORT_ENTITIES, IMPORT_ENTITY_KEYS, MAX_IMPORT_ROWS,
   templateCsv, loadImportContext, dryRunImport, applyImport, exportCsv, exportAllCsv,
 } from '../services/importer.js';
-import { describeError } from '../utils/errors.js';
 
 export const meta = { title: 'Manutenção de dados', icon: 'wrench' };
 
@@ -56,6 +55,7 @@ export async function render(container, ctx) {
     return;
   }
 
+  const admin = await isAdminUser(user);
   const cleanLog = makeLog('clean-log');
   const seedLog = makeLog('seed-log');
   const importLog = makeLog('import-log');
@@ -67,46 +67,63 @@ export async function render(container, ctx) {
     try { await fn(); } finally { busy.delete(button); button.disabled = false; }
   };
 
-  // ---------------- Limpeza ----------------
-  const modeUser = el('input', { type: 'radio', id: 'mode-user', name: 'clean-mode', value: 'user', checked: true });
-  const modeDb = el('input', { type: 'radio', id: 'mode-db', name: 'clean-mode', value: 'database' });
-  const extraUids = el('textarea', { id: 'extra-uids', rows: 2, placeholder: 'uids de outros usuários (um por linha) — serão TENTADOS e as Rules devem negar', 'aria-label': 'uids adicionais' });
-  const cleanPhrase = el('input', { type: 'text', id: 'clean-phrase', autocomplete: 'off', placeholder: `Digite: ${CONFIRM_PHRASES.user}` });
+  // ---------------- Limpeza (escopos own | target_uid | all_users) ----------------
+  const radio = (id, value, checked = false) => el('input', { type: 'radio', id, name: 'clean-mode', value, checked });
+  const modeOwn = radio('mode-own', SCOPES.OWN, true);
+  const modeTarget = admin ? radio('mode-target', SCOPES.TARGET) : null;
+  const modeAll = admin ? radio('mode-all', SCOPES.ALL) : null;
+  const targetUid = el('input', { type: 'text', id: 'target-uid', autocomplete: 'off', placeholder: 'uid do usuário alvo' });
+  const detected = el('select', { id: 'detected-users', 'aria-label': 'Usuários detectados' }, [el('option', { value: '' }, '— usuários detectados —')]);
+  detected.addEventListener('change', () => { if (detected.value) targetUid.value = detected.value; });
+  const detectBtn = el('button', { type: 'button', id: 'btn-detect', class: 'btn btn--secondary', text: 'Detectar usuários (amostra)' });
+  const cleanPhrase = el('input', { type: 'text', id: 'clean-phrase', autocomplete: 'off' });
   const cleanBtn = el('button', { type: 'button', id: 'btn-clean', class: 'btn btn--danger', text: 'Limpar' });
-  const updatePlaceholder = () => { cleanPhrase.placeholder = `Digite: ${modeDb.checked ? CONFIRM_PHRASES.database : CONFIRM_PHRASES.user}`; };
-  modeUser.addEventListener('change', updatePlaceholder);
-  modeDb.addEventListener('change', updatePlaceholder);
+  const currentScope = () => (modeAll?.checked ? SCOPES.ALL : modeTarget?.checked ? SCOPES.TARGET : SCOPES.OWN);
+  const phraseOf = (scope) => ({ [SCOPES.OWN]: CONFIRM_PHRASES.user, [SCOPES.TARGET]: CONFIRM_PHRASES.target, [SCOPES.ALL]: CONFIRM_PHRASES.database })[scope];
+  const updatePlaceholder = () => { cleanPhrase.placeholder = `Digite: ${phraseOf(currentScope())}`; };
+  for (const r of [modeOwn, modeTarget, modeAll]) r?.addEventListener('change', updatePlaceholder);
+  updatePlaceholder();
 
   const logClear = (r) => {
-    const base = `${r.collection}: ${r.deleted} apagado(s) em ${r.batches ?? 0} lote(s)`;
-    if (r.error) cleanLog.write(`${base} — FALHA: ${r.error}${r.collection === 'auditLog' ? ' (auditLog é imutável por regra: create-only)' : ''}`, 'error');
+    const base = `${r.collection}: ${r.deleted} apagado(s) em ${r.batches ?? 0} lote(s)${r.byUid && Object.keys(r.byUid).length ? ` (usuários: ${Object.keys(r.byUid).length})` : ''}`;
+    if (r.error) cleanLog.write(`${base} — FALHA: ${r.error}${r.collection === 'auditLog' ? ' (auditLog é imutável por regra: create-only, inclusive para o administrador)' : ''}`, 'error');
     else cleanLog.write(base, 'ok');
   };
+  detectBtn?.addEventListener('click', guard(detectBtn, async () => {
+    cleanLog.write('Detectando usuários por consulta de grupo (amostra de até 500 documentos por coleção)…');
+    const res = await discoverUsers();
+    detected.replaceChildren(el('option', { value: '' }, `— ${res.users.length} usuário(s) detectado(s) —`), ...res.users.map((u) => el('option', { value: u.uid }, `${u.uid} · ${u.docs} doc(s) · ${u.collections.join(', ')}`)));
+    for (const e of res.errors) cleanLog.write(`${e.collection}: FALHA ao detectar — ${e.error}`, 'error');
+    cleanLog.write(`${res.users.length} usuário(s) detectado(s) (amostra; não existe lista oficial de usuários).`, 'ok');
+  }));
   cleanBtn.addEventListener('click', guard(cleanBtn, async () => {
-    const whole = modeDb.checked;
-    const phrase = whole ? CONFIRM_PHRASES.database : CONFIRM_PHRASES.user;
+    const scope = currentScope();
+    const phrase = phraseOf(scope);
     if (cleanPhrase.value.trim() !== phrase) { toast(`Confirmação inválida. Digite exatamente: ${phrase}`, 5000); return; }
+    const target = targetUid.value.trim();
+    if (scope === SCOPES.TARGET && !target) { toast('Informe ou selecione o uid alvo.', 4000); return; }
     cleanLog.clear();
-    cleanLog.write(`Iniciando limpeza (${whole ? 'BANCO INTEIRO' : 'usuário'}) — uid ${user.uid}`);
-    if (whole) {
-      const uids = extraUids.value.split(/\s+/).filter(Boolean);
-      const res = await clearWholeDatabase(user.uid, { extraUids: uids, onLog: (r) => (r.uid === user.uid ? logClear(r) : cleanLog.write(`${r.collection}: ${r.error ? `FALHA: ${r.error}` : 'sem erro (inesperado)'}`, r.error ? 'error' : 'info')) });
-      cleanLog.write(`Concluído: ${res.deleted} documento(s) apagado(s). Outros usuários não são enumeráveis nem acessíveis pelo cliente (Rules): limpe-os com Admin SDK/Console.`);
-    } else {
-      const res = await clearUserData(user.uid, { onLog: logClear });
-      await auditUserClear(user.uid, res).catch((e) => cleanLog.write(`auditoria-resumo não gravada: ${describeError(e)}`, 'error'));
-      cleanLog.write(`Concluído: ${res.deleted} documento(s) apagado(s); ${res.failures} coleção(ões) com falha${res.permissionDenied ? ` (${res.permissionDenied} permission-denied)` : ''}.`);
-    }
+    cleanLog.write(`Executor (adminUid): ${user.uid} · escopo: ${scope}${scope === SCOPES.TARGET ? ` · targetUid: ${target}` : ''}`);
+    const res = await clearScope({ scope, adminUid: user.uid, targetUid: target, admin, onLog: logClear });
+    if (res.error && res.deleted === undefined) { cleanLog.write(`Recusado: ${res.error}`, 'error'); return; }
+    cleanLog.write(`Concluído [${res.scope}]${res.targetUid ? ` alvo ${res.targetUid}` : ''}: ${res.deleted} documento(s) apagado(s); ${res.failures} coleção(ões) com falha${res.permissionDenied ? ` (${res.permissionDenied} permission-denied)` : ''}.`, res.failures ? 'error' : 'ok');
+    if (res.byUid) cleanLog.write(`Por usuário: ${Object.entries(res.byUid).map(([u, n]) => `${u}=${n}`).join(', ') || 'nenhum documento encontrado'}`);
+    cleanLog.write(res.auditError ? `Auditoria-resumo NÃO gravada: ${res.auditError}` : 'Auditoria-resumo gravada no log do executor.', res.auditError ? 'error' : 'info');
     cleanPhrase.value = '';
   }));
 
   const cleanPanel = el('section', { class: 'panel', id: 'panel-clean' }, [
     el('div', { class: 'panel__header' }, [el('h2', { text: 'Limpeza' })]),
     el('div', { class: 'panel__body' }, [
-      el('p', { class: 'notice', role: 'alert', text: `Apaga dados REAIS do Firestore. Escopo: usuário autenticado (uid ${user.uid}).` }),
-      el('label', {}, [modeUser, ' Meu usuário — apaga as coleções de domínio e tenta auditLog']),
-      el('label', {}, [modeDb, ' Banco inteiro — meu usuário + tentativa nos uids informados (as Rules bloqueiam outros usuários)']),
-      field('uids adicionais (modo banco inteiro)', 'extra-uids', extraUids),
+      el('p', { class: 'notice', role: 'alert', text: `Apaga dados REAIS do Firestore. Executor: ${user.uid}${admin ? ' (ADMINISTRADOR — claim admin ativa)' : ''}.` }),
+      el('label', {}, [modeOwn, ' Limpar meus dados — só o meu uid (coleções de domínio; tenta auditLog, que é imutável)']),
+      ...(admin
+        ? [
+          el('label', {}, [modeTarget, ' Limpar usuário específico (admin) — sem entrar na conta dele']),
+          el('div', { id: 'admin-target', class: 'form__row' }, [field('uid alvo', 'target-uid', targetUid), field('Usuários detectados', 'detected-users', detected), detectBtn]),
+          el('label', {}, [modeAll, ' Limpar banco inteiro — TODOS os usuários (admin)']),
+        ]
+        : [el('p', { class: 'card__hint', id: 'admin-unavailable', text: 'Escopos administrativos (usuário específico / todos os usuários) indisponíveis: seu token não tem a claim admin. Configure-a pelo Admin SDK (ver PLAN.md, VF-2-03w).' })]),
       field('Confirmação digitada *', 'clean-phrase', cleanPhrase),
       cleanBtn,
       cleanLog.box,

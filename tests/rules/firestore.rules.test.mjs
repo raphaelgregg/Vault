@@ -32,6 +32,10 @@ import {
   collection,
   addDoc,
   writeBatch,
+  collectionGroup,
+  getDocs,
+  query,
+  limit,
 } from 'firebase/firestore';
 import { serverTimestamp, deleteField } from 'firebase/firestore';
 
@@ -277,6 +281,75 @@ describe('Operações válidas', () => {
         expensePayload({ accountId: 'acc-main' }) // pertence a Alice
       )
     );
+  });
+});
+
+describe('Separação de privilégios: usuário comum × administrador (VF-2-03w)', () => {
+  const ADMIN = 'root-uid';
+  const asAdmin = () => testEnv.authenticatedContext(ADMIN, { admin: true }).firestore();
+  const accountOf = (db, uid, id) => doc(db, 'users', uid, 'accounts', id);
+  const DOMAIN = ['accounts', 'categories', 'incomes', 'expenses', 'transfers', 'subscriptions', 'debtors', 'debts', 'debtPayments', 'goals', 'goalTransactions', 'creditCards', 'cardPurchases', 'invoices', 'budgets'];
+
+  it('(a) usuário comum NÃO apaga, lê nem lista dados de outro uid (permission-denied)', async () => {
+    const alice = asUser(ALICE);
+    await assertFails(deleteDoc(accountOf(alice, BOB, 'acc-bob')));
+    await assertFails(getDoc(accountOf(alice, BOB, 'acc-bob')));
+    await assertFails(getDocs(collection(alice, 'users', BOB, 'accounts')));
+    await assertFails(writeBatch(alice).delete(accountOf(alice, BOB, 'acc-bob')).commit());
+    // ...mas apaga o PRÓPRIO
+    await assertSucceeds(deleteDoc(accountOf(alice, ALICE, 'acc-main2')));
+    // e não executa limpeza global (consulta de grupo) nem se declarar admin no cliente
+    await assertFails(getDocs(query(collectionGroup(alice, 'accounts'), limit(10))));
+  });
+
+  it('claim admin ausente, falsa ou textual não concede poder (só `admin == true` booleano)', async () => {
+    for (const claims of [{}, { admin: false }, { admin: 'true' }, { admin: 1 }, { role: 'admin' }]) {
+      const db = testEnv.authenticatedContext('x-uid', claims).firestore();
+      await assertFails(deleteDoc(accountOf(db, BOB, 'acc-bob')));
+      await assertFails(getDoc(accountOf(db, BOB, 'acc-bob')));
+    }
+    await assertFails(deleteDoc(accountOf(testEnv.unauthenticatedContext().firestore(), BOB, 'acc-bob')));
+  });
+
+  it('(b) administrador apaga os dados de um uid específico (sem a conta dele), em lote e documento a documento', async () => {
+    const admin = asAdmin();
+    const snap = await assertSucceeds(getDocs(collection(admin, 'users', BOB, 'accounts'))); // leitura necessária para listar o que apagar
+    assert.equal(snap.size, 1);
+    await assertSucceeds(deleteDoc(accountOf(admin, BOB, 'acc-bob')));
+    const afterwards = await getDocs(collection(testEnv.authenticatedContext(BOB).firestore(), 'users', BOB, 'accounts'));
+    assert.equal(afterwards.size, 0);
+    // lote de exclusão em várias coleções do domínio
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const adminDb = ctx.firestore();
+      for (const c of DOMAIN) await setDoc(doc(adminDb, 'users', BOB, c, 'seed'), { x: 1 });
+    });
+    const batch = writeBatch(admin);
+    for (const c of DOMAIN) batch.delete(doc(admin, 'users', BOB, c, 'seed'));
+    await assertSucceeds(batch.commit());
+  });
+
+  it('administrador executa limpeza global: consulta de grupo lê docs de todos os usuários e apaga', async () => {
+    const admin = asAdmin();
+    const found = await assertSucceeds(getDocs(query(collectionGroup(admin, 'accounts'), limit(50))));
+    assert.ok(found.docs.some((d) => d.ref.path.startsWith(`users/${ALICE}/`)) && found.docs.some((d) => d.ref.path.startsWith(`users/${BOB}/`)));
+    const batch = writeBatch(admin);
+    found.docs.forEach((d) => batch.delete(d.ref));
+    await assertSucceeds(batch.commit());
+    assert.equal((await getDocs(query(collectionGroup(admin, 'accounts'), limit(50)))).size, 0);
+  });
+
+  it('poderes do administrador são MÍNIMOS: não cria, não edita, não toca perfil/configurações e nunca apaga auditLog', async () => {
+    const admin = asAdmin();
+    await assertFails(setDoc(accountOf(admin, BOB, 'novo'), { ...account, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(accountOf(admin, BOB, 'acc-bob'), { name: 'x', updatedAt: serverTimestamp() }));
+    await assertFails(getDoc(doc(admin, 'users', BOB, 'profile', 'main')));
+    await assertFails(deleteDoc(doc(admin, 'users', BOB, 'settings', 'main')));
+    await assertFails(getDoc(doc(admin, 'users', ALICE, 'auditLog', 'entry-1')));
+    await assertFails(deleteDoc(doc(admin, 'users', ALICE, 'auditLog', 'entry-1'))); // auditoria imutável também para o admin
+    await assertFails(getDocs(query(collectionGroup(admin, 'auditLog'), limit(5))));
+    // o admin grava auditoria só no PRÓPRIO log (create-only), como qualquer usuário
+    await assertSucceeds(addDoc(collection(admin, 'users', ADMIN, 'auditLog'), { action: 'maintenance_clear_all_users', entity: 'maintenance', entityId: 'all', actorUid: ADMIN, createdAt: serverTimestamp() }));
+    await assertFails(addDoc(collection(admin, 'users', BOB, 'auditLog'), { action: 'x', entity: 'x', entityId: 'x', actorUid: ADMIN, createdAt: serverTimestamp() }));
   });
 });
 
