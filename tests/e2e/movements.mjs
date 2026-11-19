@@ -289,6 +289,27 @@ try {
   assert.equal(edited.accountId, alelo.id, 'edição preserva o vínculo');
   console.info('  payload persistido:', JSON.stringify(Object.keys(edited).sort()));
 
+  log('transferências: confirmada de conta sem saldo é bloqueada; pendente é aceita e a confirmação também é bloqueada');
+  await go('transferencias');
+  const transferFromEmpty = async (status, reason) => {
+    await page.getByRole('button', { name: 'Nova transferência' }).click();
+    await page.selectOption('#fromAccountId', alelo.id); // conta vazia (saldo 0)
+    await page.selectOption('#toAccountId', accounts['Conta A']);
+    await page.fill('#amountCents', '10,00');
+    await page.fill('#reason', reason);
+    await page.selectOption('#status', status);
+    await page.locator('#transfer-form button[type="submit"]').click();
+  };
+  await transferFromEmpty('confirmed', 'Sem saldo UI');
+  await page.waitForFunction(() => /Saldo insuficiente em Alelo Pod: disponível R\$ 0,00/.test(document.querySelector('#transfer-form')?.innerText ?? ''));
+  await page.getByRole('button', { name: /Cancelar|Fechar/ }).first().click().catch(() => {});
+  const leaked = await page.evaluate(async () => {
+    const { listTransfers } = await import('/js/services/transfers.js');
+    const { auth } = await import('/js/firebase/client.js');
+    return (await listTransfers(auth.currentUser.uid)).some((t) => t.reason === 'Sem saldo UI');
+  });
+  assert.equal(leaked, false, 'transferência sem saldo não pode ser gravada');
+
   assert.deepEqual(app.problems, [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E movimentos OK');
 } catch (error) {

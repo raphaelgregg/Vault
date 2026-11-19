@@ -10,7 +10,8 @@ import {
   updateAudited,
   removeAudited,
 } from './firestore.js';
-import { buildEntity, formatCents, parseMoneyToCents } from '../core/model.js';
+import { buildEntity, formatCents, parseMoneyToCents, accountLabel } from '../core/model.js';
+import { loadBalances } from './balances.js';
 
 const COLLECTION = COLLECTIONS.transfers;
 
@@ -30,12 +31,46 @@ export async function getTransfer(uid, transferId) {
 }
 
 /**
+ * Saldo suficiente na conta de origem? A transferência só move dinheiro ao ser CONFIRMADA (saldo derivado:
+ * `accountBalances`), então a checagem vale para status `confirmed` (criar, editar ou confirmar). Retorna
+ * `null` se ok, ou { ok:false, errors:{ [field]: msg } }. `creditCents` = valor desta mesma transferência já
+ * debitado no saldo (edição de uma confirmada), devolvido antes de comparar. Fail-closed se não der para
+ * ler conta/movimentos. `io.getById`/`io.list` injetáveis.
+ * LIMITAÇÃO: checagem client-side (janela de concorrência entre leitura e gravação, como nas demais
+ * verificações); o saldo lê até READ_LIMIT movimentos por coleção (ver services/balances.js).
+ */
+export async function checkSufficientBalance(uid, fromAccountId, amountCents, { creditCents = 0, field = 'fromAccountId' } = {}, io = {}) {
+  try {
+    const account = await (io.getById ?? getById)(uid, COLLECTIONS.accounts, fromAccountId);
+    if (!account) return { ok: false, errors: { [field]: 'Conta de origem não encontrada.' } };
+    const { balances } = await loadBalances(uid, [account], io.list ? { list: io.list } : {});
+    const available = (balances.get(account.id) ?? 0) + creditCents;
+    if (available < amountCents) {
+      return {
+        ok: false,
+        errors: { [field]: `Saldo insuficiente em ${accountLabel(account)}: disponível ${formatCents(available)}, transferência de ${formatCents(amountCents)}.` },
+      };
+    }
+    return null;
+  } catch (error) {
+    console.error('[transfers] falha ao verificar saldo', error);
+    return { ok: false, errors: { [field]: 'Não foi possível verificar o saldo da conta de origem. A transferência não foi registrada; tente novamente.' } };
+  }
+}
+
+/**
  * Cria uma nova transferência.
- * Retorna { ok, id, errors }.
+ * Transferência já `confirmed` exige saldo suficiente na origem; `pending` não move dinheiro (a checagem
+ * acontece ao confirmar). Retorna { ok, id, errors }.
  */
 export async function createTransfer(uid, rawData, io = {}) {
   const { ok, data, errors } = buildEntity('transfers', rawData);
   if (!ok) return { ok: false, errors };
+
+  if (data.status === 'confirmed') {
+    const blocked = await checkSufficientBalance(uid, data.fromAccountId, data.amountCents, {}, io);
+    if (blocked) return blocked;
+  }
 
   const id = await createAudited(uid, COLLECTION, data, io);
   return { ok: true, id };
@@ -48,6 +83,14 @@ export async function createTransfer(uid, rawData, io = {}) {
 export async function updateTransfer(uid, transferId, rawData, io = {}) {
   const { ok, data, errors } = buildEntity('transfers', rawData);
   if (!ok) return { ok: false, errors };
+
+  if (data.status === 'confirmed') {
+    // Se já estava confirmada na mesma origem, o valor antigo já está debitado: devolve-o antes de comparar.
+    const before = await (io.getById ?? getById)(uid, COLLECTION, transferId);
+    const creditCents = before?.status === 'confirmed' && before.fromAccountId === data.fromAccountId ? Number(before.amountCents) || 0 : 0;
+    const blocked = await checkSufficientBalance(uid, data.fromAccountId, data.amountCents, { creditCents }, io);
+    if (blocked) return blocked;
+  }
 
   await updateAudited(uid, COLLECTION, transferId, data, io);
   return { ok: true };
@@ -113,6 +156,8 @@ async function transitionTransfer(uid, transferId, nextStatus, action, io = {}) 
           errors: { _form: 'Conta de origem ou destino não existe mais; não é possível confirmar.' },
         };
       }
+      const blocked = await checkSufficientBalance(uid, transfer.fromAccountId, Number(transfer.amountCents) || 0, {}, io);
+      if (blocked) return { ok: false, errors: { _form: blocked.errors.fromAccountId } };
     } catch (error) {
       console.error('[transfers] falha ao verificar contas', error);
       return {

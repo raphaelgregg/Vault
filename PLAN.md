@@ -245,6 +245,12 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Arquivos: `firestore.rules`, `js/core/model.js`, `js/core/importSchema.js`, `js/services/accounts.js`, `js/modules/{bancos,receitas,despesas,assinaturas,metas,transferencias,cartoes,devedores-parcelas}.js`, testes (`account-reference`, rules, `e2e/movements`).
 - Limitação: Rules do repositório não verificadas contra as publicadas; sem republicar, criar conta sem nome dá `permission-denied` em produção.
 
+- [x] **VF-2-03af — Transferência exige saldo suficiente na origem** (integridade) — CONCLUÍDA 2026-11-19 (**`firestore.rules` NÃO alterado**).
+- Problema [C]: `createTransfer`/`updateTransfer`/`confirmTransfer` não consultavam o saldo; transferências `confirmed` saíam de contas sem dinheiro (saldo negativo).
+- Solução: `checkSufficientBalance` (`js/services/transfers.js`) compara o saldo derivado (`loadBalances`) com o valor; aplicada ao criar/editar com status `confirmed` e ao confirmar uma pendente (edição de confirmada devolve o valor antigo antes de comparar). Pendente/cancelada não move dinheiro e não exige saldo. Fail-closed se a leitura falhar. Cobre também a importação CSV (usa `createTransfer`).
+- Limitações: checagem client-side (janela de concorrência; Rules não calculam saldo); saldo lê até 1000 movimentos por coleção (`READ_LIMIT`); outros débitos (despesa paga, aporte em meta, pagamento de fatura) não validam saldo — fora do escopo.
+- Arquivos: `js/services/transfers.js`, `tests/services/transfers.test.mjs`, `tests/e2e/movements.mjs`.
+
 ### Fase 3 — Arquitetura, qualidade e refatoração
 
 - [x] **VF-3-01 — Reduzir duplicação nos services** (Médio) — CONCLUÍDA 2026-11-18: extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
@@ -315,3 +321,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-19 — VF-2-03ac concluída (CSV unificado, escopo estrito ao uid, importação idempotente com mesclagem). Promovida para development e main.
 - 2026-11-19 — VF-2-03ad concluída (CSV: `conta` só com o nome + coluna `instituicao`; resolução sem ambiguidade; export/reimport sem perda de vínculo). Sem mudança em Rules/índices/modelo de dados.
 - 2026-11-19 — VF-2-03ae concluída (conta sem nome, `accountLabel` único nos selects). **Republicar `firestore.rules`** (`npx firebase deploy --only firestore:rules`, com autorização).
+- 2026-11-19 — VF-2-03af concluída (transferência bloqueada sem saldo na origem). Sem mudança em Rules/índices.
