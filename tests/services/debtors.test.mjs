@@ -156,12 +156,12 @@ describe('debtors — service', () => {
     }
   });
 
-  it('delete: sem vínculos remove e audita com before; consulta debts e debtPayments por debtorId', async () => {
+  it('delete: sem vínculos remove e audita com before; consulta debts, debtPayments e cardPurchases por debtorId', async () => {
     const doc = { id: 'd1', name: 'João', status: 'open' };
     const { io, calls } = makeIo(doc);
     const r = await deleteDebtor(uid, 'd1', io);
     assert.equal(r.ok, true);
-    assert.deepEqual(calls.count.map((c) => c.c).sort(), ['debtPayments', 'debts']);
+    assert.deepEqual(calls.count.map((c) => c.c).sort(), ['cardPurchases', 'debtPayments', 'debts']);
     assert.deepEqual(calls.count[0].opts, { where: [['debtorId', '==', 'd1']] });
     assert.equal(calls.remove.length, 1);
     assert.deepEqual(calls.audit[0].entry, { action: 'delete', collection: 'debtors', docId: 'd1', before: doc });

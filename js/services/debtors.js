@@ -19,6 +19,7 @@ import {
   centsToMoneyString,
   DEBTOR_STATUSES,
   debtorPendingCents,
+  debtorOverview,
   summarizeDebtors,
   formatCents,
   parseMoneyToCents,
@@ -30,6 +31,7 @@ const COLLECTION = COLLECTIONS.debtors;
 export const DEBTOR_LINK_QUERIES = Object.freeze([
   { collection: COLLECTIONS.debts, field: 'debtorId', label: 'dívidas (parcelas)' },
   { collection: COLLECTIONS.debtPayments, field: 'debtorId', label: 'recebimentos' },
+  { collection: COLLECTIONS.cardPurchases, field: 'debtorId', label: 'compras no cartão' },
 ]);
 
 /** Cancelar e reabrir apenas; `paid` só nasce de recebimentos. */
@@ -49,6 +51,13 @@ export async function listDebtors(uid, options = {}) {
 
 export async function getDebtor(uid, debtorId) {
   return getById(uid, COLLECTION, debtorId);
+}
+
+/** Visão consolidada por origem (empréstimo × cartão) com as compras vinculadas (VF-2-03i). */
+export async function getDebtorOverview(uid, debtor, io = {}) {
+  const purchases = await (io.list ?? list)(uid, COLLECTIONS.cardPurchases, { where: [['debtorId', '==', debtor.id]] });
+  purchases.sort((a, b) => (a.purchaseDate < b.purchaseDate ? 1 : -1));
+  return { ...debtorOverview(debtor, purchases), cardPurchases: purchases };
 }
 
 /** Retorna { ok, id, errors }. `deps` (create, writeAudit) é injetável. */

@@ -259,6 +259,8 @@ export const SCHEMAS = Object.freeze({
       installmentNumber: intRange(1, 48),
       categoryId: refField(false, ['expense', 'both']),
       invoiceId: refField(false),
+      // Compra de cartão feita para um devedor (VF-2-03i): soma ao valor emprestado dele.
+      debtorId: refField(false),
       notes: optionalText(300),
     },
   },
@@ -300,7 +302,7 @@ export const REF_FIELDS = Object.freeze({
   debtors: [],
   budgets: ['categoryId'],
   creditCards: ['accountId'],
-  cardPurchases: ['cardId', 'categoryId', 'invoiceId'],
+  cardPurchases: ['cardId', 'categoryId', 'invoiceId', 'debtorId'],
   invoices: ['cardId'],
   goals: ['accountId'],
   goalTransactions: ['goalId', 'accountId'],
@@ -618,6 +620,28 @@ export function debtorPendingCents(debtor) {
   const received = Number(debtor?.receivedCents) || 0;
   if (!Number.isInteger(lent)) return 0;
   return Math.max(0, lent - received);
+}
+
+/**
+ * Visão consolidada de um devedor por origem (VF-2-03i). `lentCents` já inclui as compras de
+ * cartão vinculadas (o service soma ao lançar); aqui só se separa: cartão = soma das parcelas
+ * vinculadas (limitada ao emprestado), empréstimo = restante. O recebido não é atribuído por origem.
+ * Retorna { lentCents, receivedCents, pendingCents, cardCents, loanCents, cardCount }.
+ */
+export function debtorOverview(debtor, cardPurchases = []) {
+  const lentCents = Number(debtor?.lentCents) || 0;
+  const receivedCents = Number(debtor?.receivedCents) || 0;
+  let cardCents = 0;
+  for (const p of cardPurchases) cardCents += Number(p?.amountCents) || 0;
+  cardCents = Math.min(cardCents, lentCents);
+  return {
+    lentCents,
+    receivedCents,
+    pendingCents: debtorPendingCents(debtor),
+    cardCents,
+    loanCents: lentCents - cardCents,
+    cardCount: cardPurchases.length,
+  };
 }
 
 /**

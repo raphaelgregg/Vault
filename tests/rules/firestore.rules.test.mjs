@@ -769,6 +769,20 @@ describe('Cartões, compras e faturas (VF-2-03d)', () => {
     await assertFails(batch.commit());
   });
 
+  it('compra para devedor (VF-2-03i): parcelas com debtorId + lentCents do devedor no MESMO lote; nega devedor inexistente', async () => {
+    const db = await seed();
+    const dev = doc(db, 'users', ALICE, 'debtors', 'dev1');
+    await assertSucceeds(setDoc(dev, { name: 'João', loanDate: noon('2026-11-10'), lentCents: 100000, receivedCents: 20000, status: 'open', ...stamps() }));
+    await assertSucceeds(setDoc(invDoc(db), invoice()));
+    const batch = writeBatch(db);
+    batch.set(buyDoc(db, 'p1'), purchase({ debtorId: 'dev1' }));
+    batch.set(buyDoc(db, 'p2'), purchase({ debtorId: 'dev1', installmentNumber: 2 }));
+    batch.update(dev, { lentCents: 130000, updatedAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+    await assertFails(setDoc(buyDoc(db, 'p3'), purchase({ debtorId: 'zzz' })));
+    await assertFails(setDoc(buyDoc(db, 'p4'), purchase({ debtorId: 5 })));
+  });
+
   it('lote de parcelas falha inteiro se uma parcela é inválida (nada gravado)', async () => {
     const db = await seed();
     await assertSucceeds(setDoc(invDoc(db), invoice()));

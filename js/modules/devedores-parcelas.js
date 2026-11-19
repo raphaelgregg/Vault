@@ -13,7 +13,7 @@ import {
   listDebts, listDebtPayments, createDebt, cancelDebt, registerDebtPayment, formatCents,
 } from '../services/debtPayments.js';
 import { debtorPendingCents } from '../core/model.js';
-import { getDebtor } from '../services/debtors.js';
+import { getDebtor, getDebtorOverview } from '../services/debtors.js';
 import { listAccounts } from '../services/accounts.js';
 
 const STATUS_LABELS = { pending: 'Pendente', paid: 'Paga', late: 'Atrasada', cancelled: 'Cancelada' };
@@ -27,10 +27,11 @@ export function displayDebtStatus(debt, today = todayIso()) {
  * @param {{ user: {uid:string}, debtor: object, onChange: () => Promise<void> }} ctx
  */
 export async function openDebtorInstallments({ user, debtor, onChange }) {
-  const [debts, payments, accounts] = await Promise.all([
+  const [debts, payments, accounts, overview] = await Promise.all([
     listDebts(user.uid, debtor.id),
     listDebtPayments(user.uid, { where: [['debtorId', '==', debtor.id]] }),
     listAccounts(user.uid),
+    getDebtorOverview(user.uid, debtor),
   ]);
   debts.sort((a, b) => a.installmentNumber - b.installmentNumber);
   const receivedBy = new Map();
@@ -119,10 +120,25 @@ export async function openDebtorInstallments({ user, debtor, onChange }) {
     })
     : emptyBlock('list-checks', 'Sem parcelas', 'Crie parcelas para acompanhar os vencimentos e registrar recebimentos.');
 
+  // Débitos consolidados por origem (VF-2-03i): empréstimo direto × compras no cartão vinculadas.
+  const originTable = overview.cardPurchases.length
+    ? dataTable({
+      columns: [
+        { key: 'purchaseDate', label: 'Data', render: (v) => formatDate(v) },
+        { key: 'description', label: 'Compra no cartão' },
+        { key: 'installmentNumber', label: 'Parcela', render: (v, p) => `${v}/${p.installmentsTotal}` },
+        { key: 'amountCents', label: 'Valor', numeric: true, render: (v) => formatCents(v) },
+      ],
+      rows: overview.cardPurchases,
+    })
+    : null;
+
   openModal({
     title: `Parcelas — ${debtor.name}`,
     body: el('div', {}, [
       el('p', { class: 'card__hint', text: `Emprestado ${formatCents(debtor.lentCents)} · recebido ${formatCents(debtor.receivedCents ?? 0)} · pendente ${formatCents(debtorPendingCents(debtor))}${isOpen ? '' : ' (devedor não está em aberto: somente consulta)'}` }),
+      el('p', { class: 'card__hint', text: `Por origem: empréstimo ${formatCents(overview.loanCents)} · cartão de crédito ${formatCents(overview.cardCents)} (${overview.cardCount} parcela(s) vinculada(s)). O recebido é abatido do total, sem atribuição por origem.` }),
+      originTable,
       isOpen ? el('button', { type: 'button', class: 'btn btn--primary', onClick: openCreate, text: 'Nova parcela' }) : null,
       table,
     ]),

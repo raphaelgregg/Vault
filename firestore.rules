@@ -378,7 +378,7 @@ service cloud.firestore {
       allow read: if isOwner(userId);
       allow create, update: if isOwner(userId)
         && keysOk(['cardId', 'description', 'amountCents', 'purchaseDate', 'installmentsTotal',
-                   'installmentNumber', 'categoryId', 'invoiceId', 'notes',
+                   'installmentNumber', 'categoryId', 'invoiceId', 'debtorId', 'notes',
                    'createdAt', 'updatedAt'])
         && requiredOk(['cardId', 'description', 'amountCents', 'purchaseDate',
                        'installmentsTotal', 'installmentNumber', 'createdAt', 'updatedAt'])
@@ -393,6 +393,7 @@ service cloud.firestore {
         && data().installmentNumber <= data().installmentsTotal
         && optionalRef(userId, 'categories', 'categoryId')
         && optionalRef(userId, 'invoices', 'invoiceId')
+        && optionalRef(userId, 'debtors', 'debtorId')
         && optionalString('notes', 300)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));

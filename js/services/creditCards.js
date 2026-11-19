@@ -176,6 +176,14 @@ export async function registerCardPurchase(uid, cardId, rawData, io = {}) {
     if (!check.ok) return check;
   }
 
+  // Compra feita para um devedor (VF-2-03i): devedor em aberto; o valor soma ao emprestado dele.
+  let debtor = null;
+  if (probe.data.debtorId) {
+    debtor = await fetch(uid, COLLECTIONS.debtors, probe.data.debtorId);
+    if (!debtor) return { ok: false, errors: { debtorId: 'Devedor não encontrado.' } };
+    if (debtor.status !== 'open') return { ok: false, errors: { debtorId: 'Só é possível vincular a devedor em aberto.' } };
+  }
+
   const { invoices, availableCents } = await usageOf(uid, card, io);
   if (probe.data.amountCents > availableCents) {
     return { ok: false, errors: { amountCents: `O valor excede o limite disponível (${formatCents(availableCents)}).` } };
@@ -213,8 +221,15 @@ export async function registerCardPurchase(uid, cardId, rawData, io = {}) {
   // (todas atômicas entre si). Falha no 2º deixa faturas abertas vazias, reaproveitadas depois.
   const commit = io.commitAtomic ?? commitAtomic;
   if (invoiceOps.length) await commit(uid, invoiceOps, io);
+  // O devedor é atualizado no MESMO lote das parcelas (atômico): lentCents += total da compra.
+  if (debtor) {
+    purchaseOps.push({
+      type: 'update', collection: COLLECTIONS.debtors, docId: probe.data.debtorId, action: 'card-purchase',
+      data: { lentCents: (Number(debtor.lentCents) || 0) + probe.data.amountCents },
+    });
+  }
   const ids = await commit(uid, purchaseOps, io);
-  return { ok: true, ids, invoiceMonths: [...new Set(purchaseOps.map((o) => o.data.invoiceId))] };
+  return { ok: true, ids, invoiceMonths: [...new Set(purchaseOps.filter((o) => o.collection === PURCHASES).map((o) => o.data.invoiceId))] };
 }
 
 /** Exclui parcela de compra só se a fatura estiver aberta (ou sem fatura). */
@@ -222,6 +237,10 @@ export async function deleteCardPurchase(uid, purchaseId, io = {}) {
   const fetch = io.getById ?? getById;
   const purchase = await fetch(uid, PURCHASES, purchaseId);
   if (!purchase) return { ok: false, errors: { _form: 'Compra não encontrada.' } };
+  if (purchase.debtorId) {
+    // Excluir exigiria estornar o emprestado do devedor (possivelmente já recebido): bloqueado.
+    return { ok: false, errors: { _form: 'Esta compra está vinculada a um devedor e não pode ser excluída.' } };
+  }
   if (purchase.invoiceId) {
     const invoice = await fetch(uid, INVOICES, purchase.invoiceId);
     if (invoice && invoice.status !== 'open') {

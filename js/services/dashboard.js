@@ -26,38 +26,59 @@ export function todayParts(now = new Date()) {
   return { today: iso, month: iso.slice(0, 7) };
 }
 
-/** Retorna { totalBalanceCents, month, result, upcoming, budgets, debtors, truncated, accountCount }. */
+/** Fontes de dados do dashboard; `failed` lista as que falharam (isoladas: uma falha não derruba as demais). */
+export const DASHBOARD_SOURCES = Object.freeze(['accounts', 'movements', 'pendingExpenses', 'subscriptions', 'invoices', 'debtors', 'budgets']);
+
+/**
+ * Retorna { totalBalanceCents, month, result, upcoming, budgets, debtors, truncated, accountCount, failed }.
+ * Fonte que falha → campo `null` (saldo/resultado/orçamentos/devedores) ou ausente de `upcoming`, e a
+ * fonte entra em `failed` (a UI mostra aviso explícito). Coleção vazia não é falha (zeros).
+ */
 export async function loadDashboard(uid, io = {}) {
   const fetchList = io.list ?? list;
   const { today, month } = todayParts(io.now ? io.now() : new Date());
   const capped = (collection, extra = {}) => fetchList(uid, collection, { limit: READ_LIMIT, ...extra });
+  const failed = [];
+  const attempt = async (source, fn, fallback) => {
+    try {
+      return await fn();
+    } catch (error) {
+      console.error(`[dashboard] falha na fonte "${source}"`, error);
+      failed.push(source);
+      return fallback;
+    }
+  };
 
-  const accounts = await fetchList(uid, COLLECTIONS.accounts, {});
-  const { balances, movements, truncated } = await loadBalances(uid, accounts, { list: fetchList });
-  const { incomes, expenses } = movements;
-  const [pendingExpenses, subscriptions, invoices, debtors, budgets] = await Promise.all([
-    fetchList(uid, COLLECTIONS.expenses, {
+  const [accounts, pendingExpenses, subscriptions, invoices, debtors, budgets] = await Promise.all([
+    attempt('accounts', () => fetchList(uid, COLLECTIONS.accounts, {}), null),
+    attempt('pendingExpenses', () => fetchList(uid, COLLECTIONS.expenses, {
       where: [['status', '==', 'pending'], ['dueDate', '>=', today]], orderBy: ['dueDate', 'asc'], limit: SHORT_LIMIT,
-    }),
-    fetchList(uid, COLLECTIONS.subscriptions, {
+    }), []),
+    attempt('subscriptions', () => fetchList(uid, COLLECTIONS.subscriptions, {
       where: [['status', '==', 'active']], orderBy: ['nextChargeDate', 'asc'], limit: SHORT_LIMIT,
-    }),
-    fetchList(uid, COLLECTIONS.invoices, {
+    }), []),
+    attempt('invoices', () => fetchList(uid, COLLECTIONS.invoices, {
       where: [['status', '==', 'closed']], orderBy: ['dueDate', 'asc'], limit: SHORT_LIMIT,
-    }),
-    capped(COLLECTIONS.debtors),
-    getBudgetProgress(uid, month, { list: fetchList }),
+    }), []),
+    attempt('debtors', () => capped(COLLECTIONS.debtors), null),
+    attempt('budgets', () => getBudgetProgress(uid, month, { list: fetchList }), null),
   ]);
+
+  // Saldo/resultado dependem das contas E dos movimentos realizados; sem um deles ficam indisponíveis (null).
+  const loaded = accounts
+    ? await attempt('movements', () => loadBalances(uid, accounts, { list: fetchList }), null)
+    : null;
 
   return {
     month,
-    accountCount: accounts.filter((a) => a.status === 'active').length,
-    totalBalanceCents: totalBalanceCents(accounts, balances),
-    result: monthResult(incomes, expenses, month),
+    accountCount: accounts ? accounts.filter((a) => a.status === 'active').length : null,
+    totalBalanceCents: loaded ? totalBalanceCents(accounts, loaded.balances) : null,
+    result: loaded ? monthResult(loaded.movements.incomes, loaded.movements.expenses, month) : null,
     upcoming: upcomingDue({ expenses: pendingExpenses, subscriptions, invoices, today }),
-    budgets: budgets.summary,
-    debtors: summarizeDebtors(debtors),
-    truncated: [...truncated, ...(budgets.truncated ? ['budgetExpenses'] : [])],
+    budgets: budgets ? budgets.summary : null,
+    debtors: debtors ? summarizeDebtors(debtors) : null,
+    truncated: [...(loaded?.truncated ?? []), ...(budgets?.truncated ? ['budgetExpenses'] : [])],
+    failed,
   };
 }
 

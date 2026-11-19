@@ -46,7 +46,7 @@ describe('schemas (espelham as Rules)', () => {
   it('chaves, enums e datas', () => {
     assert.deepEqual(Object.keys(SCHEMAS.creditCards.fields).sort(), ['accountId', 'brand', 'closingDay', 'color', 'dueDay', 'limitCents', 'name', 'status']);
     assert.deepEqual(Object.keys(SCHEMAS.cardPurchases.fields).sort(),
-      ['amountCents', 'cardId', 'categoryId', 'description', 'installmentNumber', 'installmentsTotal', 'invoiceId', 'notes', 'purchaseDate']);
+      ['amountCents', 'cardId', 'categoryId', 'debtorId', 'description', 'installmentNumber', 'installmentsTotal', 'invoiceId', 'notes', 'purchaseDate']);
     assert.deepEqual(Object.keys(SCHEMAS.invoices.fields).sort(), ['cardId', 'closingDate', 'dueDate', 'paidCents', 'referenceMonth', 'status', 'totalCents']);
     assert.deepEqual(SCHEMAS.invoices.dateFields, ['closingDate', 'dueDate']);
     assert.deepEqual(getCardStatusOptions().map((o) => o.value), ['active', 'blocked', 'cancelled']);

@@ -27,6 +27,7 @@ import {
 } from '../services/creditCards.js';
 import { listAccounts } from '../services/accounts.js';
 import { listCategories } from '../services/categories.js';
+import { listDebtors } from '../services/debtors.js';
 import { invoiceTotalCents } from '../core/model.js';
 
 export const meta = { title: 'Cartões', icon: 'credit-card' };
@@ -37,11 +38,17 @@ let cards = [];
 let usage = new Map();
 let accounts = [];
 let categories = [];
+let openDebtors = [];
 
 export async function render(target, ctx) {
   user = ctx.user;
   container = target;
   [accounts, categories] = await Promise.all([listAccounts(user.uid), listCategories(user.uid)]);
+  // Devedores em aberto (vínculo opcional na compra); falha aqui não impede a tela.
+  openDebtors = await listDebtors(user.uid, { where: [['status', '==', 'open']] }).catch((error) => {
+    console.error('[cartoes] falha ao listar devedores', error);
+    return [];
+  });
   await reload();
 }
 
@@ -171,12 +178,17 @@ function openPurchaseModal(card) {
       ]),
       field('Data da compra *', 'purchaseDate', el('input', { type: 'date', id: 'purchaseDate', name: 'purchaseDate', value: new Date().toISOString().slice(0, 10) })),
       field('Categoria', 'categoryId', el('select', { id: 'categoryId', name: 'categoryId' }, [el('option', { value: '' }, 'Sem categoria'), ...selectOptions(expenseCats, '')])),
+      field('Devedor (opcional)', 'debtorId', el('select', { id: 'debtorId', name: 'debtorId' }, [
+        el('option', { value: '' }, 'Compra minha'),
+        ...selectOptions(openDebtors.map((x) => ({ value: x.id, label: x.name })), ''),
+      ])),
+      el('p', { class: 'card__hint', text: 'Ao vincular a um devedor, o total da compra é somado ao valor emprestado dele.' }),
       field('Observações', 'notes', el('textarea', { id: 'notes', name: 'notes', maxlength: 300, rows: 2 })),
     ],
     submit: (d) => registerCardPurchase(user.uid, card.id, {
       description: d.get('description').trim(), amountCents: d.get('amountCents'),
       installmentsTotal: d.get('installmentsTotal'), purchaseDate: d.get('purchaseDate'),
-      categoryId: d.get('categoryId') || undefined, notes: d.get('notes').trim() || undefined,
+      categoryId: d.get('categoryId') || undefined, debtorId: d.get('debtorId') || undefined, notes: d.get('notes').trim() || undefined,
     }),
     onDone: async () => { toast('Compra lançada.'); await reload(); },
   });

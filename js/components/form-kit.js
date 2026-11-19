@@ -5,6 +5,7 @@
  */
 import { el, $, $$, toast } from '../core/ui.js';
 import { openModal, closeModal } from './modal.js';
+import { describeError } from '../utils/errors.js';
 
 export function field(label, id, control) {
   return el('div', { class: 'form__field' }, [
@@ -173,6 +174,12 @@ export function formModal({ title, formId, fields, submitLabel, submit, onDone, 
       } else {
         showErrors(form, result.errors ?? {});
       }
+    } catch (error) {
+      // Falhas assíncronas (ex.: FirebaseError permission-denied) viram mensagem no formulário.
+      console.error('[form] falha ao enviar', error);
+      const message = describeError(error);
+      showErrors(form, { _form: message });
+      if (!form.isConnected) toast(message, 6000); // falha após o fechamento (ex.: recarga)
     } finally {
       button.disabled = false;
     }

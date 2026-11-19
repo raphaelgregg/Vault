@@ -9,7 +9,7 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Propósito: controle financeiro pessoal (contas, receitas, despesas, transferências, categorias) por usuário.
 - Stack: HTML/CSS/JS ES Modules puro, Firebase Auth + Firestore (SDK 10.12.2 via CDN/importmap), Vercel estático, npm só para dev.
 - Maturidade: etapa 2 entregue — todos os módulos (contas, receitas, despesas, transferências, categorias, assinaturas, devedores+parcelas/recebimentos, metas, cartões/faturas, orçamentos, dashboard, relatórios) têm service e UI; pendem importação/backup, publicação e verificações em produção (ver Itens não verificados).
-- Testes (executados em 2026-11-19, Node 22): `test:unit` 340 ok · `test:rules` 65 ok (emulador) · `npm run lint` OK · `npm run test:e2e` OK (Chromium, emuladores). Node 18 (2026-11-19, v18.20.8): lint OK · `test:unit` 340 ok · `test:rules` 65 ok. CI no GitHub: runs #1/#2 falharam só no job Node 18 (corrigido; ver Histórico). Rules/índices em produção e Vercel: **não verificados** (deploy bloqueado, ver Itens não verificados).
+- Testes (executados em 2026-11-19, Node 22): `test:unit` 352 ok · `test:rules` 66 ok (emulador) · `npm run lint` OK · `npm run test:e2e` OK (Chromium, emuladores; sem cobertura de cartões/devedores). Node 18 (2026-11-19, v18.20.8, antes da VF-2-03i): lint OK · `test:unit` 340 ok · `test:rules` 65 ok. CI no GitHub: runs #1/#2 falharam só no job Node 18 (corrigido; ver Histórico). Rules/índices em produção e Vercel: **não verificados** (deploy bloqueado, ver Itens não verificados).
 - Lint próprio (`scripts/lint.mjs`), CI (`.github/workflows/ci.yml`, não executado no GitHub), sem build.
 
 ## Gap Analysis
@@ -92,6 +92,12 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - [x] **VF-2-04 — Rota limpa `/categorias`** (Baixo): adicionar rewrite em `vercel.json`. Aceite: `/categorias` abre a página no preview. — CONCLUÍDA 2026-11-18
 - Resolução: rewrite `/categorias` → `/pages/categorias.html` adicionado em `vercel.json` (mesmo padrão das demais). Validado só o JSON/arquivo de destino; **abrir no deploy preview** (aceite).
 
+- [x] **VF-2-03i — Erro de permissão em compra de cartão, dashboard resiliente e débitos de devedor por origem** (correção/feature) — CONCLUÍDA 2026-11-19 (validada localmente; **Rules novas NÃO publicadas**).
+  - Problema: (1) `formModal` não capturava rejeições do submit → `Uncaught (in promise) FirebaseError: Missing or insufficient permissions` sem feedback; (2) dashboard falhava inteiro se uma coleção falhasse; (3) devedor só tinha empréstimo único, sem compras de cartão.
+  - Resolução: (1) `js/components/form-kit.js` (catch no submit → `showErrors({_form})`, toast se o modal já fechou) + `js/utils/errors.js` (`describeError`, puro). Revisão de `registerCardPurchase`/`commitAtomic` contra as Rules: os payloads reais passam nos testes de Rules (emulador); a causa mais provável do `permission-denied` em produção é **Rules publicadas divergentes do repositório** (deploy nunca feito — ver Itens não verificados) — **risco potencial, não comprovado**. (2) `js/services/dashboard.js`: fontes isoladas (`attempt`), `failed[]`, campos `null` quando indisponível; `js/modules/dashboard.js` mostra aviso explícito e `—`, alerta só se todas falharem; coleção vazia = zeros. (3) `firestore.rules` (cardPurchases): campo opcional `debtorId` com `optionalRef(debtors)` — ÚNICA mudança nas Rules, com teste em `tests/rules/`; `registerCardPurchase` vincula a devedor em aberto e soma o total ao `lentCents` no MESMO lote das parcelas (saldo continua derivado, centavos inteiros); `debtorOverview`/`getDebtorOverview` (empréstimo × cartão) exibidos em `devedores-parcelas.js`; `cartoes.js` ganhou seletor de devedor; `deleteDebtor` conta `cardPurchases`.
+  - Limitações: compra vinculada a devedor não pode ser excluída (exigiria estornar `lentCents`); recebido não é atribuído por origem; "novo empréstimo" para o mesmo devedor continua via edição do valor emprestado; leitura+escrita sem transação.
+  - Arquivos: form-kit.js, utils/errors.js, services/{dashboard,creditCards,debtors}.js, core/model.js, modules/{dashboard,cartoes,devedores-parcelas}.js, firestore.rules, tests/services/debtor-origins.test.mjs, tests/rules/firestore.rules.test.mjs.
+
 ### Fase 3 — Arquitetura, qualidade e refatoração
 
 - [x] **VF-3-01 — Reduzir duplicação nos services** (Médio) — CONCLUÍDA 2026-11-18: extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
@@ -118,9 +124,10 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 
 - CI no GitHub Actions: confirmar o run do commit de correção (ver Histórico) em Node 18 e 22.
 - Vercel: deploy/preview, headers reais, CSP/SRI sem violação no console e a rota limpa `/categorias` (e demais rewrites).
-- Firestore de produção (`vault-finance-d1603`; **bloqueado**: sessão sem `firebase login`/credenciais e sem `.firebaserc`; o deploy exige autenticação do usuário): publicação de `firestore.rules`/`firestore.indexes.json` (Rules publicadas podem divergir do repositório; índices compostos declarados nunca foram exigidos pelo emulador) e leituras reais por carga de página.
+- Firestore de produção — **inclui a nova Rule `cardPurchases.debtorId` (VF-2-03i): sem publicá-la, compras vinculadas a devedor darão `permission-denied`** (`vault-finance-d1603`; **bloqueado**: sessão sem `firebase login`/credenciais e sem `.firebaserc`; o deploy exige autenticação do usuário): publicação de `firestore.rules`/`firestore.indexes.json` (Rules publicadas podem divergir do repositório; índices compostos declarados nunca foram exigidos pelo emulador) e leituras reais por carga de página.
 - E2E: só Chromium, SDK local 10.14.1 em vez do 10.12.2 fixado, Lucide bloqueado (ícones não renderizados); fora do CI.
 - Acessibilidade e responsividade (CSS/HTML não auditados em detalhe).
+- UIs de cartões e devedores (inclui vínculo compra↔devedor e erro amigável) e dashboard degradado sem E2E em navegador (cobertos por unit/Rules).
 - `categorias.js`, `assinaturas.js` e `model.js` sem E2E pela UI (lidos/testados por unit e Rules).
 
 ## Histórico
@@ -138,3 +145,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-19 — VF-2-03e/f/g concluídas (orçamentos, dashboard, relatórios); UIs de cartões, metas e parcelas/recebimentos entregues; VF-3-04, VF-4-02, VF-4-04, VF-4-05 concluídas; VF-3-02 e VF-4-03 parciais; decisão `exists()` mantida (README §7.4).
 - 2026-11-19 — VF-4-03 e VF-3-02 concluídas (paginação por cursor, saldo sob demanda, helpers compartilhados, E2E de bancos/receitas/despesas/transferências); Gap Analysis e Itens não verificados atualizados.
 - 2026-11-19 — Validação externa: CI (#1, #2) falhava só no job `Lint e testes unitários (Node 18)`: `node --test "glob"` entre aspas não expande no Node 18 (package.json:13) e `import.meta.dirname` só existe no Node ≥20.11 (tests/services/routes.test.mjs:8). Corrigido sem dependências; Node 18.20.8 local: lint OK, unit 340 ok, rules 65 ok. Deploy Firebase e preview Vercel **não executados** (sem credenciais/URL nesta sessão).
+- 2026-11-19 — VF-2-03i concluída (erro de submit tratado, dashboard resiliente por fonte, débitos de devedor por origem; Rule `cardPurchases.debtorId` + teste). Publicação das Rules pendente.
