@@ -24,3 +24,15 @@ describe('rotas de navegação', () => {
     });
   }
 });
+
+describe('rota dedicada de manutenção (VF-2-03u)', () => {
+  it('manutencao-dados: página, data-page, rewrite limpo e módulo — fora do menu principal', () => {
+    const page = join(root, 'pages', 'manutencao-dados.html');
+    assert.ok(existsSync(page));
+    assert.match(readFileSync(page, 'utf8'), /data-page="manutencao-dados"/);
+    assert.equal(vercel.rewrites.find((r) => r.source === '/manutencao-dados')?.destination, '/pages/manutencao-dados.html');
+    assert.match(appJs, /'manutencao-dados': \(\) => import\('\.\/modules\/manutencao-dados\.js'\)/);
+    assert.ok(existsSync(join(root, 'js', 'modules', 'manutencao-dados.js')));
+    assert.equal(NAV_ITEMS.some((i) => i.id === 'manutencao-dados'), false); // painel interno, sem item de menu
+  });
+});

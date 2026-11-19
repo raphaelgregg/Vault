@@ -31,6 +31,7 @@
     { "source": "/metas", "destination": "/pages/metas.html" },
     { "source": "/cartoes", "destination": "/pages/cartoes.html" },
     { "source": "/relatorios", "destination": "/pages/relatorios.html" },
-    { "source": "/configuracoes", "destination": "/pages/configuracoes.html" }
+    { "source": "/configuracoes", "destination": "/pages/configuracoes.html" },
+    { "source": "/manutencao-dados", "destination": "/pages/manutencao-dados.html" }
   ]
 }

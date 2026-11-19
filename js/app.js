@@ -26,6 +26,7 @@ const MODULES = {
   cartoes: () => import('./modules/cartoes.js'),
   relatorios: () => import('./modules/relatorios.js'),
   configuracoes: () => import('./modules/configuracoes.js'),
+  'manutencao-dados': () => import('./modules/manutencao-dados.js'),
 };
 
 async function bootstrap() {
