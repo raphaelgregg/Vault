@@ -13,6 +13,14 @@ const col = (name, field, type, extra = {}) => ({ name, field, type, ...extra })
 const LIGHT_GREEN = '#1f7a5c';
 
 /**
+ * Coluna auxiliar `instituicao` ao lado de uma referência de conta. `of` = coluna de conta que ela qualifica. NÃO é
+ * campo do modelo: só desambigua contas de mesmo nome em instituições diferentes (a conta vira `accountId`).
+ */
+const inst = (name, of, example = 'Nubank') => ({ name, field: `_${name}`, type: 'institution', of, example, help: 'instituição da conta; obrigatória se o nome da conta existir em mais de uma instituição' });
+/** Referência de conta por NOME (coluna `conta` = só o nome da conta) qualificada pela coluna de instituição `institution`. */
+const acct = (name, field, institution, extra = {}) => col(name, field, 'ref:accounts', { institution, ...extra });
+
+/**
  * type: text | enum | money | date | int | month | ref:accounts | ref:categories | ref:cards | ref:debtors.
  * `required` = a coluna precisa estar preenchida; `def` = valor quando vazio; `example` = linha do modelo.
  */
@@ -44,7 +52,8 @@ export const IMPORT_ENTITIES = Object.freeze({
       col('valor', 'amountCents', 'money', { required: true, example: '5000,00' }),
       col('data_prevista', 'expectedDate', 'date', { required: true, example: '2026-12-05' }),
       col('data_recebimento', 'receivedDate', 'date', { example: '' }),
-      col('conta', 'accountId', 'ref:accounts', { required: true, example: 'Conta Corrente' }),
+      acct('conta', 'accountId', 'instituicao', { required: true, example: 'Conta Corrente' }),
+      inst('instituicao', 'conta'),
       col('status', 'status', 'enum', { def: 'pending', example: 'pending', help: 'pending|received|cancelled' }),
       col('recorrencia', 'recurrence', 'enum', { def: 'none', example: 'none', help: 'none|monthly|weekly|yearly' }),
       col('observacoes', 'notes', 'text', { example: '' }),
@@ -59,7 +68,8 @@ export const IMPORT_ENTITIES = Object.freeze({
       col('data_compra', 'purchaseDate', 'date', { required: true, example: '2026-12-01' }),
       col('vencimento', 'dueDate', 'date', { required: true, example: '2026-12-01' }),
       col('data_pagamento', 'paidDate', 'date', { example: '' }),
-      col('conta', 'accountId', 'ref:accounts', { required: true, example: 'Conta Corrente' }),
+      acct('conta', 'accountId', 'instituicao', { required: true, example: 'Conta Corrente' }),
+      inst('instituicao', 'conta'),
       col('status', 'status', 'enum', { def: 'pending', example: 'pending', help: 'pending|paid|cancelled' }),
       col('recorrencia', 'recurrence', 'enum', { def: 'none', example: 'none', help: 'none|monthly|weekly|yearly' }),
       col('observacoes', 'notes', 'text', { example: '' }),
@@ -68,8 +78,10 @@ export const IMPORT_ENTITIES = Object.freeze({
   transferencias: {
     label: 'Transferências', kind: 'transfers', create: 'createTransfer',
     columns: [
-      col('origem', 'fromAccountId', 'ref:accounts', { required: true, example: 'Conta Corrente' }),
-      col('destino', 'toAccountId', 'ref:accounts', { required: true, example: 'Caixinha' }),
+      acct('origem', 'fromAccountId', 'instituicao_origem', { required: true, example: 'Conta Corrente' }),
+      inst('instituicao_origem', 'origem'),
+      acct('destino', 'toAccountId', 'instituicao_destino', { required: true, example: 'Caixinha' }),
+      inst('instituicao_destino', 'destino'),
       col('valor', 'amountCents', 'money', { required: true, example: '500,00' }),
       col('data', 'date', 'date', { required: true, example: '2026-12-02' }),
       col('motivo', 'reason', 'text', { required: true, example: 'Reserva' }),
@@ -84,7 +96,8 @@ export const IMPORT_ENTITIES = Object.freeze({
       col('valor', 'amountCents', 'money', { required: true, example: '55,90' }),
       col('periodicidade', 'periodicity', 'enum', { required: true, example: 'monthly', help: 'monthly|weekly|yearly' }),
       col('proxima_cobranca', 'nextChargeDate', 'date', { required: true, example: '2026-12-10' }),
-      col('conta', 'accountId', 'ref:accounts', { required: true, example: 'Conta Corrente' }),
+      acct('conta', 'accountId', 'instituicao', { required: true, example: 'Conta Corrente' }),
+      inst('instituicao', 'conta'),
       col('categoria', 'categoryId', 'ref:categories', { required: true, example: 'Assinaturas' }),
       col('cartao', 'cardId', 'ref:cards', { example: '', help: 'opcional: cobrada na fatura do cartão' }),
       col('status', 'status', 'enum', { def: 'active', example: 'active', help: 'active|paused|cancelled' }),
@@ -116,7 +129,8 @@ export const IMPORT_ENTITIES = Object.freeze({
       col('nome', 'name', 'text', { required: true, example: 'Caixinha' }),
       col('objetivo', 'targetCents', 'money', { required: true, example: '10000,00' }),
       col('prazo', 'deadline', 'date', { example: '2027-12-31' }),
-      col('conta', 'accountId', 'ref:accounts', { example: 'Caixinha', help: 'opcional: progresso = saldo da conta' }),
+      acct('conta', 'accountId', 'instituicao', { example: 'Caixinha', help: 'opcional: progresso = saldo da conta' }),
+      inst('instituicao', 'conta'),
       col('descricao', 'description', 'text', { example: '' }),
     ],
   },
@@ -128,7 +142,8 @@ export const IMPORT_ENTITIES = Object.freeze({
       col('limite', 'limitCents', 'money', { required: true, example: '5000,00' }),
       col('dia_fechamento', 'closingDay', 'int', { required: true, example: '10' }),
       col('dia_vencimento', 'dueDay', 'int', { required: true, example: '17' }),
-      col('conta', 'accountId', 'ref:accounts', { example: '' }),
+      acct('conta', 'accountId', 'instituicao', { example: '' }),
+      inst('instituicao', 'conta', ''),
       col('cor', 'color', 'text', { example: '' }),
     ],
   },
@@ -155,19 +170,43 @@ export function templateRows(key) {
   return { headers: def.columns.map((c) => c.name), rows: [def.columns.map((c) => c.example ?? '')] };
 }
 
-/** Resolve nome/identificador de conta/categoria/cartão/devedor. Retorna { id } | { error }. */
-export function resolveRef(refType, value, ctx) {
+/**
+ * Resolve nome/identificador de conta/categoria/cartão/devedor. Retorna { id } | { error }.
+ * Contas: o texto é SÓ o nome da conta; `institution` (opcional) a qualifica. Sem instituição e com o nome em mais
+ * de uma instituição o resultado é ambíguo (nunca se escolhe uma). O rótulo composto "Instituição — Nome" só é aceito
+ * como compatibilidade com CSVs antigos e apenas quando nenhuma conta tem esse nome simples.
+ */
+export function resolveRef(refType, value, ctx, institution = '') {
   const list = ctx?.[refType] ?? [];
   const wanted = normalizeName(value);
-  const labels = (item) => {
-    const base = [item.name];
-    if (item.institution) base.push(`${item.institution} — ${item.name}`, `${item.institution} - ${item.name}`);
-    return base.map(normalizeName);
-  };
+  const isAccount = refType === 'accounts';
+  const wantedInst = isAccount ? normalizeName(institution) : '';
+  const instOf = (i) => normalizeName(i.institution);
+
   const byId = list.filter((i) => i.id === value);
-  const hits = byId.length ? byId : list.filter((i) => labels(i).includes(wanted));
-  if (hits.length === 1) return { id: hits[0].id };
-  if (hits.length > 1) return { error: `"${value}" é ambíguo (${hits.length} registros com esse nome); use o identificador.` };
+  if (byId.length) {
+    if (wantedInst && instOf(byId[0]) !== wantedInst) return { error: `A conta "${value}" pertence à instituição "${byId[0].institution ?? ''}", não a "${institution}".` };
+    return { id: byId[0].id };
+  }
+
+  const sameName = list.filter((i) => normalizeName(i.name) === wanted);
+  if (isAccount && wantedInst) {
+    const hits = sameName.filter((i) => instOf(i) === wantedInst);
+    if (hits.length === 1) return { id: hits[0].id };
+    if (hits.length > 1) return { error: `"${value}" é ambíguo (${hits.length} contas "${value}" em "${institution}"); use o identificador.` };
+    if (sameName.length) return { error: `Conta "${value}" não encontrada na instituição "${institution}" (existe em: ${sameName.map((i) => i.institution || '—').join(', ')}).` };
+    return { error: `Conta "${value}" não encontrada.` };
+  }
+  if (sameName.length === 1) return { id: sameName[0].id };
+  if (sameName.length > 1) {
+    if (isAccount) return { error: `"${value}" é ambíguo (${sameName.length} contas com esse nome: ${sameName.map((i) => i.institution || '—').join(', ')}); informe a coluna instituicao ou use o identificador.` };
+    return { error: `"${value}" é ambíguo (${sameName.length} registros com esse nome); use o identificador.` };
+  }
+  if (isAccount) { // compatibilidade: rótulo composto de exportações antigas, só por correspondência exata.
+    const legacy = list.filter((i) => i.institution && [`${i.institution} — ${i.name}`, `${i.institution} - ${i.name}`].map(normalizeName).includes(wanted));
+    if (legacy.length === 1) return { id: legacy[0].id };
+    if (legacy.length > 1) return { error: `"${value}" é ambíguo (${legacy.length} contas); use o identificador.` };
+  }
   return { error: `"${value}" não encontrado(a).` };
 }
 
@@ -188,10 +227,12 @@ export function mapImportRow(key, values, ctx) {
 
   for (const c of def.columns) {
     colOfField[c.field] = c.name;
+    if (c.type === 'institution') continue; // auxiliar: lida junto da coluna de conta que ela qualifica
     let text = String(values[c.name] ?? '').trim();
     if (text === '' && c.def !== undefined) text = c.def;
     if (text === '') {
       if (c.required) errors[c.name] = 'Campo obrigatório.';
+      else if (c.institution && String(values[c.institution] ?? '').trim()) warnings.push(`"${c.institution}" informada sem "${c.name}"; ignorada.`);
       continue;
     }
     if (c.type === 'money') {
@@ -208,7 +249,7 @@ export function mapImportRow(key, values, ctx) {
     } else if (c.type === 'enum') {
       raw[c.field] = text.toLowerCase();
     } else if (REF_TYPES[c.type]) {
-      const r = resolveRef(REF_TYPES[c.type], text, ctx);
+      const r = resolveRef(REF_TYPES[c.type], text, ctx, c.institution ? String(values[c.institution] ?? '').trim() : '');
       if (r.error) errors[c.name] = r.error;
       else raw[c.field] = r.id;
     } else {
@@ -227,8 +268,12 @@ export function mapImportRow(key, values, ctx) {
 
   // Avisos (não impedem): nome repetido de conta/categoria/cartão já existente.
   const dupType = { contas: 'accounts', categorias: 'categories', cartoes: 'cards' }[key];
-  if (dupType && raw.name && (ctx?.[dupType] ?? []).some((i) => normalizeName(i.name) === normalizeName(raw.name))) {
-    warnings.push(`Já existe registro com o nome "${raw.name}"; será criado outro (referências por nome ficarão ambíguas).`);
+  const sameNameOther = (i) => normalizeName(i.name) === normalizeName(raw.name)
+    && (key !== 'contas' || normalizeName(i.institution) !== normalizeName(raw.institution)); // conta: mesmo nome+instituição = identidade (mescla/duplicata)
+  if (dupType && raw.name && (ctx?.[dupType] ?? []).some(sameNameOther)) {
+    warnings.push(key === 'contas'
+      ? `Já existe conta com o nome "${raw.name}" em outra instituição; ao referenciá-la informe a coluna instituicao.`
+      : `Já existe registro com o nome "${raw.name}"; será criado outro (referências por nome ficarão ambíguas).`);
   }
   return { ok: Object.keys(errors).length === 0, raw, errors, warnings };
 }

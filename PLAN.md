@@ -232,6 +232,13 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
   - Limitações: importação limitada a 500 linhas/arquivo; compras/dívidas/movimentações não são mescladas (só ignoradas se idênticas — alterar valor/data cria novo registro, por serem fatos); a chave de assinatura ignora valor/periodicidade; aportes de metas, orçamentos e faturas não são importados; exportar lê as 11 coleções inteiras do uid (cota de leituras).
   - Arquivos: core/importSchema.js, services/importer.js, modules/manutencao-dados.js, README.md, tests/{services/csv-unified,services/maintenance,e2e/csv,e2e/maintenance}, package.json.
 
+- [x] **VF-2-03ad — Receitas × Contas: `conta` e `instituicao` independentes no CSV** (integridade) — CONCLUÍDA 2026-11-19 (**`firestore.rules`/índices NÃO alterados; sem migração de dados**).
+- Problema [C]: o modelo já usa `incomes.accountId` (ID) e `accounts.{institution,name}`; a mistura estava só no CSV: a exportação gravava "Instituição — Nome" em `conta` e a importação aceitava nome simples (ambíguo entre instituições) ou o rótulo composto.
+- Solução: coluna auxiliar `instituicao` ao lado de `conta` (receitas, despesas, assinaturas, metas, cartões; `instituicao_origem/destino` em transferências), não é campo do modelo. `resolveRef('accounts', nome, ctx, instituicao)`: nome+instituição exatos; sem instituição e nome repetido → erro "ambíguo"; instituição errada/inexistente → erro claro; id aceito (e checado contra a instituição); rótulo composto antigo só se inequívoco (compatibilidade). Exportação: `conta` = nome, `instituicao` = instituição; par instituição+nome repetido exporta o ID.
+- Arquivos: `js/core/importSchema.js`, `js/services/importer.js`, `js/modules/manutencao-dados.js` (texto de ajuda), `tests/services/account-reference.test.mjs`.
+- Dados antigos: registros no Firestore já usam `accountId`; órfãos (conta removida) exportam o id e exigem tratamento manual. CSVs antigos com "Instituição — Nome" continuam importáveis.
+- Aceite: testes de cadastro, vínculo, homônimas, referência inexistente, export→reimport e módulos que usam contas passam; lint e unit verdes.
+
 ### Fase 3 — Arquitetura, qualidade e refatoração
 
 - [x] **VF-3-01 — Reduzir duplicação nos services** (Médio) — CONCLUÍDA 2026-11-18: extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
@@ -300,3 +307,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-19 — VF-2-03aa concluída (função `/api/admin-claims`, painel de administradores, auditoria). Configurar `FIREBASE_SERVICE_ACCOUNT` na Vercel antes de usar em produção.
 - 2026-11-19 — VF-2-03ab concluída (401 por chave de API restrita no servidor → verificação local do ID token; erros de configuração separados; `GET /api/admin-claims` e lista na UI). Promovida para development e main.
 - 2026-11-19 — VF-2-03ac concluída (CSV unificado, escopo estrito ao uid, importação idempotente com mesclagem). Promovida para development e main.
+- 2026-11-19 — VF-2-03ad concluída (CSV: `conta` só com o nome + coluna `instituicao`; resolução sem ambiguidade; export/reimport sem perda de vínculo). Sem mudança em Rules/índices/modelo de dados.

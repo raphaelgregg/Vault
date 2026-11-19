@@ -15,7 +15,7 @@
  */
 import { COLLECTIONS } from '../utils/constants.js';
 import { list } from './firestore.js';
-import { parseCsv, toCsv } from '../utils/csv.js';
+import { parseCsv, toCsv, normalizeName } from '../utils/csv.js';
 import { makeZip } from '../utils/zip.js';
 import { centsToMoneyString } from '../core/model.js';
 import {
@@ -293,9 +293,6 @@ const EXPORT_COLLECTION = {
 };
 const REF_COLLECTION = { 'ref:accounts': 'accounts', 'ref:categories': 'categories', 'ref:cards': 'cards', 'ref:debtors': 'debtors' };
 
-/** Nome legível da referência (conta = "Instituição — Nome"). */
-const refLabel = (item) => (item.institution ? `${item.institution} — ${item.name}` : item.name);
-
 /** Agrupa parcelas em dívidas/compras (uma linha por dívida/compra, como na importação). */
 function groupRows(key, docs) {
   if (key === 'dividas') {
@@ -331,12 +328,25 @@ function exportRowsFor(key, docs, ctx) {
 /** Linhas de registros JÁ no formato de importação (dívidas/compras agrupadas) — sem reagrupar. */
 function rowsFromRecords(key, records, ctx) {
   const def = IMPORT_ENTITIES[key];
+  const accounts = ctx.accounts ?? [];
+  const accountOf = (id) => accounts.find((i) => i.id === id);
+  // `conta` = SÓ o nome da conta; a instituição vai na coluna `instituicao`. Se o par instituição+nome não for único,
+  // exporta o ID (a reimportação resolve por id), para nunca ligar o registro à conta errada.
+  const accountText = (account) => {
+    const twins = accounts.filter((i) => normalizeName(i.name) === normalizeName(account.name) && normalizeName(i.institution) === normalizeName(account.institution));
+    return twins.length > 1 ? account.id : account.name;
+  };
   return records.map((doc) => def.columns.map((c) => {
+    if (c.type === 'institution') {
+      const ref = def.columns.find((x) => x.name === c.of);
+      return accountOf(doc[ref.field])?.institution ?? '';
+    }
     const value = doc[c.field];
     if (value === undefined || value === null) return '';
     if (c.type === 'money') return centsToMoneyString(Number(value));
     const refType = REF_COLLECTION[c.type];
-    if (refType) return refLabel((ctx[refType] ?? []).find((i) => i.id === value) ?? { name: value });
+    if (refType === 'accounts') { const a = accountOf(value); return a ? accountText(a) : value; }
+    if (refType) return (ctx[refType] ?? []).find((i) => i.id === value)?.name ?? value;
     return value;
   }));
 }

@@ -342,7 +342,7 @@ export async function render(container, ctx) {
   }));
 
   const hint = () => (isUnified()
-    ? `CSV unificado: 1ª coluna "${UNIFIED_COLUMN}" (${IMPORT_ENTITY_KEYS.join(', ')}) + as colunas de cada entidade; cada linha preenche só as colunas da sua entidade. Pode vir fora de ordem: é processado em contas → categorias → cartões → devedores → demais, e linhas podem citar (por nome) registros criados no próprio arquivo.`
+    ? `CSV unificado: 1ª coluna "${UNIFIED_COLUMN}" (${IMPORT_ENTITY_KEYS.join(', ')}) + as colunas de cada entidade; cada linha preenche só as colunas da sua entidade. Pode vir fora de ordem: é processado em contas → categorias → cartões → devedores → demais, e linhas podem citar (por nome) registros criados no próprio arquivo. Contas: a coluna "conta" traz só o nome da conta e "instituicao" a instituição (obrigatória quando o nome existe em mais de uma).`
     : IMPORT_ENTITIES[entitySelect.value].columns.map((c) => `${c.name}${c.required ? '*' : ''}${c.help ? ` (${c.help})` : ''}`).join(' · '));
   const explain = () => (isUnified()
     ? 'Modelo UNIFICADO = cabeçalho + 1 linha-modelo por entidade (nenhum dado seu). Exportar base populada = TODOS os registros do SEU usuário, de todas as entidades, em 1 CSV reimportável. Importar é idempotente: registros que já existem para você são ignorados (ou atualizados se o CSV trouxer campos diferentes).'
