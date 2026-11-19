@@ -162,7 +162,8 @@ try {
   await page.click('#btn-apply');
   await waitLog(/Fim: 1 criada\(s\), 0 atualizada\(s\), 1 ignorada\(s\) por duplicidade/);
 
-  assert.deepEqual(app.problems.filter((p) => !/permission|PERMISSION|insufficient/i.test(p)), [], `erros de console/página: ${app.problems.join(' | ')}`);
+  // 404 esperado: o painel de administradores consulta GET /api/admin-claims, que não existe no servidor estático do E2E.
+  assert.deepEqual(app.problems.filter((p) => !/permission|PERMISSION|insufficient|status of 404/i.test(p)), [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E CSV unificado OK');
 } catch (error) {
   console.error(`E2E CSV unificado FALHOU na etapa "${step}":`, error.message);
