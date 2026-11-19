@@ -23,7 +23,7 @@ import {
 import {
   listCards, createCard, updateCard, deleteCard, blockCard, unblockCard, cancelCard,
   registerCardPurchase, registerInvoiceConsolidation, consolidationDeltaCents, parseMoneyToCents,
-  deleteCardPurchase, closeInvoice, payInvoice, cancelInvoice,
+  deleteCardPurchase, closeInvoice, payInvoice, cancelInvoice, deleteInvoice,
   listInvoices, listCardPurchases, getCardLimitUsage, getCardStatusOptions, getInvoiceStatusOptions, formatCents,
 } from '../services/creditCards.js';
 import { listAccounts } from '../services/accounts.js';
@@ -127,7 +127,7 @@ function cardActions(card) {
   }
   acts.push(iconButton(`Excluir ${card.name}`, 'trash-2', () => confirmModal({
     title: 'Excluir cartão', message: `Excluir "${card.name}"?`,
-    hint: 'Só é possível sem compras nem faturas; para manter o histórico, cancele.', confirmLabel: 'Excluir',
+    hint: 'Bloqueia com compras, assinaturas ou faturas com movimentação; faturas canceladas/zeradas saem junto. Para manter o histórico, cancele.', confirmLabel: 'Excluir',
     onConfirm: async () => {
       const r = await deleteCard(user.uid, card.id);
       if (r.ok) { toast('Cartão excluído.'); await reload(); } else toast(r.errors._form, 6000);
@@ -211,13 +211,13 @@ async function openPurchaseModal(card) {
   });
 }
 
-async function openInvoicesModal(card) {
+async function openInvoicesModal(card, { showCancelled = false } = {}) {
   const [invoices, purchases] = await Promise.all([listInvoices(user.uid, card.id), listCardPurchases(user.uid, card.id)]);
   invoices.sort((a, b) => (a.referenceMonth < b.referenceMonth ? 1 : -1));
   const invoiceById = new Map(invoices.map((i) => [i.id, i]));
   const totalOf = (inv) => (inv.status === 'open' ? invoiceTotalCents(purchases.filter((p) => p.invoiceId === inv.id)) : (inv.totalCents ?? 0));
 
-  const refreshModal = async () => { closeModal(); await reload(); await openInvoicesModal(card); };
+  const refreshModal = async () => { closeModal(); await reload(); await openInvoicesModal(card, { showCancelled }); };
   const act = async (fn, id, okMsg) => {
     const r = await fn(user.uid, id);
     if (r.ok) { toast(okMsg); await refreshModal(); } else toast(r.errors._form, 6000);
@@ -269,7 +269,18 @@ async function openInvoicesModal(card) {
     onDone: async () => { toast('Consolidado lançado na fatura.'); await refreshModal(); },
   });
 
-  const invoiceTable = invoices.length
+  // Canceladas ficam ocultas por padrão (não somem do banco até serem excluídas); a lista é refeita ao agir.
+  const visibleInvoices = showCancelled ? invoices : invoices.filter((i) => i.status !== 'cancelled');
+  const hiddenCount = invoices.length - visibleInvoices.length;
+  const toggleCancelled = (hiddenCount > 0 || showCancelled) && invoices.some((i) => i.status === 'cancelled')
+    ? el('button', {
+      type: 'button', class: 'btn btn--secondary',
+      onClick: () => { closeModal(); openInvoicesModal(card, { showCancelled: !showCancelled }); },
+      text: showCancelled ? 'Ocultar faturas canceladas' : `Mostrar faturas canceladas (${hiddenCount})`,
+    })
+    : null;
+
+  const invoiceTable = visibleInvoices.length
     ? dataTable({
       columns: [
         { key: 'referenceMonth', label: 'Fatura', render: (v) => formatMonth(v) },
@@ -279,7 +290,7 @@ async function openInvoicesModal(card) {
         { key: 'status', label: 'Status', render: (v) => optionLabel(getInvoiceStatusOptions(), v) },
         { key: 'accountId', label: 'Paga com', render: (v, i) => (i.status === 'paid' ? `${accountLabel(v)}${i.paidAt ? ` · ${formatDate(i.paidAt)}` : ''}` : '—') },
       ],
-      rows: invoices,
+      rows: visibleInvoices,
       actions: (inv) => [
         inv.status === 'open' ? iconButton(`Fechar fatura ${formatMonth(inv.referenceMonth)}`, 'lock', () => act(closeInvoice, inv.id, 'Fatura fechada.')) : null,
         ['open', 'closed'].includes(inv.status) && totalOf(inv) > 0
@@ -289,9 +300,15 @@ async function openInvoicesModal(card) {
             title: 'Cancelar fatura', message: `Cancelar a fatura ${formatMonth(inv.referenceMonth)} (sem compras)?`, confirmLabel: 'Cancelar fatura',
             onConfirm: () => act(cancelInvoice, inv.id, 'Fatura cancelada.'),
           }), 'btn--danger') : null,
+        ['cancelled', 'open'].includes(inv.status) && !purchases.some((p) => p.invoiceId === inv.id)
+          ? iconButton(`Excluir fatura ${formatMonth(inv.referenceMonth)}`, 'trash-2', () => confirmModal({
+            title: 'Excluir fatura', message: `Excluir definitivamente a fatura ${formatMonth(inv.referenceMonth)} (sem compras)?`,
+            hint: 'Remove o registro vazio e libera o mês para novas compras. Não afeta faturas pagas.', confirmLabel: 'Excluir fatura',
+            onConfirm: () => act(deleteInvoice, inv.id, 'Fatura excluída.'),
+          }), 'btn--danger') : null,
       ].filter(Boolean),
     })
-    : emptyBlock('receipt', 'Sem faturas', 'As faturas são criadas ao lançar compras.');
+    : emptyBlock('receipt', 'Sem faturas', hiddenCount ? 'Só há faturas canceladas (ocultas).' : 'As faturas são criadas ao lançar compras.');
 
   const sorted = [...purchases].sort((a, b) => (a.purchaseDate < b.purchaseDate ? 1 : -1));
   const purchaseTable = sorted.length
@@ -314,7 +331,7 @@ async function openInvoicesModal(card) {
 
   openModal({
     title: `Faturas e compras — ${card.name}`,
-    body: el('div', {}, [el('h3', { text: 'Faturas' }), card.status === 'active' ? el('button', { type: 'button', class: 'btn btn--secondary', onClick: openConsolidation, text: 'Lançar consolidado' }) : null, invoiceTable, el('h3', { text: 'Compras (parcelas)' }), purchaseTable]),
+    body: el('div', {}, [el('h3', { text: 'Faturas' }), card.status === 'active' ? el('button', { type: 'button', class: 'btn btn--secondary', onClick: openConsolidation, text: 'Lançar consolidado' }) : null, toggleCancelled, invoiceTable, el('h3', { text: 'Compras (parcelas)' }), purchaseTable]),
     footer: [el('button', { type: 'button', class: 'btn btn--secondary', onClick: closeModal, text: 'Fechar' })],
   });
   refreshIcons();

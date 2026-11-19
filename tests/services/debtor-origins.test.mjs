@@ -587,7 +587,7 @@ describe('assinaturas × cartão × fatura (VF-2-03r)', () => {
     assert.equal(consolidationDeltaCents(1.5, 100), null);
   });
   it('excluir cartão com assinaturas vinculadas é bloqueado', async () => {
-    const r = await deleteCard(uid, 'c1', { getById: async () => cardX, count: async (u, c) => (c === 'subscriptions' ? 1 : 0) });
+    const r = await deleteCard(uid, 'c1', { getById: async () => cardX, list: async () => [], count: async (u, c) => (c === 'subscriptions' ? 1 : 0) });
     assert.equal(r.ok, false);
     assert.match(r.errors._form, /1 assinaturas/);
   });

@@ -849,6 +849,20 @@ describe('Cartões, compras e faturas (VF-2-03d)', () => {
     await assertFails(batch.commit());
   });
 
+  it('excluir cartão com faturas vazias/canceladas (VF-2-03t): delete das faturas + cartão + auditorias no MESMO lote; excluir fatura avulsa', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(invDoc(db), invoice({ status: 'cancelled' })));
+    await assertSucceeds(setDoc(invDoc(db, 'c1_2026-12'), invoice({ referenceMonth: '2026-12', closingDate: noon('2026-12-10'), dueDate: noon('2026-12-17') })));
+    await assertSucceeds(deleteDoc(invDoc(db, 'c1_2026-12'))); // fatura vazia excluída isoladamente
+    const audit = (entity, id) => ({ action: 'delete', entity, entityId: id, before: { id }, actorUid: ALICE, createdAt: serverTimestamp() });
+    const batch = writeBatch(db);
+    batch.delete(invDoc(db));
+    batch.set(doc(collection(db, 'users', ALICE, 'auditLog')), audit('invoices', 'c1_2026-11'));
+    batch.delete(cardDoc(db));
+    batch.set(doc(collection(db, 'users', ALICE, 'auditLog')), audit('creditCards', 'c1'));
+    await assertSucceeds(batch.commit());
+  });
+
   it('pagar fatura com conta (VF-2-03p): patch status/totalCents/paidCents/accountId/paidAt; nega conta inexistente, paidAt string e extra; cancelar fatura vazia', async () => {
     const db = await seed();
     await assertSucceeds(setDoc(invDoc(db), invoice()));

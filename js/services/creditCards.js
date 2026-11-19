@@ -100,27 +100,75 @@ export async function updateCard(uid, cardId, rawData, io = {}) {
   return { ok: true };
 }
 
-/** Bloqueia exclusão com compras/faturas (fail-closed); cancele para manter o histórico. */
+const MAX_CARD_DELETE_INVOICES = 200; // 2 escritas por fatura (+ cartão) no lote de 500
+
+/** Fatura com movimentação real: fechada/paga com total ou valor pago. Cancelada, zerada ou aberta vazia: não. */
+const hasRealInvoiceMovement = (invoice) => ['closed', 'paid'].includes(invoice.status)
+  && ((Number(invoice.totalCents) || 0) > 0 || (Number(invoice.paidCents) || 0) > 0);
+
+/**
+ * Exclui o cartão (VF-2-03t). Bloqueia (fail-closed) com: compras/parcelas, assinaturas vinculadas ou faturas
+ * fechadas/pagas COM movimentação. Faturas canceladas, zeradas ou abertas sem compras NÃO bloqueiam: são
+ * removidas junto com o cartão, no MESMO lote atômico (cada remoção com auditoria) — sem faturas órfãs.
+ * Para manter o histórico de um cartão em uso, cancele-o.
+ */
 export async function deleteCard(uid, cardId, io = {}) {
   const card = await (io.getById ?? getById)(uid, CARDS, cardId);
   if (!card) return { ok: false, errors: { _form: 'Cartão não encontrado.' } };
-  let counts;
+  let purchases;
+  let subscriptions;
+  let invoices;
   try {
     const countFn = io.count ?? count;
-    counts = await Promise.all([
-      countFn(uid, PURCHASES, byCard(cardId)).then((n) => ({ n, label: 'compras' })),
-      countFn(uid, INVOICES, byCard(cardId)).then((n) => ({ n, label: 'faturas' })),
-      countFn(uid, COLLECTIONS.subscriptions, byCard(cardId)).then((n) => ({ n, label: 'assinaturas' })),
+    [purchases, subscriptions, invoices] = await Promise.all([
+      countFn(uid, PURCHASES, byCard(cardId)),
+      countFn(uid, COLLECTIONS.subscriptions, byCard(cardId)),
+      (io.list ?? list)(uid, INVOICES, byCard(cardId)),
     ]);
   } catch (error) {
     console.error('[creditCards] falha ao verificar vínculos', error);
     return { ok: false, errors: { _form: 'Não foi possível verificar os vínculos do cartão. A exclusão foi cancelada por segurança; tente novamente.' } };
   }
-  const used = counts.filter((c) => c.n > 0);
+  const moving = invoices.filter(hasRealInvoiceMovement).length;
+  const used = [
+    { n: purchases, label: 'compras' },
+    { n: subscriptions, label: 'assinaturas' },
+    { n: moving, label: 'faturas com movimentação' },
+  ].filter((c) => c.n > 0);
   if (used.length) {
     return { ok: false, errors: { _form: `Este cartão não pode ser excluído: possui ${used.map((c) => `${c.n} ${c.label}`).join(', ')}. Cancele-o para manter o histórico.` } };
   }
-  await removeAudited(uid, CARDS, cardId, card, io);
+  if (invoices.length > MAX_CARD_DELETE_INVOICES) {
+    return { ok: false, errors: { _form: `Exclua primeiro as faturas vazias: máximo de ${MAX_CARD_DELETE_INVOICES} por vez.` } };
+  }
+  const ops = [
+    ...invoices.map((i) => ({ type: 'delete', collection: INVOICES, docId: i.id, before: i })),
+    { type: 'delete', collection: CARDS, docId: cardId, before: card },
+  ];
+  await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
+  return { ok: true, removedInvoices: invoices.length };
+}
+
+/**
+ * Exclui DEFINITIVAMENTE uma fatura sem compras (VF-2-03t): cancelada, ou aberta vazia (R$ 0,00). Fechada/paga
+ * não é apagada (é histórico/movimento da conta). Com compras vinculadas, bloqueia. Fail-closed na leitura;
+ * remoção + auditoria no mesmo lote. Liberar a fatura cancelada também libera o mês para novas compras.
+ */
+export async function deleteInvoice(uid, invoiceId, io = {}) {
+  const invoice = await (io.getById ?? getById)(uid, INVOICES, invoiceId);
+  if (!invoice) return { ok: false, errors: { _form: 'Fatura não encontrada.' } };
+  if (!['cancelled', 'open'].includes(invoice.status)) {
+    return { ok: false, errors: { _form: 'Faturas fechadas ou pagas são histórico e não podem ser excluídas.' } };
+  }
+  let linked;
+  try {
+    linked = await (io.count ?? count)(uid, PURCHASES, { where: [['invoiceId', '==', invoiceId]] });
+  } catch (error) {
+    console.error('[creditCards] falha ao verificar compras da fatura', error);
+    return { ok: false, errors: { _form: 'Não foi possível verificar as compras da fatura. A exclusão foi interrompida por segurança.' } };
+  }
+  if (linked > 0) return { ok: false, errors: { _form: `A fatura possui ${linked} parcela(s) de compras e não pode ser excluída.` } };
+  await (io.commitAtomic ?? commitAtomic)(uid, [{ type: 'delete', collection: INVOICES, docId: invoiceId, before: invoice }], io);
   return { ok: true };
 }
 

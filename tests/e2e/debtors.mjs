@@ -167,7 +167,40 @@ try {
   await page.waitForFunction(() => /Fatura cancelada/.test(document.querySelector('.toast')?.innerText ?? ''));
   await page.waitForSelector('.modal');
   assert.equal(await page.getByRole('button', { name: 'Cancelar fatura 01/2031' }).count(), 0);
+  // VF-2-03t: a fatura cancelada some da lista (oculta por padrão), reaparece sob demanda e pode ser EXCLUÍDA
+  assert.doesNotMatch(await page.locator('.modal').innerText(), /01\/2031/);
+  await page.getByRole('button', { name: /Mostrar faturas canceladas/ }).click();
+  await page.waitForFunction(() => /01\/2031[^\n]*Cancelada/.test(document.querySelector('.modal')?.innerText ?? ''));
+  await page.getByRole('button', { name: 'Excluir fatura 01/2031' }).click();
+  await page.getByRole('button', { name: 'Excluir fatura', exact: true }).click();
+  await page.waitForFunction(() => /Fatura excluída/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForSelector('.modal');
+  assert.equal(await page.getByRole('button', { name: /Mostrar faturas canceladas/ }).count(), 0); // nada mais cancelado
+  assert.doesNotMatch(await page.locator('.modal').innerText(), /01\/2031/);
   await page.keyboard.press('Escape');
+
+  log('VF-2-03t: excluir cartão sem compras cujas faturas estão canceladas/zeradas (antes: bloqueado)');
+  await page.evaluate(async () => {
+    const { createCard } = await import('/js/services/creditCards.js');
+    const { create } = await import('/js/services/firestore.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const uid = auth.currentUser.uid;
+    const c = await createCard(uid, { name: 'Inter', brand: 'Visa', limitCents: '1.000,00', closingDay: 10, dueDay: 17 });
+    await create(uid, 'invoices', { cardId: c.id, referenceMonth: '2031-02', dueDate: '2031-02-17', status: 'cancelled', totalCents: 0 }, `${c.id}_2031-02`);
+    await create(uid, 'invoices', { cardId: c.id, referenceMonth: '2031-03', dueDate: '2031-03-17', status: 'cancelled' }, `${c.id}_2031-03`);
+  });
+  await page.goto(`${app.base}/pages/cartoes.html`);
+  await page.waitForSelector('#page-content .panel');
+  await page.getByRole('button', { name: 'Excluir Inter' }).click();
+  await page.getByRole('button', { name: 'Excluir', exact: true }).click();
+  await page.waitForFunction(() => /Cartão excluído/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForFunction(() => !/Inter/.test(document.querySelector('#page-content tbody')?.innerText ?? ''));
+  const orphans = await page.evaluate(async () => {
+    const { list } = await import('/js/services/firestore.js');
+    const { auth } = await import('/js/firebase/client.js');
+    return (await list(auth.currentUser.uid, 'invoices')).filter((i) => /2031-0[23]$/.test(i.id)).length;
+  });
+  assert.equal(orphans, 0); // faturas removidas junto, sem órfãs
 
   log('VF-2-03r: assinatura no cartão vira parcela na fatura; consolidado em fatura aberta; fatura paga intacta');
   await page.evaluate(async () => {

@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createCard, updateCard, deleteCard, setCardStatus, cancelCard, blockCard, unblockCard,
-  registerCardPurchase, deleteCardPurchase, closeInvoice, payInvoice, cancelInvoice, getCardLimitUsage,
+  registerCardPurchase, deleteCardPurchase, closeInvoice, payInvoice, cancelInvoice, deleteInvoice, getCardLimitUsage,
   getCardStatusOptions, getInvoiceStatusOptions,
 } from '../../js/services/creditCards.js';
 import {
@@ -139,10 +139,10 @@ describe('cartões — CRUD e status', () => {
     assert.equal((await setCardStatus(uid, 'c1', 'x', a.io)).ok, false);
   });
   it('exclusão: bloqueia com vínculos e fail-closed; exclui quando livre', async () => {
-    const ok = makeIo();
+    const ok = makeIo({ invoices: [] });
     assert.equal((await deleteCard(uid, 'c1', ok.io)).ok, true);
-    assert.equal(ok.calls.audit[0].action, 'delete');
-    assert.match((await deleteCard(uid, 'c1', makeIo({ linked: 2 }).io)).errors._form, /compras/);
+    assert.deepEqual(ok.calls.atomic.at(-1).map((o) => [o.type, o.collection, o.docId]), [['delete', 'creditCards', 'c1']]);
+    assert.match((await deleteCard(uid, 'c1', makeIo({ linked: 2, invoices: [] }).io)).errors._form, /compras/);
     const f = makeIo();
     f.io.count = async () => { throw new Error('x'); };
     const orig = console.error; console.error = () => {};
@@ -155,6 +155,62 @@ describe('cartões — CRUD e status', () => {
     const m = makeIo({ purchases: [{ cardId: 'c1', amountCents: 120000, invoiceId: 'c1_2026-11' }], invoices: [inv()] });
     assert.deepEqual(await getCardLimitUsage(uid, 'c1', m.io), { usedCents: 120000, availableCents: 380000 });
     assert.equal(await getCardLimitUsage(uid, 'zz', m.io), null);
+  });
+});
+
+describe('exclusão de cartão e fatura (VF-2-03t)', () => {
+  const invC = (o = {}) => inv({ id: 'c1_2026-10', referenceMonth: '2026-10', ...o });
+  it('faturas canceladas/zeradas NÃO bloqueiam: saem junto com o cartão, no mesmo lote, com auditoria', async () => {
+    const invoices = [invC({ status: 'cancelled', totalCents: 0 }), invC({ id: 'c1_2026-11', status: 'cancelled' }), invC({ id: 'c1_2026-12', status: 'open' }), invC({ id: 'c1_2027-01', status: 'closed', totalCents: 0 })];
+    const m = makeIo({ invoices, linked: 0 });
+    const r = await deleteCard(uid, 'c1', m.io);
+    assert.deepEqual([r.ok, r.removedInvoices], [true, 4]);
+    assert.deepEqual(m.calls.atomic.at(-1).map((o) => `${o.collection}:${o.docId}`), ['invoices:c1_2026-10', 'invoices:c1_2026-11', 'invoices:c1_2026-12', 'invoices:c1_2027-01', 'creditCards:c1']);
+    assert.equal(m.calls.remove.length, 0); // nada fora do lote
+  });
+  it('mantém o bloqueio: compras, assinaturas vinculadas, fatura fechada/paga COM movimentação; leitura falha = fail-closed', async () => {
+    const blockers = [
+      [makeIo({ linked: 3, invoices: [] }), /3 compras/],
+      [makeIo({ invoices: [invC({ status: 'paid', totalCents: 5000, paidCents: 5000 })] }), /1 faturas com movimentação/],
+      [makeIo({ invoices: [invC({ status: 'closed', totalCents: 100 })] }), /faturas com movimentação/],
+    ];
+    for (const [m, re] of blockers) {
+      assert.match((await deleteCard(uid, 'c1', m.io)).errors._form, re);
+      assert.equal(m.calls.atomic.length, 0);
+    }
+    const subs = makeIo({ invoices: [] });
+    subs.io.count = async (u, c) => (c === 'subscriptions' ? 2 : 0);
+    assert.match((await deleteCard(uid, 'c1', subs.io)).errors._form, /2 assinaturas/);
+    const f = makeIo({ invoices: [] });
+    f.io.list = async () => { throw new Error('x'); };
+    const orig = console.error; console.error = () => {};
+    assert.equal((await deleteCard(uid, 'c1', f.io)).ok, false);
+    console.error = orig;
+    assert.equal(f.calls.atomic.length, 0);
+  });
+  it('excluir fatura: cancelada ou aberta vazia, definitivamente e no lote; bloqueia com compras, fechada/paga e leitura falha', async () => {
+    for (const status of ['cancelled', 'open']) {
+      const m = makeIo({ invoices: [invC({ status })], linked: 0 });
+      assert.deepEqual(await deleteInvoice(uid, 'c1_2026-10', m.io), { ok: true });
+      assert.deepEqual(m.calls.atomic.at(-1), [{ type: 'delete', collection: 'invoices', docId: 'c1_2026-10', before: invC({ status }) }]);
+    }
+    for (const mk of [makeIo({ invoices: [invC({ status: 'cancelled' })], linked: 2 }), makeIo({ invoices: [invC({ status: 'paid', totalCents: 1 })] }), makeIo({ invoices: [invC({ status: 'closed' })] }), makeIo({ invoices: [] })]) {
+      assert.equal((await deleteInvoice(uid, 'c1_2026-10', mk.io)).ok, false);
+      assert.equal(mk.calls.atomic.length, 0);
+    }
+    const f = makeIo({ invoices: [invC({ status: 'cancelled' })] });
+    f.io.count = async () => { throw new Error('x'); };
+    const orig = console.error; console.error = () => {};
+    assert.equal((await deleteInvoice(uid, 'c1_2026-10', f.io)).ok, false);
+    console.error = orig;
+  });
+  it('excluir a fatura cancelada libera o mês: nova compra cria a fatura do mês em vez de pular para o seguinte', async () => {
+    const withCancelled = makeIo({ invoices: [invC({ id: 'c1_2026-11', referenceMonth: '2026-11', status: 'cancelled' })] });
+    await registerCardPurchase(uid, 'c1', rawBuy({ purchaseDate: '2026-11-05' }), withCancelled.io);
+    assert.equal(withCancelled.calls.atomic.flat().find((o) => o.collection === 'cardPurchases').data.invoiceId, 'c1_2026-12'); // pulou (comportamento antigo)
+    const freed = makeIo({ invoices: [] });
+    await registerCardPurchase(uid, 'c1', rawBuy({ purchaseDate: '2026-11-05' }), freed.io);
+    assert.equal(freed.calls.atomic.flat().find((o) => o.collection === 'cardPurchases').data.invoiceId, 'c1_2026-11');
   });
 });
 
