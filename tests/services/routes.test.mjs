@@ -3,9 +3,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { NAV_ITEMS } from '../../js/utils/nav.js';
 
-const root = join(import.meta.dirname, '..', '..');
+const root = fileURLToPath(new URL('../..', import.meta.url));
 const vercel = JSON.parse(readFileSync(join(root, 'vercel.json'), 'utf8'));
 const appJs = readFileSync(join(root, 'js', 'app.js'), 'utf8');
 
