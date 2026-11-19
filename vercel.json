@@ -19,19 +19,19 @@
     }
   ],
   "rewrites": [
-    { "source": "/dashboard", "destination": "/pages/dashboard.html" },
-    { "source": "/bancos", "destination": "/pages/bancos.html" },
-    { "source": "/categorias", "destination": "/pages/categorias.html" },
-    { "source": "/receitas", "destination": "/pages/receitas.html" },
-    { "source": "/despesas", "destination": "/pages/despesas.html" },
-    { "source": "/transferencias", "destination": "/pages/transferencias.html" },
-    { "source": "/orcamentos", "destination": "/pages/orcamentos.html" },
-    { "source": "/assinaturas", "destination": "/pages/assinaturas.html" },
-    { "source": "/devedores", "destination": "/pages/devedores.html" },
-    { "source": "/metas", "destination": "/pages/metas.html" },
-    { "source": "/cartoes", "destination": "/pages/cartoes.html" },
-    { "source": "/relatorios", "destination": "/pages/relatorios.html" },
-    { "source": "/configuracoes", "destination": "/pages/configuracoes.html" },
-    { "source": "/manutencao-dados", "destination": "/pages/manutencao-dados.html" }
+    { "source": "/dashboard", "destination": "/pages/dashboard" },
+    { "source": "/bancos", "destination": "/pages/bancos" },
+    { "source": "/categorias", "destination": "/pages/categorias" },
+    { "source": "/receitas", "destination": "/pages/receitas" },
+    { "source": "/despesas", "destination": "/pages/despesas" },
+    { "source": "/transferencias", "destination": "/pages/transferencias" },
+    { "source": "/orcamentos", "destination": "/pages/orcamentos" },
+    { "source": "/assinaturas", "destination": "/pages/assinaturas" },
+    { "source": "/devedores", "destination": "/pages/devedores" },
+    { "source": "/metas", "destination": "/pages/metas" },
+    { "source": "/cartoes", "destination": "/pages/cartoes" },
+    { "source": "/relatorios", "destination": "/pages/relatorios" },
+    { "source": "/configuracoes", "destination": "/pages/configuracoes" },
+    { "source": "/manutencao-dados", "destination": "/pages/manutencao-dados" }
   ]
 }
