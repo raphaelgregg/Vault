@@ -13,6 +13,7 @@ import {
   allocateLinkedGoalBalances, isAccountLinkedGoal, goalSavedCents, goalProgressPercent, formatCents,
 } from '../services/goals.js';
 import { listAccounts } from '../services/accounts.js';
+import { accountLabel as accountText } from '../core/model.js';
 import { loadBalances } from '../services/balances.js';
 import { describeError } from '../utils/errors.js';
 
@@ -56,7 +57,7 @@ async function reload() {
 
 const accountLabel = (id) => {
   const a = accounts.find((x) => x.id === id);
-  return a ? `${a.institution} — ${a.name}` : '—';
+  return a ? accountText(a) : '—';
 };
 const savedOf = (g) => saved.get(g.id) ?? 0;
 

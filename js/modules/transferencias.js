@@ -24,6 +24,7 @@ import {
 import { createPager } from '../services/pager.js';
 import { createPagerFooter } from '../components/pager-footer.js';
 import { listAccounts } from '../services/accounts.js';
+import { accountLabel } from '../core/model.js';
 
 export const meta = { title: 'Transferências', icon: 'arrow-left-right' };
 
@@ -329,7 +330,7 @@ function openTransferModal(transfer = null) {
         }, [
           el('option', { value: '', disabled: true, selected: !transfer }, 'Selecione a conta de origem'),
           ...activeAccounts.map((a) =>
-            el('option', { value: a.id, selected: transfer?.fromAccountId === a.id }, `${a.institution} — ${a.name}`)
+            el('option', { value: a.id, selected: transfer?.fromAccountId === a.id }, accountLabel(a))
           ),
         ]),
         el('span', { class: 'form__error', 'data-for': 'fromAccountId' }),
@@ -343,7 +344,7 @@ function openTransferModal(transfer = null) {
         }, [
           el('option', { value: '', disabled: true, selected: !transfer }, 'Selecione a conta de destino'),
           ...activeAccounts.map((a) =>
-            el('option', { value: a.id, selected: transfer?.toAccountId === a.id }, `${a.institution} — ${a.name}`)
+            el('option', { value: a.id, selected: transfer?.toAccountId === a.id }, accountLabel(a))
           ),
         ]),
         el('span', { class: 'form__error', 'data-for': 'toAccountId' }),
@@ -540,7 +541,7 @@ function confirmDeleteTransfer(transfer) {
 
 function getAccountLabel(accountId) {
   const acc = accountsCache.find((a) => a.id === accountId);
-  return acc ? `${acc.institution} — ${acc.name}` : accountId ?? '—';
+  return acc ? accountLabel(acc) : accountId ?? '—';
 }
 
 function getStatusLabel(value) {

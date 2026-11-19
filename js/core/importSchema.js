@@ -29,7 +29,7 @@ export const IMPORT_ENTITIES = Object.freeze({
     label: 'Contas', kind: 'accounts', create: 'createAccount',
     columns: [
       col('instituicao', 'institution', 'text', { required: true, example: 'Nubank' }),
-      col('nome', 'name', 'text', { required: true, example: 'Conta Corrente' }),
+      col('nome', 'name', 'text', { example: 'Conta Corrente', help: 'opcional: conta sem nome específico' }),
       col('tipo', 'type', 'enum', { required: true, example: 'checking', help: 'checking|salary|savings|digital|investment|benefit|other' }),
       col('saldo_inicial', 'initialBalanceCents', 'money', { def: '0', example: '1500,00' }),
       col('cor', 'color', 'text', { def: LIGHT_GREEN, example: '#1f7a5c' }),
@@ -191,11 +191,12 @@ export function resolveRef(refType, value, ctx, institution = '') {
 
   const sameName = list.filter((i) => normalizeName(i.name) === wanted);
   if (isAccount && wantedInst) {
+    const shown = value ? `"${value}"` : '(sem nome)';
     const hits = sameName.filter((i) => instOf(i) === wantedInst);
     if (hits.length === 1) return { id: hits[0].id };
-    if (hits.length > 1) return { error: `"${value}" é ambíguo (${hits.length} contas "${value}" em "${institution}"); use o identificador.` };
-    if (sameName.length) return { error: `Conta "${value}" não encontrada na instituição "${institution}" (existe em: ${sameName.map((i) => i.institution || '—').join(', ')}).` };
-    return { error: `Conta "${value}" não encontrada.` };
+    if (hits.length > 1) return { error: `${shown} é ambíguo (${hits.length} contas ${shown} em "${institution}"); use o identificador.` };
+    if (sameName.length) return { error: `Conta ${shown} não encontrada na instituição "${institution}" (existe em: ${sameName.map((i) => i.institution || '—').join(', ')}).` };
+    return { error: value ? `Conta ${shown} não encontrada.` : `Nenhuma conta sem nome na instituição "${institution}".` };
   }
   if (sameName.length === 1) return { id: sameName[0].id };
   if (sameName.length > 1) {
@@ -230,9 +231,14 @@ export function mapImportRow(key, values, ctx) {
     if (c.type === 'institution') continue; // auxiliar: lida junto da coluna de conta que ela qualifica
     let text = String(values[c.name] ?? '').trim();
     if (text === '' && c.def !== undefined) text = c.def;
+    const instText = c.institution ? String(values[c.institution] ?? '').trim() : '';
     if (text === '') {
-      if (c.required) errors[c.name] = 'Campo obrigatório.';
-      else if (c.institution && String(values[c.institution] ?? '').trim()) warnings.push(`"${c.institution}" informada sem "${c.name}"; ignorada.`);
+      // Conta sem nome: `conta` vazia + `instituicao` identifica a conta sem nome daquela instituição.
+      if (c.type === 'ref:accounts' && instText) {
+        const r = resolveRef('accounts', '', ctx, instText);
+        if (r.error) errors[c.name] = r.error;
+        else raw[c.field] = r.id;
+      } else if (c.required) errors[c.name] = 'Campo obrigatório.';
       continue;
     }
     if (c.type === 'money') {

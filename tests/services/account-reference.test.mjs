@@ -4,8 +4,8 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildEntity } from '../../js/core/model.js';
-import { createAccount } from '../../js/services/accounts.js';
+import { buildEntity, accountLabel } from '../../js/core/model.js';
+import { createAccount, updateAccount } from '../../js/services/accounts.js';
 import { createIncome } from '../../js/services/incomes.js';
 import { mapImportRow, resolveRef, templateRows, IMPORT_ENTITIES } from '../../js/core/importSchema.js';
 import { parseCsv } from '../../js/utils/csv.js';
@@ -82,7 +82,8 @@ describe('importação de receitas: resolução de conta', () => {
     assert.equal(wrongInst.ok, false);
     assert.match(wrongInst.errors.conta, /não encontrada na instituição "Nubank".*Inter/);
     assert.match(mapImportRow('receitas', income({ instituicao: 'Banco X' }), ctx).errors.conta, /não encontrada na instituição "Banco X"/);
-    assert.match(mapImportRow('receitas', income({ conta: '' }), ctx).errors.conta, /obrigatório/);
+    assert.match(mapImportRow('receitas', income({ conta: '', instituicao: '' }), ctx).errors.conta, /obrigatório/);
+    assert.match(mapImportRow('receitas', income({ conta: '', instituicao: 'Nubank' }), ctx).errors.conta, /Nenhuma conta sem nome na instituição "Nubank"/);
   });
 
   it('6) mesmo nome em instituições diferentes: sem instituição é ambíguo; com instituição resolve cada uma', () => {
@@ -105,12 +106,6 @@ describe('importação de receitas: resolução de conta', () => {
     assert.deepEqual(resolveRef('accounts', 'Itaú — Corrente', ctx), { id: 'a2' });
     assert.deepEqual(resolveRef('accounts', 'nubank - corrente', ctx), { id: 'a1' });
     assert.match(resolveRef('accounts', 'Inter — Corrente', ctx).error, /não encontrado/);
-  });
-
-  it('instituicao sem conta (conta opcional) gera aviso, não erro', () => {
-    const r = mapImportRow('metas', { nome: 'M', objetivo: '10,00', conta: '', instituicao: 'Nubank' }, ctx);
-    assert.equal(r.ok, true);
-    assert.match(r.warnings.join(' '), /instituicao.*sem "conta"/);
   });
 
   it('instituicao não vira campo do modelo nem aviso de coluna desconhecida', () => {
@@ -225,5 +220,104 @@ describe('módulos que usam Contas', () => {
     assert.equal(mapImportRow('metas', { nome: 'M', objetivo: '10,00', ...base }, ctx).raw.accountId, 'a2');
     assert.equal(mapImportRow('cartoes', { nome: 'C', bandeira: 'Visa', limite: '10,00', dia_fechamento: '1', dia_vencimento: '2', ...base }, ctx).raw.accountId, 'a2');
     assert.equal(mapImportRow('despesas', { descricao: 'D', categoria: 'Salário', valor: '1,00', data_compra: '2026-12-01', vencimento: '2026-12-01', conta: 'Corrente' }, ctx).ok, false);
+  });
+});
+
+describe('contas sem nome (Bancos): instituição como identificação', () => {
+  const nameless = { id: 'n1', institution: 'Alelo Pod', status: 'active', type: 'benefit' };
+  const dup = { id: 'n2', institution: 'Alelo Pod', name: 'Alelo Pod', status: 'active', type: 'benefit' };
+  const base = { institution: 'Alelo Pod', type: 'benefit', initialBalanceCents: '0,00', color: '#000', status: 'active' };
+
+  it('rótulos do select: diferentes, sem nome, iguais, sem separador sobrando', () => {
+    assert.equal(accountLabel({ institution: 'Nubank', name: 'Corrente' }), 'Nubank — Corrente');
+    assert.equal(accountLabel({ institution: 'Alelo Pod' }), 'Alelo Pod');
+    assert.equal(accountLabel({ institution: 'Alelo Pod', name: '' }), 'Alelo Pod');
+    assert.equal(accountLabel({ institution: 'Alelo Pod', name: '  ' }), 'Alelo Pod');
+    assert.equal(accountLabel({ institution: 'Alelo Pod', name: 'Alelo Pod' }), 'Alelo Pod');
+    assert.equal(accountLabel({ institution: 'Itaú', name: 'ITAU' }), 'Itaú');
+    assert.equal(accountLabel({ name: 'Só nome' }), 'Só nome');
+    assert.equal(accountLabel({}), '—');
+    assert.equal(accountLabel(undefined), '—');
+  });
+
+  it('2) criar conta somente com instituição: válida e `name` não é gravado', async () => {
+    let saved;
+    const r = await createAccount(UID, base, { create: async (_u, _c, d) => { saved = d; return 'n1'; }, writeAudit: async () => {} });
+    assert.equal(r.ok, true);
+    assert.equal('name' in saved, false);
+    assert.equal(buildEntity('accounts', { ...base, name: '   ' }).ok, true);
+  });
+
+  it('1) com instituição e nome: ambos gravados; instituição continua obrigatória', async () => {
+    assert.equal(buildEntity('accounts', { ...base, name: 'Refeição' }).data.name, 'Refeição');
+    assert.equal(buildEntity('accounts', { ...base, institution: '' }).ok, false);
+  });
+
+  it('3) editar conta sem nome: nome removido envia null (deleteField); com nome mantém o texto', async () => {
+    const calls = [];
+    const io = { update: async (_u, _c, id, d) => { calls.push([id, d]); }, writeAudit: async () => {} };
+    assert.equal((await updateAccount(UID, 'n1', { ...base }, io)).ok, true);
+    assert.equal(calls[0][1].name, null);
+    assert.equal(calls[0][1].institution, 'Alelo Pod');
+    await updateAccount(UID, 'n1', { ...base, name: 'Novo' }, io);
+    assert.equal(calls[1][1].name, 'Novo');
+  });
+
+  it('4,5,6) receita aceita conta sem nome / nome igual / nome diferente; só accountId é enviado', () => {
+    for (const id of ['n1', 'n2', 'a1']) {
+      const payload = { description: 'S', categoryId: 'c1', amountCents: '1,00', expectedDate: '2026-12-05', accountId: id, status: 'pending', recurrence: 'none' };
+      const { ok, data } = buildEntity('incomes', payload);
+      assert.equal(ok, true);
+      assert.deepEqual(Object.keys(data).sort(), ['accountId', 'amountCents', 'categoryId', 'description', 'expectedDate', 'recurrence', 'status']);
+    }
+    assert.equal(buildEntity('incomes', { description: 'S', categoryId: 'c1', amountCents: '1,00', expectedDate: '2026-12-05', accountId: 'n1', status: 'pending', recurrence: 'none', institution: 'Alelo Pod' }).ok, false);
+  });
+
+  it('7) editar receita preserva o vínculo (accountId inalterado no patch)', async () => {
+    const patches = [];
+    const base2 = { description: 'S', categoryId: 'c1', amountCents: '1,00', expectedDate: '2026-12-05', accountId: 'n1', status: 'pending', recurrence: 'none' };
+    const { updateIncome } = await import('../../js/services/incomes.js');
+    const r = await updateIncome(UID, 'i1', { ...base2, description: 'S2' }, { lookupCategory: async () => ({ id: 'c1', kind: 'income' }), update: async (_u, _c, id, d) => { patches.push(d); }, writeAudit: async () => {} });
+    assert.equal(r.ok, true);
+    assert.equal(patches[0].accountId, 'n1');
+    assert.equal('institution' in patches[0] || 'name' in patches[0], false);
+  });
+
+  it('9) contas antigas (com nome) seguem válidas e com o mesmo rótulo', () => {
+    const old = { id: 'o1', institution: 'Nubank', name: 'Caixinha', type: 'savings', initialBalanceCents: 0, color: '#000', status: 'active' };
+    const { id: _id, ...doc } = old;
+    assert.equal(buildEntity('accounts', { ...doc, initialBalanceCents: '0,00' }).ok, true);
+    assert.equal(accountLabel(old), 'Nubank — Caixinha');
+  });
+
+  it('10) CSV: conta sem nome importa por `instituicao` e exporta/reimporta sem perder o vínculo', async () => {
+    const c = { accounts: [nameless, dup, ...accounts], categories, cards: [], debtors: [] };
+    const r = mapImportRow('receitas', income({ conta: '', instituicao: 'Alelo Pod' }), c);
+    assert.equal(r.ok, true);
+    assert.equal(r.raw.accountId, 'n1');
+    // conta com nome igual à instituição continua resolvendo por nome
+    assert.equal(mapImportRow('receitas', income({ conta: 'Alelo Pod', instituicao: 'Alelo Pod' }), c).raw.accountId, 'n2');
+    // conta com nome opcional na importação de contas
+    const acc = mapImportRow('contas', { instituicao: 'Sodexo', nome: '', tipo: 'benefit' }, c);
+    assert.equal(acc.ok, true);
+    assert.equal('name' in acc.raw, false);
+
+    const { io, tables } = makeIo([{ id: 'i1', description: 'Salário', categoryId: 'c1', amountCents: 10000, expectedDate: '2026-12-05', accountId: 'n1', status: 'pending', recurrence: 'none' }]);
+    tables.accounts = [nameless, ...accounts];
+    const out = await exportCsv(UID, 'receitas', { io });
+    const row = parseCsv(out.text).rows[0].values;
+    assert.deepEqual([row.conta, row.instituicao], ['', 'Alelo Pod']);
+    const plan = dryRunImport('receitas', out.text, await loadImportData(UID, io));
+    assert.equal(plan.counts.error, 0);
+    assert.equal(plan.rows[0].raw.accountId, 'n1');
+    const empty = makeIo([]);
+    empty.tables.accounts = [nameless, ...accounts];
+    assert.equal(dryRunImport('receitas', out.text, await loadImportData(UID, empty.io)).rows[0].raw.accountId, 'n1');
+  });
+
+  it('CSV de contas: `nome` não é obrigatório; mesma instituição sem nome duas vezes é duplicata', () => {
+    const csv = 'instituicao;nome;tipo\nSodexo;;benefit\nSodexo;;benefit\nVR;Refeição;benefit';
+    const plan = dryRunImport('contas', csv, { accounts: [], categories: [], cards: [], debtors: [], records: { contas: [] }, errors: {} });
+    assert.deepEqual(plan.rows.map((r) => r.action), ['create', 'duplicate', 'create']);
   });
 });

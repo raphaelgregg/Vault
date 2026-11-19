@@ -234,6 +234,61 @@ try {
   await page.getByRole('button', { name: 'Excluir', exact: true }).click();
   await page.waitForFunction(() => /não pode ser excluída/.test(document.querySelector('.toast')?.innerText ?? ''));
 
+  log('contas sem nome: criar só com instituição, editar, receita vinculada persiste só accountId, rótulos sem duplicar');
+  await go('bancos');
+  await page.getByRole('button', { name: 'Nova conta' }).click();
+  await page.fill('#institution', 'Alelo Pod');
+  await page.selectOption('#type', 'benefit');
+  await page.locator('#account-form button[type="submit"]').click();
+  await waitText(/Alelo Pod/);
+  await page.getByRole('button', { name: 'Editar Alelo Pod' }).click();
+  await page.fill('#institution', 'Alelo Pod');
+  await page.locator('#account-form button[type="submit"]').click();
+  await page.waitForFunction(() => /atualizada/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.getByRole('button', { name: 'Nova conta' }).click();
+  await page.fill('#institution', 'Sodexo');
+  await page.fill('#name', 'Sodexo');
+  await page.selectOption('#type', 'benefit');
+  await page.locator('#account-form button[type="submit"]').click();
+  await waitText(/Sodexo/);
+  await go('receitas');
+  await page.getByRole('button', { name: 'Nova receita' }).click();
+  const labels = await page.locator('#accountId option').allInnerTexts();
+  assert.ok(labels.includes('Alelo Pod'), `rótulos: ${labels}`);
+  assert.ok(labels.includes('Sodexo') && !labels.some((l) => /Sodexo — Sodexo|Alelo Pod — /.test(l)), `rótulos: ${labels}`);
+  assert.ok(labels.includes('Banco A — Conta A'), `rótulos: ${labels}`);
+  const alelo = await page.evaluate(async () => {
+    const { listAccounts } = await import('/js/services/accounts.js');
+    const { auth } = await import('/js/firebase/client.js');
+    return (await listAccounts(auth.currentUser.uid)).find((a) => a.institution === 'Alelo Pod');
+  });
+  assert.equal('name' in alelo, false, 'conta só com instituição não grava `name`');
+  await page.fill('#description', 'Vale UI');
+  await page.selectOption('#categoryId', cats.inc);
+  await page.fill('#amountCents', '300,00');
+  await page.selectOption('#accountId', alelo.id);
+  await page.selectOption('#status', 'pending');
+  await page.locator('#income-form button[type="submit"]').click();
+  await waitText(/Vale UI/);
+  const stored = await page.evaluate(async () => {
+    const { listIncomes } = await import('/js/services/incomes.js');
+    const { auth } = await import('/js/firebase/client.js');
+    return (await listIncomes(auth.currentUser.uid)).find((i) => i.description === 'Vale UI');
+  });
+  assert.equal(stored.accountId, alelo.id);
+  assert.equal('institution' in stored || 'name' in stored, false, 'receita não persiste institution/name');
+  await page.getByRole('button', { name: 'Editar Vale UI' }).click();
+  await page.fill('#description', 'Vale UI editado');
+  await page.locator('#income-form button[type="submit"]').click();
+  await waitText(/Vale UI editado/);
+  const edited = await page.evaluate(async () => {
+    const { listIncomes } = await import('/js/services/incomes.js');
+    const { auth } = await import('/js/firebase/client.js');
+    return (await listIncomes(auth.currentUser.uid)).find((i) => i.description === 'Vale UI editado');
+  });
+  assert.equal(edited.accountId, alelo.id, 'edição preserva o vínculo');
+  console.info('  payload persistido:', JSON.stringify(Object.keys(edited).sort()));
+
   assert.deepEqual(app.problems, [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E movimentos OK');
 } catch (error) {

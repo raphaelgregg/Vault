@@ -1072,3 +1072,63 @@ describe('Orçamentos (VF-2-03e)', () => {
     await assertFails(getDoc(budgetDoc(asAnonymous())));
   });
 });
+
+describe('Contas: `name` opcional (Bancos) e receitas só com accountId', () => {
+  const { name: _omit, ...nameless } = account;
+  const incomePayload = (overrides = {}) => ({
+    description: 'Salário', categoryId: 'cat-casa', amountCents: 500000, accountId: 'acc-sem-nome',
+    expectedDate: new Date('2026-12-05'), status: 'pending', recurrence: 'none',
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...overrides,
+  });
+
+  it('cria conta SEM `name` (só instituição)', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(doc(db, 'users', ALICE, 'accounts', 'acc-sem-nome'), nameless));
+  });
+
+  it('continua negando `name` vazio ou não-string, e instituição ausente', async () => {
+    const db = asUser(ALICE);
+    await assertFails(setDoc(doc(db, 'users', ALICE, 'accounts', 'x1'), { ...account, name: '' }));
+    await assertFails(setDoc(doc(db, 'users', ALICE, 'accounts', 'x2'), { ...account, name: 42 }));
+    const { institution: _i, ...noInstitution } = account;
+    await assertFails(setDoc(doc(db, 'users', ALICE, 'accounts', 'x3'), noInstitution));
+  });
+
+  it('conta antiga (com name) segue válida; editar removendo `name` (deleteField) é aceito', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(getDoc(doc(db, 'users', ALICE, 'accounts', 'acc-main')));
+    await assertSucceeds(updateDoc(doc(db, 'users', ALICE, 'accounts', 'acc-main'), { name: deleteField(), updatedAt: serverTimestamp() }));
+    const snap = await getDoc(doc(db, 'users', ALICE, 'accounts', 'acc-main'));
+    assert.equal('name' in snap.data(), false);
+    assert.equal(snap.data().institution, 'Banco Exemplo');
+  });
+
+  it('receita referencia a conta sem nome só por accountId; persiste exatamente esse documento', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => setDoc(doc(ctx.firestore(), 'users', ALICE, 'accounts', 'acc-sem-nome'), nameless));
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(doc(db, 'users', ALICE, 'incomes', 'r1'), incomePayload()));
+    const stored = (await getDoc(doc(db, 'users', ALICE, 'incomes', 'r1'))).data();
+    assert.deepEqual(Object.keys(stored).sort(), ['accountId', 'amountCents', 'categoryId', 'createdAt', 'description', 'expectedDate', 'recurrence', 'status', 'updatedAt']);
+    assert.equal(stored.accountId, 'acc-sem-nome');
+  });
+
+  it('receita NÃO aceita institution/name da conta como campos próprios', async () => {
+    const db = asUser(ALICE);
+    await assertFails(setDoc(doc(db, 'users', ALICE, 'incomes', 'r2'), incomePayload({ accountId: 'acc-main', institution: 'Banco Exemplo' })));
+    await assertFails(setDoc(doc(db, 'users', ALICE, 'incomes', 'r3'), incomePayload({ accountId: 'acc-main', name: 'Conta principal' })));
+  });
+
+  it('receita com conta inexistente é negada; editar mantém accountId', async () => {
+    const db = asUser(ALICE);
+    await assertFails(setDoc(doc(db, 'users', ALICE, 'incomes', 'r4'), incomePayload({ accountId: 'nao-existe' })));
+    await assertSucceeds(setDoc(doc(db, 'users', ALICE, 'incomes', 'r5'), incomePayload({ accountId: 'acc-main' })));
+    await assertSucceeds(updateDoc(doc(db, 'users', ALICE, 'incomes', 'r5'), { description: 'Salário editado', updatedAt: serverTimestamp() }));
+    assert.equal((await getDoc(doc(db, 'users', ALICE, 'incomes', 'r5'))).data().accountId, 'acc-main');
+  });
+
+  it('excluir conta sem nome é permitido ao dono', async () => {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(doc(db, 'users', ALICE, 'accounts', 'acc-del'), nameless));
+    await assertSucceeds(deleteDoc(doc(db, 'users', ALICE, 'accounts', 'acc-del')));
+  });
+});

@@ -21,6 +21,7 @@ import {
 } from '../services/subscriptions.js';
 import { listCategories, getCategoryKindOptions } from '../services/categories.js';
 import { listAccounts } from '../services/accounts.js';
+import { accountLabel as accountText } from '../core/model.js';
 import { listCards } from '../services/creditCards.js';
 
 export const meta = { title: 'Assinaturas', icon: 'repeat' };
@@ -277,7 +278,7 @@ function openSubscriptionModal(item = null) {
     el('div', { class: 'form__row' }, [
       field('Conta *', 'accountId', el('select', { id: 'accountId', name: 'accountId', required: true }, [
         el('option', { value: '', disabled: true, selected: !item }, 'Selecione uma conta'),
-        ...activeAccounts.map((a) => el('option', { value: a.id, selected: item?.accountId === a.id }, `${a.institution} — ${a.name}`)),
+        ...activeAccounts.map((a) => el('option', { value: a.id, selected: item?.accountId === a.id }, accountText(a))),
       ])),
       field('Categoria *', 'categoryId', el('select', { id: 'categoryId', name: 'categoryId', required: true }, [
         el('option', { value: '', disabled: true, selected: !item }, 'Selecione uma categoria'),
@@ -361,7 +362,7 @@ function categoryLabel(category) {
 
 function accountLabel(accountId) {
   const account = accountsCache.find((a) => a.id === accountId);
-  return account ? `${account.institution} — ${account.name}` : (accountId ?? '—');
+  return account ? accountText(account) : (accountId ?? '—');
 }
 
 function optionLabel(options, value) {

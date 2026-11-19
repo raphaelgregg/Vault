@@ -10,7 +10,7 @@ import { el, $, toast, refreshIcons } from '../core/ui.js';
 import { openModal, closeModal } from '../components/modal.js';
 import { createStatCard } from '../components/stat-card.js';
 import { formatCentsInput, formatDate, clearErrors, showFormErrors as showErrors } from '../components/form-kit.js';
-import { filterMovements } from '../core/model.js';
+import { filterMovements, accountLabel } from '../core/model.js';
 import {
   listIncomes,
   createIncome,
@@ -407,7 +407,7 @@ function openIncomeModal(income = null) {
         }, [
           el('option', { value: '', disabled: true, selected: !income }, 'Selecione uma conta'),
           ...activeAccounts.map((a) =>
-            el('option', { value: a.id, selected: income?.accountId === a.id }, `${a.institution} — ${a.name}`)
+            el('option', { value: a.id, selected: income?.accountId === a.id }, accountLabel(a))
           ),
         ]),
         el('span', { class: 'form__error', 'data-for': 'accountId' }),
@@ -588,7 +588,7 @@ function confirmDeleteIncome(income) {
 
 function accountLabelOf(accountId) {
   const a = accountsCache.find((x) => x.id === accountId);
-  return a ? `${a.institution} — ${a.name}` : '—';
+  return a ? accountLabel(a) : '—';
 }
 
 function getCategoryLabel(categoryId) {

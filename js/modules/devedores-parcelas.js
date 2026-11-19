@@ -12,7 +12,7 @@ import {
 import {
   listDebts, listDebtPayments, createDebtPlan, cancelDebt, registerDebtPayment, settleDebts, formatCents,
 } from '../services/debtPayments.js';
-import { debtorPendingCents, debtorObligations } from '../core/model.js';
+import { debtorPendingCents, debtorObligations, accountLabel } from '../core/model.js';
 import { getDebtor, getDebtorStatement } from '../services/debtors.js';
 import { listCards } from '../services/creditCards.js';
 import { listAccounts } from '../services/accounts.js';
@@ -40,7 +40,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   const receivedBy = new Map();
   for (const p of payments) receivedBy.set(p.debtId, (receivedBy.get(p.debtId) ?? 0) + p.amountCents);
   const isOpen = debtor.status === 'open';
-  const activeAccounts = accounts.filter((a) => a.status === 'active').map((a) => ({ value: a.id, label: `${a.institution} — ${a.name}` }));
+  const activeAccounts = accounts.filter((a) => a.status === 'active').map((a) => ({ value: a.id, label: accountLabel(a) }));
 
   const refresh = async () => {
     await onChange?.();

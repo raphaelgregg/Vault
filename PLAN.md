@@ -239,6 +239,12 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Dados antigos: registros no Firestore já usam `accountId`; órfãos (conta removida) exportam o id e exigem tratamento manual. CSVs antigos com "Instituição — Nome" continuam importáveis.
 - Aceite: testes de cadastro, vínculo, homônimas, referência inexistente, export→reimport e módulos que usam contas passam; lint e unit verdes.
 
+- [x] **VF-2-03ae — Contas: `name` opcional (rótulo "Conta") e rótulo único de conta nos selects** (consistência) — CONCLUÍDA 2026-11-19 (**`firestore.rules` ALTERADO: republicar**; sem migração).
+- Problema [C]: `name` era obrigatório (Rules, modelo, formulário) e os selects montavam `${institution} — ${name}` (duplicava "Alelo Pod — Alelo Pod" e deixava "— " sem nome).
+- Solução: Rules `requiredOk` sem `name` + `(!('name' in data()) || text('name', 80))`; `SCHEMAS.accounts.name = optionalText(80)`; texto só com espaços = vazio (`validateEntity/buildEntity`); `updateAccount` envia `name: null` (deleteField) ao limpar; `accountLabel()` em `js/core/model.js` usado em Bancos, Receitas, Despesas, Assinaturas, Metas, Transferências, Cartões e Devedores; CSV: `nome` de contas opcional e `conta` vazia + `instituicao` resolve a conta sem nome. Contas antigas (com `name`) seguem válidas; receitas continuam com só `accountId`.
+- Arquivos: `firestore.rules`, `js/core/model.js`, `js/core/importSchema.js`, `js/services/accounts.js`, `js/modules/{bancos,receitas,despesas,assinaturas,metas,transferencias,cartoes,devedores-parcelas}.js`, testes (`account-reference`, rules, `e2e/movements`).
+- Limitação: Rules do repositório não verificadas contra as publicadas; sem republicar, criar conta sem nome dá `permission-denied` em produção.
+
 ### Fase 3 — Arquitetura, qualidade e refatoração
 
 - [x] **VF-3-01 — Reduzir duplicação nos services** (Médio) — CONCLUÍDA 2026-11-18: extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
@@ -308,3 +314,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-19 — VF-2-03ab concluída (401 por chave de API restrita no servidor → verificação local do ID token; erros de configuração separados; `GET /api/admin-claims` e lista na UI). Promovida para development e main.
 - 2026-11-19 — VF-2-03ac concluída (CSV unificado, escopo estrito ao uid, importação idempotente com mesclagem). Promovida para development e main.
 - 2026-11-19 — VF-2-03ad concluída (CSV: `conta` só com o nome + coluna `instituicao`; resolução sem ambiguidade; export/reimport sem perda de vínculo). Sem mudança em Rules/índices/modelo de dados.
+- 2026-11-19 — VF-2-03ae concluída (conta sem nome, `accountLabel` único nos selects). **Republicar `firestore.rules`** (`npx firebase deploy --only firestore:rules`, com autorização).

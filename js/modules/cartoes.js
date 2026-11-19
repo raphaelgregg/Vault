@@ -30,7 +30,7 @@ import { listAccounts } from '../services/accounts.js';
 import { listCategories } from '../services/categories.js';
 import { listOpenDebtors } from '../services/debtors.js';
 import { describeError } from '../utils/errors.js';
-import { invoiceTotalCents, debtorPendingCents } from '../core/model.js';
+import { invoiceTotalCents, debtorPendingCents, accountLabel as accountText } from '../core/model.js';
 
 export const meta = { title: 'Cartões', icon: 'credit-card' };
 
@@ -73,7 +73,7 @@ async function reload() {
 
 const accountLabel = (id) => {
   const a = accounts.find((x) => x.id === id);
-  return a ? `${a.institution} — ${a.name}` : '—';
+  return a ? accountText(a) : '—';
 };
 
 function renderPage() {

@@ -149,9 +149,9 @@ service cloud.firestore {
       allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['institution', 'name', 'type', 'initialBalanceCents', 'color', 'status', 'createdAt', 'updatedAt'])
-        && requiredOk(['institution', 'name', 'type', 'initialBalanceCents', 'color', 'status', 'createdAt', 'updatedAt'])
+        && requiredOk(['institution', 'type', 'initialBalanceCents', 'color', 'status', 'createdAt', 'updatedAt'])
         && text('institution', 80)
-        && text('name', 80)
+        && (!('name' in data()) || text('name', 80))
         && oneOf('type', ['checking', 'salary', 'savings', 'digital', 'investment', 'benefit', 'other'])
         && cents(data().initialBalanceCents)
         && text('color', 32)

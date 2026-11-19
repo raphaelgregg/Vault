@@ -67,6 +67,20 @@ export function centsToMoneyString(cents) {
   return `${Math.trunc(value / 100)},${String(value % 100).padStart(2, '0')}`;
 }
 
+/**
+ * Rótulo de exibição de uma conta (selects, listas, mensagens). Puro.
+ * "Instituição — Conta" quando ambos existem e diferem; só um deles quando o outro falta ou são iguais
+ * (sem caixa/acento); nunca separador sobrando.
+ */
+export function accountLabel(account) {
+  const fold = (v) => String(v ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const institution = String(account?.institution ?? '').trim();
+  const name = String(account?.name ?? '').trim();
+  if (!institution) return name || '—';
+  if (!name || fold(name) === fold(institution)) return institution;
+  return `${institution} — ${name}`;
+}
+
 /** Formata centavos para exibição pt-BR: 123456 -> "R$ 1.234,56". */
 export function formatCents(cents) {
   if (typeof cents !== 'number' || !Number.isInteger(cents)) return '—';
@@ -103,7 +117,7 @@ export const SCHEMAS = Object.freeze({
     dateFields: [],
     fields: {
       institution: text(80),
-      name: text(80),
+      name: optionalText(80), // opcional: conta sem nome específico = só a instituição
       type: { kind: 'enum', required: true, values: ACCOUNT_TYPES.map((t) => t.value) },
       initialBalanceCents: cents0(),
       color: text(32),
@@ -394,7 +408,8 @@ export function validateEntity(kind, data, context = {}) {
 
   for (const [field, rule] of Object.entries(schema.fields)) {
     const value = data[field];
-    const missing = value === undefined || value === null || value === '';
+    const missing = value === undefined || value === null || value === ''
+      || (rule.kind === 'text' && typeof value === 'string' && value.trim() === ''); // texto só com espaços = vazio
 
     if (missing) {
       if (rule.required) errors[field] = 'Campo obrigatório.';
@@ -473,7 +488,8 @@ export function buildEntity(kind, data, context = {}) {
   const out = {};
   for (const [field, rule] of Object.entries(schema.fields)) {
     const value = data[field];
-    if (value === undefined || value === null || value === '') continue;
+    if (value === undefined || value === null || value === ''
+      || (rule.kind === 'text' && typeof value === 'string' && value.trim() === '')) continue;
     if (rule.kind === 'text' || rule.kind === 'enum' || rule.kind === 'ref') {
       out[field] = typeof value === 'string' ? value.trim() : value;
     } else if (rule.kind === 'cents') {

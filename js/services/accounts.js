@@ -48,7 +48,8 @@ export async function updateAccount(uid, accountId, rawData, io = {}) {
   const { ok, data, errors } = buildEntity('accounts', rawData);
   if (!ok) return { ok: false, errors };
 
-  await updateAudited(uid, COLLECTION, accountId, data, io);
+  // Conta sem nome: remove `name` se existia (null → deleteField em `update`; update é merge).
+  await updateAudited(uid, COLLECTION, accountId, { ...data, name: data.name ?? null }, io);
   return { ok: true };
 }
 

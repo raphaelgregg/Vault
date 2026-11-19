@@ -9,6 +9,7 @@ import { el, $, toast, refreshIcons } from '../core/ui.js';
 import { openModal, closeModal } from '../components/modal.js';
 import { createStatCard } from '../components/stat-card.js';
 import { formatCentsInput, clearErrors, showFormErrors as showErrors } from '../components/form-kit.js';
+import { accountLabel } from '../core/model.js';
 import { loadBalances, READ_LIMIT } from '../services/balances.js';
 import {
   listAccounts,
@@ -147,7 +148,7 @@ function createAccountsTable() {
 
   const columns = [
     { key: 'institution', label: 'Instituição' },
-    { key: 'name', label: 'Conta' },
+    { key: 'name', label: 'Conta', render: (v) => v || '—' },
     { key: 'type', label: 'Tipo', render: (v) => getTypeLabel(v) },
     { key: 'initialBalanceCents', label: 'Saldo inicial', numeric: true, render: (v) => formatCents(Number(v) || 0) },
     ...(derived ? [{ key: 'id', label: 'Saldo atual', numeric: true, render: (v) => formatCents(derived.balances.get(v) ?? 0) }] : []),
@@ -189,14 +190,14 @@ function createAccountsTable() {
         el('button', {
           type: 'button',
           class: 'btn btn--icon',
-          'aria-label': `Editar ${account.name}`,
+          'aria-label': `Editar ${account.name || account.institution}`,
           onClick: () => openAccountModal(account),
           html: '<i data-lucide="edit-2" aria-hidden="true"></i>',
         }),
         el('button', {
           type: 'button',
           class: 'btn btn--icon btn--danger',
-          'aria-label': `Excluir ${account.name}`,
+          'aria-label': `Excluir ${account.name || account.institution}`,
           onClick: () => confirmDeleteAccount(account),
           html: '<i data-lucide="trash-2" aria-hidden="true"></i>',
         }),
@@ -234,12 +235,11 @@ function openAccountModal(account = null) {
         el('span', { class: 'form__error', 'data-for': 'institution' }),
       ]),
       el('div', { class: 'form__field' }, [
-        el('label', { for: 'name', text: 'Nome da conta *' }),
+        el('label', { for: 'name', text: 'Conta' }),
         el('input', {
           type: 'text',
           id: 'name',
           name: 'name',
-          required: true,
           maxlength: 80,
           value: account?.name ?? '',
           autocomplete: 'off',
@@ -311,7 +311,7 @@ function openAccountModal(account = null) {
   ];
 
   const modal = openModal({
-    title: isEdit ? `Editar conta: ${account.name}` : 'Nova conta',
+    title: isEdit ? `Editar conta: ${accountLabel(account)}` : 'Nova conta',
     body: form,
     footer,
     onClose: () => form.removeEventListener('submit', handleSubmit),
@@ -364,7 +364,7 @@ function openAccountModal(account = null) {
 /** Confirma exclusão de conta. */
 function confirmDeleteAccount(account) {
   const body = el('div', {}, [
-    el('p', { text: `Tem certeza que deseja excluir a conta "${account.name}"?` }),
+    el('p', { text: `Tem certeza que deseja excluir a conta "${accountLabel(account)}"?` }),
     el('p', { class: 'card__hint', text: 'Esta ação não pode ser desfeita. Contas com movimentações vinculadas não podem ser excluídas — nesse caso, arquive a conta (status "Arquivada").' }),
   ]);
 
