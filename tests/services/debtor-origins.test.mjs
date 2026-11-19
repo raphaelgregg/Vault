@@ -8,6 +8,8 @@ import { createDebtPlan, settleDebts, registerDebtPayment } from '../../js/servi
 import { deleteDebtor, getDebtorOverview, listOpenDebtors, loadDebtorStatements, getDebtorStatement, DEBTOR_LINK_QUERIES } from '../../js/services/debtors.js';
 import { debtorOverview, debtorMonthStatement, debtorObligations } from '../../js/core/model.js';
 import { describeError } from '../../js/utils/errors.js';
+import { allocateLinkedGoalBalances, isAccountLinkedGoal } from '../../js/core/model.js';
+import { registerGoalTransaction } from '../../js/services/goals.js';
 import { loadDashboard, DASHBOARD_SOURCES } from '../../js/services/dashboard.js';
 
 const uid = 'u1';
@@ -382,5 +384,44 @@ describe('antecipar e quitar (VF-2-03n)', () => {
       assert.ok(r.errors[field], field);
       assert.equal(atomic.length, 0);
     }
+  });
+});
+
+describe('metas vinculadas a conta (VF-2-03o)', () => {
+  const ts = (ms) => ({ toMillis: () => ms });
+  const g = (id, accountId, target, ms, o = {}) => ({ id, accountId, targetCents: target, status: 'active', createdAt: ts(ms), ...o });
+
+  it('modo conta vinculada = tem conta E nenhuma movimentação', () => {
+    assert.equal(isAccountLinkedGoal({ accountId: 'a' }, 0), true);
+    assert.equal(isAccountLinkedGoal({ accountId: 'a' }, undefined), true);
+    assert.equal(isAccountLinkedGoal({ accountId: 'a' }, 2), false); // legado com aportes
+    assert.equal(isAccountLinkedGoal({}, 0), false);
+  });
+  it('progresso = saldo da conta; várias metas na mesma conta repartem em ordem de criação, sem duplicar', () => {
+    const balances = new Map([['nu', 150000], ['inv', 40000], ['neg', -500]]);
+    const out = allocateLinkedGoalBalances([
+      g('b', 'nu', 100000, 2), g('a', 'nu', 100000, 1), g('c', 'inv', 90000, 1), g('n', 'neg', 100, 1),
+      g('x', 'nu', 500, 3, { status: 'cancelled' }), g('l', 'nu', 700, 1, {}), g('free', undefined, 10, 1),
+    ], balances, new Map([['l', 3]]));
+    assert.deepEqual([...out.entries()].sort(), [['a', 100000], ['b', 50000], ['c', 40000], ['n', 0]]);
+    assert.ok(out.get('a') + out.get('b') <= 150000); // nunca soma mais que o saldo
+    assert.equal(out.has('x'), false); // cancelada fora
+    assert.equal(out.has('l'), false); // legada (com movimentações) fora
+  });
+  it('aporte/resgate bloqueado em meta vinculada sem movimentações; meta sem conta ou legada segue aceitando', async () => {
+    const mk = (goal, txs = []) => {
+      const atomic = [];
+      return { atomic, io: { getById: async (u, c, id) => (c === 'goals' ? goal : { id, status: 'active' }), list: async () => txs, commitAtomic: async (u, ops) => { atomic.push(ops); return ['t']; } } };
+    };
+    const raw = { amountCents: '10,00', date: '2026-11-19', accountId: 'a1' };
+    const linked = mk({ id: 'g1', accountId: 'nu', targetCents: 100000, status: 'active' });
+    const r = await registerGoalTransaction(uid, 'g1', 'deposit', raw, linked.io);
+    assert.equal(r.ok, false);
+    assert.match(r.errors._form, /Transferências/);
+    assert.equal(linked.atomic.length, 0);
+    const free = mk({ id: 'g1', targetCents: 100000, status: 'active' });
+    assert.equal((await registerGoalTransaction(uid, 'g1', 'deposit', raw, free.io)).ok, true);
+    const legacy = mk({ id: 'g1', accountId: 'nu', targetCents: 100000, status: 'active' }, [{ type: 'deposit', amountCents: 500 }]);
+    assert.equal((await registerGoalTransaction(uid, 'g1', 'deposit', raw, legacy.io)).ok, true);
   });
 });

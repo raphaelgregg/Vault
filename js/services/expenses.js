@@ -8,7 +8,7 @@ import {
   getById,
   createAudited,
   updateAudited,
-  removeAudited,
+  commitAtomic,
 } from './firestore.js';
 import {
   buildEntity,
@@ -86,8 +86,11 @@ export async function deleteExpense(uid, expenseId, io = {}) {
   const expense = await (io.getById ?? getById)(uid, COLLECTION, expenseId);
   if (!expense) return { ok: false, errors: { _form: 'Despesa não encontrada.' } };
 
-  await removeAudited(uid, COLLECTION, expenseId, expense, io);
-  return { ok: true };
+  // Exclusão + auditoria em UM lote atômico (VF-2-03o). O saldo da conta é DERIVADO (despesas pagas), então
+  // excluir uma despesa paga devolve o valor ao saldo sem gravar nada na conta: `reversedCents` informa o estorno.
+  await (io.commitAtomic ?? commitAtomic)(uid, [{ type: 'delete', collection: COLLECTION, docId: expenseId, before: expense }], io);
+  const reversed = expense.status === 'paid' && expense.accountId;
+  return { ok: true, reversedCents: reversed ? Number(expense.amountCents) || 0 : 0, accountId: reversed ? expense.accountId : null };
 }
 
 /** Marca despesa como paga (status -> paid + paidDate = hoje). */

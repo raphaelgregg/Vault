@@ -4,7 +4,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createAudited, updateAudited, removeAudited } from '../../js/services/firestore.js';
+import { createAudited, updateAudited, removeAudited, commitAtomic } from '../../js/services/firestore.js';
 import { createAccount, updateAccount, deleteAccount } from '../../js/services/accounts.js';
 import { createCategory, updateCategory, deleteCategory } from '../../js/services/categories.js';
 import { createTransfer, updateTransfer, deleteTransfer } from '../../js/services/transfers.js';
@@ -123,8 +123,6 @@ describe('services delegam aos helpers (criar/atualizar/excluir/status)', () => 
     ['accounts', deleteAccount, { count: async () => 0 }],
     ['categories', deleteCategory, { count: async () => 0 }],
     ['transfers', deleteTransfer, {}],
-    ['incomes', deleteIncome, {}],
-    ['expenses', deleteExpense, {}],
   ];
 
   for (const [name, deleteFn, extra] of deletes) {
@@ -171,5 +169,40 @@ describe('services delegam aos helpers (criar/atualizar/excluir/status)', () => 
     await cancelExpense(uid, 'e1', io);
     assert.deepEqual(calls.update[0].data, { status: 'paid', paidDate: '2026-11-18' });
     assert.deepEqual(calls.audit.map((a) => a.entry.action), ['mark_paid', 'cancel']);
+  });
+});
+
+describe('exclusão atômica de despesas e receitas (VF-2-03o)', () => {
+  for (const [name, deleteFn, paidStatus] of [['expenses', deleteExpense, 'paid'], ['incomes', deleteIncome, 'received']]) {
+    it(`${name}: um lote com delete + auditoria e estorno informado (pago/recebido com conta)`, async () => {
+      const doc = { id: 'x1', status: paidStatus, accountId: 'a1', amountCents: 12345 };
+      const batches = [];
+      const r = await deleteFn(uid, 'x1', { getById: async () => doc, commitAtomic: async (u, ops) => { batches.push(ops); return ['x1']; } });
+      assert.deepEqual(r, { ok: true, reversedCents: 12345, accountId: 'a1' });
+      assert.deepEqual(batches, [[{ type: 'delete', collection: name, docId: 'x1', before: doc }]]);
+    });
+    it(`${name}: pendente/sem conta não informa estorno; inexistente não grava`, async () => {
+      for (const doc of [{ id: 'x1', status: 'pending', accountId: 'a1', amountCents: 500 }, { id: 'x1', status: paidStatus, amountCents: 500 }]) {
+        const r = await deleteFn(uid, 'x1', { getById: async () => doc, commitAtomic: async () => ['x1'] });
+        assert.deepEqual([r.ok, r.reversedCents, r.accountId], [true, 0, null]);
+      }
+      let called = false;
+      const r = await deleteFn(uid, 'x1', { getById: async () => null, commitAtomic: async () => { called = true; } });
+      assert.equal(r.ok, false);
+      assert.equal(called, false);
+    });
+  }
+  it('commitAtomic: op delete apaga o doc e grava a auditoria com `before` no MESMO lote', async () => {
+    const calls = [];
+    const batch = { set: (ref, data) => calls.push(['set', ref.path, data]), update: () => {}, delete: (ref) => calls.push(['delete', ref.path]), commit: async () => calls.push(['commit']) };
+    const ids = await commitAtomic(uid, [{ type: 'delete', collection: 'expenses', docId: 'x1', before: { id: 'x1', amountCents: 5 } }], {
+      newBatch: () => batch,
+      userDoc: (u, c, id) => ({ path: `${c}/${id}`, id }),
+      newDocRef: (u, c) => ({ path: `${c}/auto`, id: 'auto' }),
+    });
+    assert.deepEqual(ids, ['x1']);
+    assert.deepEqual(calls.map((c) => c[0]), ['delete', 'set', 'commit']);
+    assert.equal(calls[1][1], 'auditLog/auto');
+    assert.deepEqual([calls[1][2].action, calls[1][2].entity, calls[1][2].entityId, calls[1][2].before], ['delete', 'expenses', 'x1', { id: 'x1', amountCents: 5 }]);
   });
 });

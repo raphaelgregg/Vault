@@ -13,6 +13,7 @@
  *  6. criação/leitura válidas permitidas
  *  7. update/delete de auditLog negados
  */
+import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it, before, after, beforeEach } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -283,6 +284,19 @@ describe('auditLog imutável', () => {
   it('permite leitura do próprio log', async () => {
     const db = asUser(ALICE);
     await assertSucceeds(getDoc(doc(db, 'users', ALICE, 'auditLog', 'entry-1')));
+  });
+
+  it('exclusão atômica (VF-2-03o): delete do lançamento + entrada de auditoria com `before` no MESMO lote; auditoria continua imutável', async () => {
+    const db = asUser(ALICE);
+    const ref = await addDoc(collection(db, 'users', ALICE, 'expenses'), expensePayload());
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'users', ALICE, 'expenses', ref.id));
+    batch.set(doc(collection(db, 'users', ALICE, 'auditLog')), {
+      action: 'delete', entity: 'expenses', entityId: ref.id, before: { id: ref.id, amountCents: 5000, status: 'paid' },
+      actorUid: ALICE, createdAt: serverTimestamp(),
+    });
+    await assertSucceeds(batch.commit());
+    assert.equal((await getDoc(doc(db, 'users', ALICE, 'expenses', ref.id))).exists(), false);
   });
 
   it('permite criar entrada com actorUid correto', async () => {

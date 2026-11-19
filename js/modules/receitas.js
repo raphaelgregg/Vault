@@ -330,7 +330,8 @@ function createIncomeActions(income) {
     })
   );
 
-  if (income.status !== 'received') {
+  // Excluir também receitas recebidas (VF-2-03o): o saldo é derivado, então o valor sai da conta (confirmação explica).
+  {
     actions.push(
       el('button', {
         type: 'button',
@@ -556,6 +557,9 @@ async function confirmCancelIncome(income) {
 function confirmDeleteIncome(income) {
   const body = el('div', {}, [
     el('p', { text: `Tem certeza que deseja excluir a receita "${income.description}"?` }),
+    el('p', { class: 'card__hint', text: income.status === 'received' && income.accountId
+      ? `Receita recebida: ao excluir, ${formatCents(Number(income.amountCents) || 0)} saem do saldo de ${accountLabelOf(income.accountId)} (o saldo é calculado dos lançamentos, nada é regravado).`
+      : 'Receita não recebida: o saldo de nenhuma conta é afetado.' }),
     el('p', { class: 'card__hint', text: 'Esta ação não pode ser desfeita.' }),
   ]);
 
@@ -568,7 +572,7 @@ function confirmDeleteIncome(income) {
         closeModal();
         const result = await deleteIncome(currentUser.uid, income.id);
         if (result.ok) {
-          toast('Receita excluída.');
+          toast(result.reversedCents ? `Receita excluída — ${formatCents(result.reversedCents)} estornados em ${accountLabelOf(result.accountId)}.` : 'Receita excluída.');
           await loadData();
           renderPage($('.content') || document.getElementById('page-content'));
         } else {
@@ -580,6 +584,11 @@ function confirmDeleteIncome(income) {
   ];
 
   openModal({ title: 'Confirmar exclusão', body, footer });
+}
+
+function accountLabelOf(accountId) {
+  const a = accountsCache.find((x) => x.id === accountId);
+  return a ? `${a.institution} — ${a.name}` : '—';
 }
 
 function getCategoryLabel(categoryId) {

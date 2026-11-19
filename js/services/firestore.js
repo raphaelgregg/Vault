@@ -256,6 +256,13 @@ export async function commitAtomic(uid, ops, io = {}) {
       batch.set(newDocRef(uid, 'auditLog'), auditPayload(uid, {
         action: op.action ?? 'create', collection: op.collection, docId: ref.id, after: op.data,
       }));
+    } else if (op.type === 'delete') {
+      // Exclusão atômica com a auditoria (VF-2-03o): `op.before` vai para o auditLog.
+      batch.delete(userDocFn(uid, op.collection, op.docId));
+      ids.push(op.docId);
+      batch.set(newDocRef(uid, 'auditLog'), auditPayload(uid, {
+        action: op.action ?? 'delete', collection: op.collection, docId: op.docId, before: op.before,
+      }));
     } else {
       batch.update(userDocFn(uid, op.collection, op.docId), { ...toFirestoreData(op.data), ...stamps });
       ids.push(op.docId);

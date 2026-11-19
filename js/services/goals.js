@@ -19,6 +19,8 @@ import {
 import {
   buildEntity,
   applyGoalTransaction,
+  isAccountLinkedGoal,
+  allocateLinkedGoalBalances,
   goalSavedCents,
   goalProgressPercent,
   centsToMoneyString,
@@ -143,7 +145,11 @@ export async function registerGoalTransaction(uid, goalId, type, rawData, io = {
   if (!account) return { ok: false, errors: { accountId: 'Conta não encontrada.' } };
   if (account.status !== 'active') return { ok: false, errors: { accountId: 'A conta precisa estar ativa.' } };
 
-  const saved = goalSavedCents(await (io.list ?? list)(uid, TXS, { where: [['goalId', '==', goalId]] }));
+  const transactions = await (io.list ?? list)(uid, TXS, { where: [['goalId', '==', goalId]] });
+  if (isAccountLinkedGoal(goal, transactions.length)) {
+    return { ok: false, errors: { _form: 'Meta vinculada a uma conta: o progresso segue o saldo dessa conta. Transfira para ela em Transferências (ou remova o vínculo da meta para usar aportes).' } };
+  }
+  const saved = goalSavedCents(transactions);
   const applied = applyGoalTransaction(goal, saved, type, data.amountCents);
   if (!applied.ok) return { ok: false, errors: { _form: applied.error } };
 
@@ -168,4 +174,4 @@ export function getGoalTransactionTypeOptions() {
   return GOAL_TRANSACTION_TYPES.map((t) => ({ value: t.value, label: t.label }));
 }
 
-export { goalSavedCents, goalProgressPercent, centsToMoneyString, formatCents, parseMoneyToCents };
+export { allocateLinkedGoalBalances, isAccountLinkedGoal, goalSavedCents, goalProgressPercent, centsToMoneyString, formatCents, parseMoneyToCents };

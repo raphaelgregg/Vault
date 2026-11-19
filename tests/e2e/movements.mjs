@@ -193,6 +193,40 @@ try {
   assert.match(await rows().filter({ hasText: 'Conta A' }).innerText(), /R\$\s?2\.200,00/);
   assert.match(await rows().filter({ hasText: 'Conta B' }).innerText(), /R\$\s?500,00/);
   assert.match(await content(), /R\$\s?2\.700,00/);
+  log('VF-2-03o: meta vinculada a conta (caixinha) segue o saldo da conta; sem aporte duplicado');
+  await go('metas');
+  await page.getByRole('button', { name: 'Nova meta' }).click();
+  await page.fill('#name', 'Caixinha UI');
+  await page.fill('#targetCents', '1.000,00');
+  await page.selectOption('#accountId', accounts['Conta B']);
+  await page.locator('#goal-form button[type="submit"]').click();
+  await waitRow(/Caixinha UI/);
+  const goalRow = await rows().filter({ hasText: 'Caixinha UI' }).innerText();
+  assert.match(goalRow, /saldo de Banco B — Conta B/);
+  assert.match(goalRow, /R\$\s?500,00/); // saldo da Conta B (transferência confirmada)
+  assert.match(goalRow, /50%/);
+  assert.equal(await page.getByRole('button', { name: 'Aportar em Caixinha UI' }).count(), 0); // fonte única: transferências
+
+  log('VF-2-03o: excluir despesa paga e receita recebida com confirmação; saldo derivado estorna');
+  const confirmDelete = async (label, hintRe, toastRe) => {
+    await page.getByRole('button', { name: label }).click();
+    await page.waitForSelector('.modal');
+    assert.match(await page.locator('.modal').innerText(), hintRe); // aviso do estorno antes de confirmar
+    await page.getByRole('button', { name: 'Excluir', exact: true }).click();
+    await page.waitForFunction((src) => new RegExp(src).test(document.querySelector('.toast')?.innerText ?? ''), toastRe.source);
+  };
+  await go('despesas');
+  await waitText(/Conta debitada|CONTA DEBITADA/);
+  assert.match(await content(), /Cartões \/ Faturas/); // despesa direta × fatura de cartão
+  assert.match(await rows().filter({ hasText: 'Compras UI' }).innerText(), /Banco A — Conta A/);
+  await confirmDelete('Excluir Compras UI', /voltam ao saldo de Banco A — Conta A/, /estornados em Banco A — Conta A/);
+  await go('receitas');
+  await confirmDelete('Excluir Salário UI', /saem do saldo de Banco A — Conta A/, /estornados em Banco A — Conta A/);
+  await go('bancos');
+  await page.getByRole('button', { name: 'Calcular saldo atual' }).click();
+  await waitText(/Saldo atual derivado/);
+  assert.match(await rows().filter({ hasText: 'Conta A' }).innerText(), /R\$\s?500,00/); // 1000 − 500 (transferência)
+
   await page.getByRole('button', { name: 'Excluir Conta A' }).click();
   await page.getByRole('button', { name: 'Excluir', exact: true }).click();
   await page.waitForFunction(() => /não pode ser excluída/.test(document.querySelector('.toast')?.innerText ?? ''));

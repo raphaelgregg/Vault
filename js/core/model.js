@@ -780,6 +780,41 @@ export function goalSavedCents(transactions = []) {
   }, 0);
 }
 
+/**
+ * Meta em modo "conta vinculada" (VF-2-03o): tem `accountId` e NENHUMA movimentação própria (aporte/resgate).
+ * O progresso segue o saldo derivado da conta (caixinha/investimento), alimentado por transferências, e não
+ * por goalTransactions — fonte única, sem duplicar valores. Metas com movimentações seguem o modo legado.
+ */
+export const isAccountLinkedGoal = (goal, txCount) => Boolean(goal?.accountId) && !txCount;
+
+/**
+ * Distribui o saldo de cada conta entre as metas vinculadas a ela (várias metas na mesma conta não repetem o
+ * mesmo valor): por conta, em ordem de criação, cada meta recebe min(alvo, saldo restante); o excedente
+ * fica sem alocar. Só metas ativas/concluídas em modo conta vinculada; saldo negativo conta como 0.
+ * `balances`: Map(accountId → centavos); `txCounts`: Map(goalId → nº de movimentações).
+ * Retorna Map(goalId → centavos guardados).
+ */
+export function allocateLinkedGoalBalances(goals = [], balances = new Map(), txCounts = new Map()) {
+  const out = new Map();
+  const byAccount = new Map();
+  for (const g of goals) {
+    if (g.status === 'cancelled' || !isAccountLinkedGoal(g, txCounts.get(g.id))) continue;
+    if (!byAccount.has(g.accountId)) byAccount.set(g.accountId, []);
+    byAccount.get(g.accountId).push(g);
+  }
+  const created = (g) => (typeof g.createdAt?.toMillis === 'function' ? g.createdAt.toMillis() : 0);
+  for (const [accountId, list] of byAccount) {
+    let remaining = Math.max(0, Number(balances.get(accountId)) || 0);
+    list.sort((a, b) => created(a) - created(b) || String(a.id).localeCompare(String(b.id)));
+    for (const g of list) {
+      const share = Math.min(Number(g.targetCents) || 0, remaining);
+      out.set(g.id, share);
+      remaining -= share;
+    }
+  }
+  return out;
+}
+
 /** Progresso 0..100 (inteiro, truncado) do guardado sobre a meta. */
 export function goalProgressPercent(savedCents, targetCents) {
   if (!Number.isInteger(targetCents) || targetCents <= 0) return 0;

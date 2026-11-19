@@ -10,9 +10,11 @@ import {
 import {
   listGoals, createGoal, updateGoal, deleteGoal, cancelGoal, reopenGoal,
   depositToGoal, withdrawFromGoal, listGoalTransactions, getGoalStatusOptions,
-  goalSavedCents, goalProgressPercent, formatCents,
+  allocateLinkedGoalBalances, isAccountLinkedGoal, goalSavedCents, goalProgressPercent, formatCents,
 } from '../services/goals.js';
 import { listAccounts } from '../services/accounts.js';
+import { loadBalances } from '../services/balances.js';
+import { describeError } from '../utils/errors.js';
 
 export const meta = { title: 'Metas', icon: 'target' };
 
@@ -21,6 +23,8 @@ let container = null;
 let goals = [];
 let saved = new Map();
 let accounts = [];
+let linkedIds = new Set(); // metas em modo "conta vinculada" (progresso = saldo da conta)
+let balancesNotice = null;
 
 export async function render(target, ctx) {
   user = ctx.user;
@@ -31,8 +35,22 @@ export async function render(target, ctx) {
 
 async function reload() {
   goals = await listGoals(user.uid);
-  const entries = await Promise.all(goals.map(async (g) => [g.id, goalSavedCents(await listGoalTransactions(user.uid, g.id))]));
-  saved = new Map(entries);
+  const txs = await Promise.all(goals.map(async (g) => [g.id, await listGoalTransactions(user.uid, g.id)]));
+  saved = new Map(txs.map(([id, list]) => [id, goalSavedCents(list)]));
+  const txCounts = new Map(txs.map(([id, list]) => [id, list.length]));
+  // Metas vinculadas a conta: progresso = saldo derivado da conta (alimentado por transferências), repartido
+  // entre as metas da mesma conta sem repetir valor. Falha de leitura é isolada: aviso explícito, resto segue.
+  linkedIds = new Set(goals.filter((g) => g.status !== 'cancelled' && isAccountLinkedGoal(g, txCounts.get(g.id))).map((g) => g.id));
+  balancesNotice = null;
+  if (linkedIds.size) {
+    try {
+      const { balances } = await loadBalances(user.uid, accounts);
+      for (const [id, cents] of allocateLinkedGoalBalances(goals, balances, txCounts)) saved.set(id, cents);
+    } catch (error) {
+      console.error('[metas] falha ao ler saldos das contas vinculadas', error);
+      balancesNotice = `Não foi possível ler o saldo das contas vinculadas (${describeError(error)}); o progresso dessas metas não foi atualizado.`;
+    }
+  }
   renderPage();
 }
 
@@ -50,14 +68,14 @@ function renderPage() {
     actionLabel: 'Nova meta', onAction: () => openGoalModal(),
   });
   const stats = el('div', { class: 'grid grid--cards' }, [
-    statCard('Total acumulado', formatCents(total), 'piggy-bank', 'Aportes − resgates (metas não canceladas)'),
+    statCard('Total acumulado', formatCents(total), 'piggy-bank', 'Aportes − resgates, ou saldo da conta vinculada (metas não canceladas)'),
     statCard('Metas ativas', String(goals.filter((g) => g.status === 'active').length), 'target', 'Em andamento'),
     statCard('Concluídas', String(goals.filter((g) => g.status === 'completed').length), 'check-circle-2', 'Alvo atingido'),
   ]);
   const table = goals.length
     ? dataTable({
       columns: [
-        { key: 'name', label: 'Meta' },
+        { key: 'name', label: 'Meta', render: (v, g) => (linkedIds.has(g.id) ? `${v} · saldo de ${accountLabel(g.accountId)}` : v) },
         { key: 'targetCents', label: 'Objetivo', numeric: true, render: (v) => formatCents(v) },
         { key: 'saved', label: 'Acumulado', numeric: true, render: (_, g) => formatCents(savedOf(g)) },
         { key: 'progress', label: 'Progresso', render: (_, g) => progressBar(goalProgressPercent(savedOf(g), g.targetCents), 'ok', `Progresso de ${g.name}`) },
@@ -69,7 +87,8 @@ function renderPage() {
       actions: goalActions,
     })
     : emptyBlock('target', 'Nenhuma meta criada', 'Crie reserva de emergência, viagem ou qualquer objetivo e acompanhe o progresso.');
-  container.replaceChildren(header, stats, el('section', { class: 'panel' }, [
+  const notice = balancesNotice ? el('p', { class: 'notice', role: 'alert', text: balancesNotice }) : null;
+  container.replaceChildren(header, notice, stats, el('section', { class: 'panel' }, [
     el('div', { class: 'panel__header' }, [el('h2', { text: 'Minhas metas' })]),
     el('div', { class: 'panel__body panel__body--flush' }, [table]),
   ]));
@@ -78,8 +97,8 @@ function renderPage() {
 
 function goalActions(goal) {
   const acts = [];
-  if (goal.status === 'active') acts.push(iconButton(`Aportar em ${goal.name}`, 'plus-circle', () => openMovementModal(goal, 'deposit'), 'btn--success'));
-  if ((goal.status === 'active' || goal.status === 'completed') && savedOf(goal) > 0) {
+  if (goal.status === 'active' && !linkedIds.has(goal.id)) acts.push(iconButton(`Aportar em ${goal.name}`, 'plus-circle', () => openMovementModal(goal, 'deposit'), 'btn--success'));
+  if ((goal.status === 'active' || goal.status === 'completed') && savedOf(goal) > 0 && !linkedIds.has(goal.id)) {
     acts.push(iconButton(`Resgatar de ${goal.name}`, 'minus-circle', () => openMovementModal(goal, 'withdraw')));
   }
   if (goal.status === 'active') acts.push(iconButton(`Editar ${goal.name}`, 'edit-2', () => openGoalModal(goal)));
@@ -118,6 +137,7 @@ function openGoalModal(goal = null) {
         field('Prazo', 'deadline', el('input', { type: 'date', id: 'deadline', name: 'deadline', value: goal?.deadline ?? '' })),
       ]),
       field('Conta vinculada', 'accountId', el('select', { id: 'accountId', name: 'accountId' }, [el('option', { value: '' }, 'Nenhuma'), ...selectOptions(activeAccounts, goal?.accountId)])),
+      el('p', { class: 'card__hint', text: 'Conta vinculada (ex.: caixinha ou investimento): o progresso segue o saldo dela, alimentado por Transferências; metas na mesma conta repartem o saldo em ordem de criação. Sem conta, use aportes e resgates.' }),
       field('Descrição', 'description', el('textarea', { id: 'description', name: 'description', maxlength: 300, rows: 2, value: goal?.description ?? '' })),
     ],
     submit: (d) => {

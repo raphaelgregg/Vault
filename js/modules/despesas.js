@@ -77,6 +77,7 @@ function renderPage(container) {
       el('div', {}, [
         el('h2', { text: 'Despesas' }),
         el('p', { class: 'card__hint', text: 'Despesas por categoria, vencimentos, parcelamentos e orçamento mensal.' }),
+        el('p', { class: 'card__hint', text: 'Despesa direta debita a conta bancária indicada ao ser paga. Compras no cartão de crédito não entram aqui: são lançadas e acompanhadas em Cartões / Faturas, e pagar a fatura é o que abate a conta bancária.' }),
       ]),
       el('div', { class: 'topbar__spacer' }),
       el('button', {
@@ -261,6 +262,7 @@ function createExpensesTable() {
     { key: 'amountCents', label: 'Valor', numeric: true, render: (v) => formatCents(Number(v) || 0) },
     { key: 'dueDate', label: 'Vencimento', render: (v) => formatDate(v) },
     { key: 'paidDate', label: 'Pagamento', render: (v) => v ? formatDate(v) : '—' },
+    { key: 'accountId', label: 'Conta debitada', render: (v, item) => (v ? getAccountLabel(v) : (item.status === 'paid' ? '—' : 'Ao pagar')) },
     { key: 'status', label: 'Status', render: (v) => getStatusLabel(v) },
   ];
 
@@ -273,7 +275,7 @@ function createExpensesTable() {
     el('tr', {}, [
       ...columns.map((column) => {
         const value = expense[column.key];
-        const display = column.render ? column.render(value) : (value ?? '—');
+        const display = column.render ? column.render(value, expense) : (value ?? '—');
         return el('td', {
           class: column.numeric ? 'num' : '',
           text: display,
@@ -326,7 +328,8 @@ function createExpenseActions(expense) {
     })
   );
 
-  if (expense.status !== 'paid') {
+  // Excluir também despesas pagas (VF-2-03o): o saldo é derivado, então o valor volta à conta (confirmação explica).
+  {
     actions.push(
       el('button', {
         type: 'button',
@@ -578,6 +581,9 @@ async function confirmCancelExpense(expense) {
 function confirmDeleteExpense(expense) {
   const body = el('div', {}, [
     el('p', { text: `Tem certeza que deseja excluir a despesa "${expense.description}"?` }),
+    el('p', { class: 'card__hint', text: expense.status === 'paid' && expense.accountId
+      ? `Despesa paga: ao excluir, ${formatCents(Number(expense.amountCents) || 0)} voltam ao saldo de ${getAccountLabel(expense.accountId)} (o saldo é calculado dos lançamentos, nada é regravado).`
+      : 'Despesa não paga: o saldo de nenhuma conta é afetado.' }),
     el('p', { class: 'card__hint', text: 'Esta ação não pode ser desfeita.' }),
   ]);
 
@@ -590,7 +596,7 @@ function confirmDeleteExpense(expense) {
         closeModal();
         const result = await deleteExpense(currentUser.uid, expense.id);
         if (result.ok) {
-          toast('Despesa excluída.');
+          toast(result.reversedCents ? `Despesa excluída — ${formatCents(result.reversedCents)} estornados em ${getAccountLabel(result.accountId)}.` : 'Despesa excluída.');
           await loadData();
           renderPage($('.content') || document.getElementById('page-content'));
         } else {
@@ -602,6 +608,11 @@ function confirmDeleteExpense(expense) {
   ];
 
   openModal({ title: 'Confirmar exclusão', body, footer });
+}
+
+function getAccountLabel(accountId) {
+  const a = accountsCache.find((x) => x.id === accountId);
+  return a ? `${a.institution} — ${a.name}` : '—';
 }
 
 function getCategoryLabel(categoryId) {

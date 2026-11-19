@@ -8,7 +8,7 @@ import {
   getById,
   createAudited,
   updateAudited,
-  removeAudited,
+  commitAtomic,
 } from './firestore.js';
 import {
   buildEntity,
@@ -86,8 +86,11 @@ export async function deleteIncome(uid, incomeId, io = {}) {
   const income = await (io.getById ?? getById)(uid, COLLECTION, incomeId);
   if (!income) return { ok: false, errors: { _form: 'Receita não encontrada.' } };
 
-  await removeAudited(uid, COLLECTION, incomeId, income, io);
-  return { ok: true };
+  // Exclusão + auditoria em UM lote atômico (VF-2-03o). O saldo da conta é DERIVADO (receitas recebidas), então
+  // excluir uma receita recebida retira o valor do saldo sem gravar nada na conta: `reversedCents` informa o estorno.
+  await (io.commitAtomic ?? commitAtomic)(uid, [{ type: 'delete', collection: COLLECTION, docId: incomeId, before: income }], io);
+  const reversed = income.status === 'received' && income.accountId;
+  return { ok: true, reversedCents: reversed ? Number(income.amountCents) || 0 : 0, accountId: reversed ? income.accountId : null };
 }
 
 /** Marca receita como recebida (status -> received + receivedDate = hoje). */
