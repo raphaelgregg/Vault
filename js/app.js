@@ -19,6 +19,7 @@ const MODULES = {
   despesas: () => import('./modules/despesas.js'),
   transferencias: () => import('./modules/transferencias.js'),
   categorias: () => import('./modules/categorias.js'),
+  orcamentos: () => import('./modules/orcamentos.js'),
   assinaturas: () => import('./modules/assinaturas.js'),
   devedores: () => import('./modules/devedores.js'),
   metas: () => import('./modules/metas.js'),

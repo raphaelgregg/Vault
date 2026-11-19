@@ -25,6 +25,7 @@
     { "source": "/receitas", "destination": "/pages/receitas.html" },
     { "source": "/despesas", "destination": "/pages/despesas.html" },
     { "source": "/transferencias", "destination": "/pages/transferencias.html" },
+    { "source": "/orcamentos", "destination": "/pages/orcamentos.html" },
     { "source": "/assinaturas", "destination": "/pages/assinaturas.html" },
     { "source": "/devedores", "destination": "/pages/devedores.html" },
     { "source": "/metas", "destination": "/pages/metas.html" },

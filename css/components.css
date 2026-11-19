@@ -408,3 +408,28 @@
   font-size: var(--fs-sm);
   max-width: 360px;
 }
+
+/* ---------- Formulários, ações e progresso (módulos de formulário) ---------- */
+.form__row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); }
+.form__field { display: flex; flex-direction: column; gap: var(--space-1); margin-bottom: var(--space-3); }
+.form__field label { font-size: var(--fs-sm); font-weight: 600; }
+.form__field input, .form__field select, .form__field textarea {
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text); font: inherit;
+}
+.form__field--error input, .form__field--error select, .form__field--error textarea { border-color: var(--expense); }
+.form__error { color: var(--expense); font-size: var(--fs-xs); min-height: 1em; }
+.btn--secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+.btn--success { color: var(--income); }
+td.actions { white-space: nowrap; }
+.progress { height: 8px; border-radius: var(--radius-pill); background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; min-width: 80px; }
+.progress__bar { height: 100%; background: var(--brand-500); }
+.progress--warning .progress__bar { background: var(--warning); }
+.progress--over .progress__bar { background: var(--expense); }
+.bar-row { display: grid; grid-template-columns: minmax(90px, 1fr) 3fr minmax(90px, auto); gap: var(--space-3); align-items: center; padding: var(--space-2) 0; }
+.bar-row__label { font-size: var(--fs-sm); }
+.bar-row__value { font-size: var(--fs-sm); text-align: right; font-variant-numeric: tabular-nums; }
+.bar--income .progress__bar { background: var(--income); }
+.bar--expense .progress__bar { background: var(--expense); }
+.notice { padding: var(--space-3); border: 1px solid var(--warning); border-radius: var(--radius-sm); color: var(--warning); font-size: var(--fs-sm); margin-bottom: var(--space-3); }
+.toolbar { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; margin-bottom: var(--space-3); }

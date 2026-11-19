@@ -1,6 +1,6 @@
 /**
  * Devedores — VF-2-03b: CRUD integrado ao Firestore (users/{uid}/debtors).
- * Pendente = emprestado − recebido (derivado, nunca gravado). Parcelas e recebimentos: VF-2-03b2.
+ * Pendente = emprestado − recebido (derivado, nunca gravado). Parcelas e recebimentos: devedores-parcelas.js (VF-2-03b2).
  */
 import { el, $, $$, toast, refreshIcons } from '../core/ui.js';
 import { openModal, closeModal } from '../components/modal.js';
@@ -17,6 +17,8 @@ import {
   formatCents,
   parseMoneyToCents,
 } from '../services/debtors.js';
+
+import { openDebtorInstallments } from './devedores-parcelas.js';
 
 export const meta = { title: 'Devedores', icon: 'users' };
 
@@ -135,7 +137,9 @@ function iconButton(label, icon, onClick, extraClass = '') {
 }
 
 function createActions(item) {
-  const actions = [];
+  const actions = [
+    iconButton(`Parcelas e recebimentos de ${item.name}`, 'list-checks', () => openDebtorInstallments({ user: currentUser, debtor: item, onChange: reload })),
+  ];
   if (item.status === 'open') {
     actions.push(iconButton(`Editar ${item.name}`, 'edit-2', () => openDebtorModal(item)));
     actions.push(iconButton(`Cancelar ${item.name}`, 'x-circle', () => confirmCancel(item), 'btn--danger'));
