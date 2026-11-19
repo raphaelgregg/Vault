@@ -288,7 +288,12 @@ O projeto não habilita nada fora do Spark e não faz chamadas pagas.
   despesas (compras no cartão não entram).
 - Backup do Firestore **não é automático no plano gratuito**; exportação completa por usuário ainda
   não existe. Não presuma backup gerenciado.
-- Exportação PDF e importação CSV não existem; exportação CSV existe nos relatórios.
+- Exportação PDF não existe. Importação/exportação CSV de dados existe em `/manutencao-dados` (qualquer usuário
+  autenticado, SEMPRE só o próprio `uid`, mesmo sendo administrador): por entidade (11) ou **CSV unificado** com a
+  coluna `entidade` (modelo, base populada e importação em 1 arquivo). A importação processa na ordem de dependência
+  (contas → categorias → cartões → devedores → demais), é **idempotente** (chave determinística por entidade; reimportar
+  não duplica; campos diferentes de contas/categorias/cartões/devedores/metas são mesclados) e reporta criados,
+  atualizados, ignorados por duplicidade e falhas. Exportação CSV também existe nos relatórios.
 - O tema é aplicado por JS após o carregamento; pode haver um flash breve de tema claro.
 
 ---

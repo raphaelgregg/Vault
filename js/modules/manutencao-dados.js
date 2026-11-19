@@ -12,7 +12,7 @@ import { clearUserData, clearScope, discoverUsers, isAdminUser, SCOPES } from '.
 import { seedFullTestSuite, MAX_VOLUME } from '../services/seed.js';
 import {
   IMPORT_ENTITIES, IMPORT_ENTITY_KEYS, MAX_IMPORT_ROWS,
-  templateCsv, loadImportContext, dryRunImport, applyImport, exportCsv, exportAllCsv,
+  templateCsv, unifiedTemplateCsv, loadImportData, dryRunImport, applyImport, exportCsv, exportAllCsv, exportUnifiedCsv, UNIFIED_KEY, UNIFIED_COLUMN,
 } from '../services/importer.js';
 
 export const meta = { title: 'Manutenção de dados', icon: 'wrench' };
@@ -246,7 +246,13 @@ export async function render(container, ctx) {
   ]);
 
   // ---------------- Importação / exportação ----------------
-  const entitySelect = el('select', { id: 'import-entity', 'aria-label': 'Entidade' }, IMPORT_ENTITY_KEYS.map((k) => el('option', { value: k }, IMPORT_ENTITIES[k].label)));
+  const entitySelect = el('select', { id: 'import-entity', 'aria-label': 'Entidade' }, [
+    el('option', { value: UNIFIED_KEY }, 'Todas as entidades (CSV unificado)'),
+    ...IMPORT_ENTITY_KEYS.map((k) => el('option', { value: k }, IMPORT_ENTITIES[k].label)),
+  ]);
+  entitySelect.value = IMPORT_ENTITY_KEYS[0]; // padrão: uma entidade; "Todas" é opt-in
+  const isUnified = () => entitySelect.value === UNIFIED_KEY;
+  const entityLabel = () => (isUnified() ? 'Todas as entidades' : IMPORT_ENTITIES[entitySelect.value].label);
   const delimSelect = el('select', { id: 'import-delim', 'aria-label': 'Delimitador do modelo' }, [el('option', { value: ';' }, 'Ponto e vírgula (;)'), el('option', { value: ',' }, 'Vírgula (,)')]);
   const csvText = el('textarea', { id: 'import-text', rows: 8, placeholder: 'Cole o CSV aqui (UTF-8, ; ou ,) ou escolha um arquivo', 'aria-label': 'Conteúdo CSV' });
   const fileInput = el('input', { type: 'file', id: 'import-file', accept: '.csv,text/csv,text/plain' });
@@ -260,11 +266,12 @@ export async function render(container, ctx) {
   function invalidatePlan() { lastPlan = null; lastPlanText = null; applyBtn.disabled = true; }
 
   const renderPlan = (plan) => {
-    summary.textContent = `${plan.total} linha(s) lida(s): ${plan.valid} válida(s), ${plan.invalid} com erro, ${plan.warnings} aviso(s). Delimitador "${plan.delimiter}".`;
+    const c = plan.counts ?? { create: plan.valid, merge: 0, duplicate: 0 };
+    summary.textContent = `${plan.total} linha(s) lida(s): ${plan.valid} válida(s), ${plan.invalid} com erro, ${plan.warnings} aviso(s). Novas: ${c.create} · a atualizar: ${c.merge} · duplicadas (ignoradas): ${c.duplicate}. Delimitador "${plan.delimiter}".`;
     const problems = [
       ...plan.fileErrors.map((e) => `Arquivo${e.line ? ` (linha ${e.line})` : ''}: ${e.message}`),
       ...plan.rows.flatMap((r) => [
-        ...Object.entries(r.errors).map(([c, m]) => `Linha ${r.line} · ${c}: ${m}`),
+        ...Object.entries(r.errors).map(([c, m]) => `Linha ${r.line}${r.entity && isUnified() ? ` [${r.entity}]` : ''} · ${c}: ${m}`),
         ...r.warnings.map((w) => `Linha ${r.line} · aviso: ${w}`),
       ]),
     ];
@@ -275,37 +282,54 @@ export async function render(container, ctx) {
 
   validateBtn.addEventListener('click', guard(validateBtn, async () => {
     importLog.clear();
-    const ctxRefs = await loadImportContext(user.uid);
-    const plan = dryRunImport(entitySelect.value, csvText.value, ctxRefs);
+    const data = await loadImportData(user.uid); // sempre o uid AUTENTICADO (mesmo para administrador)
+    const plan = dryRunImport(entitySelect.value, csvText.value, data);
     renderPlan(plan);
     lastPlan = plan;
     lastPlanText = csvText.value;
-    applyBtn.disabled = !(plan.valid > 0 && !plan.fileErrors.some((e) => e.line === 1 && plan.missingColumns.length));
-    importLog.write(`Dry-run de "${IMPORT_ENTITIES[plan.key].label}": nada foi gravado.`);
+    applyBtn.disabled = !((plan.counts?.create ?? 0) + (plan.counts?.merge ?? 0) > 0 && !plan.missingColumns.length);
+    importLog.write(`Dry-run de "${entityLabel()}": nada foi gravado.`);
   }));
   applyBtn.addEventListener('click', guard(applyBtn, async () => {
     if (!lastPlan || lastPlanText !== csvText.value) { toast('Valide o conteúdo atual antes de importar.', 4000); return; }
     importLog.clear();
-    importLog.write(`Importando ${lastPlan.valid} linha(s) válida(s) de "${IMPORT_ENTITIES[lastPlan.key].label}"…`);
+    importLog.write(`Importando "${entityLabel()}" para o usuário ${user.uid}: ${lastPlan.counts.create} nova(s), ${lastPlan.counts.merge} a atualizar, ${lastPlan.counts.duplicate} duplicada(s) serão ignoradas…`);
+    const LABEL = { created: 'criada', merged: 'atualizada', ignored: 'ignorada (duplicidade)', failed: 'FALHA' };
     const res = await applyImport(user.uid, lastPlan, {
-      onLog: (e) => importLog.write(`Linha ${e.line}: ${e.ok ? `criada${e.id ? ` (${e.id})` : ''}` : `FALHA — ${e.message}`}`, e.ok ? 'ok' : 'error'),
+      onLog: (e) => importLog.write(`Linha ${e.line} [${e.entity}]: ${LABEL[e.action]}${e.id ? ` (${e.id})` : ''}${e.message ? ` — ${e.message}` : ''}${e.changed?.length ? ` (campos: ${e.changed.join(', ')})` : ''}`, e.action === 'failed' ? 'error' : e.action === 'ignored' ? 'info' : 'ok'),
     });
-    importLog.write(`Fim: ${res.created} criada(s), ${res.failed} falha(s)${res.permissionDenied ? ` (${res.permissionDenied} permission-denied)` : ''}.`);
+    importLog.write(`Fim: ${res.created} criada(s), ${res.merged} atualizada(s), ${res.ignored} ignorada(s) por duplicidade, ${res.failed} falha(s)${res.permissionDenied ? ` (${res.permissionDenied} permission-denied)` : ''}.`, res.failed ? 'error' : 'ok');
     invalidatePlan();
   }));
 
   const templateBtn = el('button', { type: 'button', id: 'btn-template', class: 'btn btn--secondary', text: 'Baixar modelo CSV (vazio — só cabeçalhos)' });
   templateBtn.addEventListener('click', () => {
+    if (isUnified()) {
+      downloadText('modelo-todas-entidades.csv', unifiedTemplateCsv({ delimiter: delimSelect.value }));
+      importLog.write(`Modelo UNIFICADO baixado: cabeçalho (coluna "${UNIFIED_COLUMN}" + colunas) e 1 linha-modelo por entidade, na ordem de dependência. Nenhum dado seu.`);
+      return;
+    }
     downloadText(`modelo-${entitySelect.value}.csv`, templateCsv(entitySelect.value, { delimiter: delimSelect.value }));
-    importLog.write(`Modelo VAZIO de "${IMPORT_ENTITIES[entitySelect.value].label}" baixado (somente cabeçalhos, nenhum dado).`);
+    importLog.write(`Modelo VAZIO de "${entityLabel()}" baixado (somente cabeçalhos, nenhum dado).`);
   });
   const exportBtn = el('button', { type: 'button', id: 'btn-export', class: 'btn btn--secondary', text: 'Exportar CSV da base atual (registros existentes)' });
   exportBtn.addEventListener('click', guard(exportBtn, async () => {
+    if (isUnified()) {
+      importLog.clear();
+      importLog.write(`Exportando a base do usuário ${user.uid} (todas as entidades, 1 CSV)…`);
+      const r = await exportUnifiedCsv(user.uid, {
+        delimiter: delimSelect.value,
+        onLog: (x) => importLog.write(x.ok ? `✔ ${x.label}: ${x.rowCount} registro(s)` : `✖ ${x.label}: FALHA — ${x.error}`, x.ok ? 'ok' : 'error'),
+      });
+      if (r.exported) downloadText(r.filename, r.text);
+      importLog.write(`Fim: ${r.exported}/${r.results.length} entidade(s), ${r.totalRows} registro(s) no total${r.failed ? `, ${r.failed} com falha (fora do arquivo)` : ''}${r.exported ? ` — ${r.filename}` : ''}.`, r.failed ? 'error' : 'ok');
+      return;
+    }
     const r = await exportCsv(user.uid, entitySelect.value, { delimiter: delimSelect.value });
     downloadText(r.filename, r.text);
-    importLog.write(`Exportados ${r.rowCount} registro(s) existente(s) de "${IMPORT_ENTITIES[entitySelect.value].label}" (${r.filename}).`, 'ok');
+    importLog.write(`Exportados ${r.rowCount} registro(s) existente(s) de "${entityLabel()}" (${r.filename}).`, 'ok');
   }));
-  const exportAllBtn = el('button', { type: 'button', id: 'btn-export-all', class: 'btn btn--primary', text: 'Exportar TODAS as entidades (.zip)' });
+  const exportAllBtn = el('button', { type: 'button', id: 'btn-export-all', class: 'btn btn--primary', text: 'Exportar TODAS as entidades (.zip, 1 CSV por entidade)' });
   exportAllBtn.addEventListener('click', guard(exportAllBtn, async () => {
     importLog.clear();
     importLog.write(`Exportando as ${IMPORT_ENTITY_KEYS.length} entidades (registros existentes)…`);
@@ -317,18 +341,30 @@ export async function render(container, ctx) {
     importLog.write(`Fim: ${res.exported}/${IMPORT_ENTITY_KEYS.length} entidade(s) exportada(s), ${res.totalRows} registro(s) no total${res.failed ? `, ${res.failed} com falha (fora do pacote)` : ''}${res.exported ? ` — arquivo ${res.filename}` : ''}.`, res.failed ? 'error' : 'ok');
   }));
 
-  const hint = () => IMPORT_ENTITIES[entitySelect.value].columns.map((c) => `${c.name}${c.required ? '*' : ''}${c.help ? ` (${c.help})` : ''}`).join(' · ');
+  const hint = () => (isUnified()
+    ? `CSV unificado: 1ª coluna "${UNIFIED_COLUMN}" (${IMPORT_ENTITY_KEYS.join(', ')}) + as colunas de cada entidade; cada linha preenche só as colunas da sua entidade. Pode vir fora de ordem: é processado em contas → categorias → cartões → devedores → demais, e linhas podem citar (por nome) registros criados no próprio arquivo.`
+    : IMPORT_ENTITIES[entitySelect.value].columns.map((c) => `${c.name}${c.required ? '*' : ''}${c.help ? ` (${c.help})` : ''}`).join(' · '));
+  const explain = () => (isUnified()
+    ? 'Modelo UNIFICADO = cabeçalho + 1 linha-modelo por entidade (nenhum dado seu). Exportar base populada = TODOS os registros do SEU usuário, de todas as entidades, em 1 CSV reimportável. Importar é idempotente: registros que já existem para você são ignorados (ou atualizados se o CSV trouxer campos diferentes).'
+    : 'Modelo CSV = arquivo VAZIO, só com os cabeçalhos da entidade (nenhum dado). Exportar CSV da base atual = os REGISTROS JÁ EXISTENTES da entidade selecionada. "Exportar todas" gera um .zip com um CSV por entidade (as 11) mais _resumo.txt.');
   const columnsHint = el('p', { class: 'card__hint', id: 'import-columns', text: hint() });
-  entitySelect.addEventListener('change', () => { columnsHint.textContent = hint(); invalidatePlan(); });
+  const explainEl = el('p', { class: 'card__hint', id: 'import-explain', text: explain() });
+  const syncLabels = () => {
+    columnsHint.textContent = hint();
+    explainEl.textContent = explain();
+    templateBtn.textContent = isUnified() ? 'Baixar modelo UNIFICADO (cabeçalho + 1 linha-modelo por entidade)' : 'Baixar modelo CSV (vazio — só cabeçalhos)';
+    exportBtn.textContent = isUnified() ? 'Exportar base populada (todas as entidades, 1 CSV)' : 'Exportar CSV da base atual (registros existentes)';
+  };
+  entitySelect.addEventListener('change', () => { syncLabels(); invalidatePlan(); });
 
   const importPanel = el('section', { class: 'panel', id: 'panel-import' }, [
     el('div', { class: 'panel__header' }, [el('h2', { text: 'Importação e exportação CSV' })]),
     el('div', { class: 'panel__body' }, [
-      el('p', { class: 'card__hint', text: `Datas AAAA-MM-DD; valores em reais (1234,56 / 1.234,56) convertidos para centavos inteiros; referências por NOME (conta, categoria, cartão, devedor). Máx. ${MAX_IMPORT_ROWS} linhas por importação. Importe na ordem: contas → categorias → cartões → devedores → demais.` }),
+      el('p', { class: 'card__hint', text: `Datas AAAA-MM-DD; valores em reais (1234,56 / 1.234,56) convertidos para centavos inteiros; referências por NOME (conta, categoria, cartão, devedor). Máx. ${MAX_IMPORT_ROWS} linhas por importação. Importar/exportar vale SEMPRE só para o seu usuário (mesmo sendo administrador). Reimportar não duplica.` }),
       field('Entidade', 'import-entity', entitySelect),
       columnsHint,
       field('Delimitador do modelo/exportação', 'import-delim', delimSelect),
-      el('p', { class: 'card__hint', id: 'import-explain', text: 'Modelo CSV = arquivo VAZIO, só com os cabeçalhos da entidade (nenhum dado). Exportar CSV da base atual = os REGISTROS JÁ EXISTENTES da entidade selecionada. "Exportar todas" gera um .zip com um CSV por entidade (as 11) mais _resumo.txt.' }),
+      explainEl,
       el('div', {}, [templateBtn, ' ', exportBtn, ' ', exportAllBtn]),
       field('Arquivo CSV', 'import-file', fileInput),
       field('Ou cole o CSV', 'import-text', csvText),

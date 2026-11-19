@@ -4,7 +4,7 @@
  * devedor). `mapImportRow` valida sem gravar (dry-run): conversão exata de dinheiro/data, resolução de
  * referências e `validateEntity` do modelo (os mesmos erros que o service daria). A gravação usa os services.
  */
-import { validateEntity } from './model.js';
+import { validateEntity, parseMoneyToCents, centsToMoneyString } from './model.js';
 import { normalizeMoneyText, normalizeDateText, normalizeName } from '../utils/csv.js';
 
 export const MAX_IMPORT_ROWS = 500; // limite de linhas por importação (um lote de gravação)
@@ -245,4 +245,107 @@ function validatePlan(raw) {
   const errors = {};
   if (!Number.isInteger(raw.installments) || raw.installments < 1 || raw.installments > 120) errors.installments = 'Informe de 1 a 120 parcelas.';
   return { errors };
+}
+
+// ---------------------------------------------------------------------------
+// Ordem de dependência, identidade (idempotência) e CSV unificado (VF-2-03ac)
+// ---------------------------------------------------------------------------
+
+/** Chave da opção "Todas as entidades" e coluna que identifica a entidade em cada linha do CSV unificado. */
+export const UNIFIED_KEY = 'todas';
+export const UNIFIED_COLUMN = 'entidade';
+
+/**
+ * Ordem OBRIGATÓRIA de processamento (dependências): contas → categorias → cartões → devedores → demais.
+ * Dentro das demais: movimentações e assinaturas (usam conta/categoria/cartão), metas (conta), dívidas
+ * (devedor) e compras de cartão (cartão, devedor).
+ */
+export const IMPORT_ORDER = Object.freeze([
+  'contas', 'categorias', 'cartoes', 'devedores',
+  'receitas', 'despesas', 'transferencias', 'assinaturas', 'metas', 'dividas', 'compras_cartao',
+]);
+
+const norm = normalizeName;
+const cents = (v) => (typeof v === 'number' ? v : parseMoneyToCents(v));
+const dateOf = (v) => String(v ?? '');
+const refOf = (v) => String(v ?? '');
+
+/**
+ * Chave determinística por entidade para NÃO duplicar ao reimportar. Aplicada ao `raw` do CSV (nomes de campo do
+ * modelo, referências já resolvidas em ids) e ao registro EXISTENTE do mesmo uid (mesmos nomes de campo; para
+ * dívidas/compras, o registro AGRUPADO — ver `groupRows` do importer). Nome = normalizado (sem acento/caixa).
+ */
+export const IMPORT_IDENTITY = Object.freeze({
+  contas: { key: (r) => `${norm(r.institution)}|${norm(r.name)}`, merge: ['type', 'color', 'status'] },
+  categorias: { key: (r) => `${norm(r.name)}|${r.kind}`, merge: ['color'] },
+  cartoes: { key: (r) => norm(r.name), merge: ['brand', 'limitCents', 'closingDay', 'dueDay', 'accountId', 'color'] },
+  devedores: { key: (r) => norm(r.name), merge: ['notes'] },
+  metas: { key: (r) => norm(r.name), merge: ['targetCents', 'deadline', 'accountId', 'description'] },
+  receitas: { key: (r) => `${norm(r.description)}|${cents(r.amountCents)}|${dateOf(r.expectedDate)}|${refOf(r.accountId)}`, merge: [] },
+  despesas: { key: (r) => `${norm(r.description)}|${cents(r.amountCents)}|${dateOf(r.purchaseDate)}|${dateOf(r.dueDate)}|${refOf(r.accountId)}`, merge: [] },
+  transferencias: { key: (r) => `${refOf(r.fromAccountId)}|${refOf(r.toAccountId)}|${cents(r.amountCents)}|${dateOf(r.date)}|${norm(r.reason)}`, merge: [] },
+  assinaturas: { key: (r) => `${norm(r.name)}|${refOf(r.accountId)}`, merge: [] },
+  dividas: { key: (r) => `${refOf(r.debtorId)}|${norm(r.description)}|${cents(r.totalCents)}|${Number(r.installments) || 1}|${dateOf(r.firstDueDate)}`, merge: [] },
+  compras_cartao: { key: (r) => `${refOf(r.cardId)}|${norm(r.description)}|${cents(r.amountCents)}|${Number(r.installmentsTotal) || 1}|${dateOf(r.purchaseDate)}|${refOf(r.debtorId)}`, merge: [] },
+});
+
+/** Campos de dinheiro (comparados em centavos). */
+const MONEY_FIELDS = new Set(['limitCents', 'targetCents']);
+
+const sameValue = (field, a, b) => (MONEY_FIELDS.has(field) ? cents(a) === cents(b) : String(a ?? '').trim() === String(b ?? '').trim());
+
+/**
+ * Campos mesclados que o CSV preencheu e DIFEREM do registro existente (célula vazia nunca apaga). Entidades sem
+ * `merge` (movimentações, compras, dívidas, assinaturas) retornam [] — duplicata é só ignorada.
+ */
+export function mergeDiff(entity, raw, existing, filled = null) {
+  const fields = IMPORT_IDENTITY[entity]?.merge ?? [];
+  return fields.filter((f) => raw[f] !== undefined && raw[f] !== '' && (!filled || filled.has(f)) && !sameValue(f, raw[f], existing?.[f]));
+}
+
+/** Campos do modelo que a linha do CSV preencheu EXPLICITAMENTE (padrões `def` não contam como preenchidos). */
+export function filledFields(entity, values) {
+  return new Set(IMPORT_ENTITIES[entity].columns.filter((c) => String(values?.[c.name] ?? '').trim() !== '').map((c) => c.field));
+}
+
+/** `raw` completo para o service de atualização: estado existente + campos alterados do CSV. */
+export function buildMergeRaw(entity, existing, raw, changed) {
+  const pick = (names, money = []) => Object.fromEntries(names.map((n) => [n, money.includes(n) ? centsToMoneyString(Number(existing[n]) || 0) : existing[n]]).filter(([, v]) => v !== undefined));
+  const bases = {
+    contas: () => pick(['institution', 'name', 'type', 'color', 'status'], []),
+    categorias: () => pick(['name', 'kind', 'color']),
+    cartoes: () => pick(['name', 'brand', 'limitCents', 'closingDay', 'dueDay', 'accountId', 'color'], ['limitCents']),
+    devedores: () => pick(['name', 'loanDate', 'lentCents', 'notes'], ['lentCents']),
+    metas: () => pick(['name', 'targetCents', 'deadline', 'accountId', 'description'], ['targetCents']),
+  };
+  const base = bases[entity]();
+  if (entity === 'contas') base.initialBalanceCents = centsToMoneyString(Number(existing.initialBalanceCents) || 0);
+  for (const f of changed) base[f] = raw[f];
+  return base;
+}
+
+/** Cabeçalho do CSV unificado: `entidade` + união das colunas (primeira ocorrência, na ordem de dependência). */
+export function unifiedHeaders() {
+  const names = [];
+  for (const key of IMPORT_ORDER) for (const c of IMPORT_ENTITIES[key].columns) if (!names.includes(c.name)) names.push(c.name);
+  return [UNIFIED_COLUMN, ...names];
+}
+
+/** Resolve o valor da coluna `entidade` (chave, rótulo ou sem acento/caixa) para a chave da entidade. */
+export function resolveEntityKey(text) {
+  const wanted = normalizeName(text).replace(/\s+/g, '_');
+  for (const key of IMPORT_ORDER) {
+    if (normalizeName(key) === wanted || normalizeName(IMPORT_ENTITIES[key].label).replace(/\s+/g, '_') === wanted) return key;
+  }
+  return null;
+}
+
+/** Linhas-modelo do CSV unificado: 1 exemplo por entidade, na ordem de dependência, alinhadas ao cabeçalho. */
+export function unifiedTemplateRows() {
+  const headers = unifiedHeaders();
+  const rows = IMPORT_ORDER.map((key) => {
+    const byName = Object.fromEntries(IMPORT_ENTITIES[key].columns.map((c) => [c.name, c.example ?? '']));
+    return headers.map((h) => (h === UNIFIED_COLUMN ? key : (byName[h] ?? '')));
+  });
+  return { headers, rows };
 }

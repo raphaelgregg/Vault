@@ -108,6 +108,7 @@ describe('importer (2 etapas)', () => {
     const res = await applyImport(uid, plan, {
       onLog: (e) => logs.push(e),
       io: {
+        loadData: async () => ({ ...ctx, records: {}, errors: {} }),
         creators: {
           despesas: async (u, raw) => {
             calls.push(raw);
@@ -121,7 +122,7 @@ describe('importer (2 etapas)', () => {
     assert.deepEqual(calls.map((c) => c.amountCents), ['10,00', '1000,01']);
     assert.deepEqual([res.created, res.failed, res.permissionDenied], [1, 1, 1]);
     assert.match(logs[1].message, /permission-denied/);
-    const rejected = await applyImport(uid, plan, { io: { creators: { despesas: async () => ({ ok: false, errors: { _form: 'regra' } }) } } });
+    const rejected = await applyImport(uid, plan, { io: { loadData: async () => ({ ...ctx, records: {}, errors: {} }), creators: { despesas: async () => ({ ok: false, errors: { _form: 'regra' } }) } } });
     assert.equal(rejected.failed, 2);
   });
   it('modelo CSV e exportação (referências por nome, centavos → reais) fazem ida e volta no dry-run', async () => {

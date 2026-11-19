@@ -137,7 +137,7 @@ try {
   assert.match(await page.locator('#import-rows').innerText(), /Linha 4 · tipo/);
   assert.equal((await counts()).categories, catsBefore); // dry-run não gravou nada
   await page.click('#btn-apply');
-  await waitLog('import-log', /Fim: 2 criada\(s\), 0 falha/);
+  await waitLog('import-log', /Fim: 2 criada\(s\), 0 atualizada\(s\), 0 ignorada\(s\) por duplicidade, 0 falha\(s\)/);
   assert.equal((await counts()).categories, catsBefore + 2);
   const [expDownload] = await Promise.all([page.waitForEvent('download'), page.click('#btn-export')]);
   const exported = await readFile(await expDownload.path(), 'utf8');
