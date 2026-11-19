@@ -280,7 +280,8 @@ service cloud.firestore {
       allow read: if isOwner(userId);
       allow create, update: if isOwner(userId)
         && keysOk(['debtorId', 'description', 'principalCents', 'dueDate',
-                   'installmentNumber', 'status', 'createdAt', 'updatedAt'])
+                   'installmentNumber', 'installmentsTotal', 'debtGroupId', 'status',
+                   'createdAt', 'updatedAt'])
         && requiredOk(['debtorId', 'description', 'principalCents', 'dueDate',
                        'installmentNumber', 'status', 'createdAt', 'updatedAt'])
         && ref(userId, 'debtors', 'debtorId')
@@ -290,6 +291,11 @@ service cloud.firestore {
         && data().installmentNumber is int
         && data().installmentNumber > 0
         && data().installmentNumber <= 360
+        && (!('installmentsTotal' in data())
+            || (data().installmentsTotal is int
+                && data().installmentsTotal >= data().installmentNumber
+                && data().installmentsTotal <= 360))
+        && optionalString('debtGroupId', 128)
         && oneOf('status', ['pending', 'paid', 'late', 'cancelled'])
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));

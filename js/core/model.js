@@ -198,6 +198,9 @@ export const SCHEMAS = Object.freeze({
       principalCents: money(),
       dueDate: date(),
       installmentNumber: intRange(1, 360),
+      // Dívida à vista (1) ou parcelada (N) e agrupamento das parcelas (VF-2-03m); ausentes em parcelas legadas.
+      installmentsTotal: { kind: 'int', required: false, min: 1, max: 360 },
+      debtGroupId: optionalText(128),
       status: { kind: 'enum', required: true, values: DEBT_STATUSES.map((s) => s.value) },
     },
   },
@@ -652,9 +655,7 @@ export function debtorOverview(debtor, cardPurchases = []) {
  *  - parcelas de empréstimo (`debts`) pendentes com vencimento no mês, pelo restante (principal − recebido).
  * Sem dupla contagem: `lentCents` já inclui o cartão, mas aqui cada origem vem da SUA coleção e o total do
  * mês é limitado ao pendente do devedor (nunca cobra mais do que ele deve). Devedor não aberto → 0.
- * Retorna { month, card: itens, loan: itens, cardCents, loanCents, rawCents, totalCents, capped, overlapCents }.
- * `overlapCents` > 0 sinaliza parcelas de empréstimo cadastradas além da parte de empréstimo (possível duplicidade
- * com compras de cartão).
+ * Retorna { month, card: itens, loan: itens, cardCents, loanCents, rawCents, totalCents, capped }.
  */
 export function debtorMonthStatement({ debtor, month, purchases = [], invoicesById = new Map(), debts = [], receivedByDebt = new Map() } = {}) {
   const card = [];
@@ -665,10 +666,8 @@ export function debtorMonthStatement({ debtor, month, purchases = [], invoicesBy
     card.push({ ...p, referenceMonth, invoiceStatus: invoice?.status ?? null });
   }
   const loan = [];
-  let scheduledCents = 0;
   for (const d of debts) {
     if (d.status === 'cancelled') continue;
-    scheduledCents += Number(d.principalCents) || 0;
     if (d.status === 'paid' || typeof d.dueDate !== 'string' || d.dueDate.slice(0, 7) !== month) continue;
     const remainingCents = (Number(d.principalCents) || 0) - (receivedByDebt.get(d.id) ?? 0);
     if (remainingCents > 0) loan.push({ ...d, remainingCents });
@@ -679,13 +678,58 @@ export function debtorMonthStatement({ debtor, month, purchases = [], invoicesBy
   const open = debtor?.status === 'open';
   const pending = debtorPendingCents(debtor);
   const totalCents = open ? Math.min(rawCents, pending) : 0;
-  const allCardCents = purchases.reduce((t, p) => t + (Number(p.amountCents) || 0), 0);
-  const loanPortion = Math.max(0, (Number(debtor?.lentCents) || 0) - allCardCents);
   return {
     month, card, loan, cardCents, loanCents, rawCents, totalCents,
     capped: open && rawCents > pending,
-    overlapCents: Math.max(0, scheduledCents - loanPortion),
   };
+}
+
+/**
+ * Dívidas do devedor em lista única (VF-2-03m) — puro. Cada obrigação é independente:
+ *  - `cash`: dívida à vista (`debts` com installmentsTotal 1);
+ *  - `installment`: dívida parcelada (`debts` com installmentsTotal N, agrupadas por `debtGroupId`);
+ *  - `legacy`: parcela antiga de empréstimo (sem installmentsTotal);
+ *  - `card`: parcela de compra no cartão (`cardPurchases.debtorId`), com cartão, fatura e status da fatura.
+ * Totais: `openCents` = pendente do devedor (valor emprestado − recebido, mantido pelos services; é o que
+ * os recebimentos abatem); `listedCents` = restante das obrigações listadas, limitado a `openCents`;
+ * `unlistedCents` = parte em aberto sem obrigação detalhada (ex.: valor inicial informado sem parcelas) —
+ * informativo, nunca alerta. Não há mais teste de "duplicidade": várias obrigações legítimas coexistem.
+ */
+export function debtorObligations({ debtor, debts = [], receivedByDebt = new Map(), purchases = [], invoicesById = new Map(), cardsById = new Map() } = {}) {
+  const items = [];
+  for (const d of debts) {
+    if (d.status === 'cancelled') continue;
+    const received = receivedByDebt.get(d.id) ?? 0;
+    const total = Number(d.installmentsTotal) || null;
+    items.push({
+      source: 'debt', id: d.id, groupId: d.debtGroupId ?? d.id,
+      kind: total === 1 ? 'cash' : total ? 'installment' : 'legacy',
+      description: d.description, installmentNumber: d.installmentNumber, installmentsTotal: total,
+      amountCents: Number(d.principalCents) || 0, receivedCents: received,
+      remainingCents: d.status === 'paid' ? 0 : Math.max(0, (Number(d.principalCents) || 0) - received),
+      dueDate: d.dueDate, referenceMonth: typeof d.dueDate === 'string' ? d.dueDate.slice(0, 7) : null,
+      status: d.status === 'paid' || (Number(d.principalCents) || 0) - received <= 0 ? 'paid' : 'pending',
+    });
+  }
+  for (const p of purchases) {
+    const invoice = p.invoiceId ? invoicesById.get(p.invoiceId) : null;
+    const amount = Number(p.amountCents) || 0;
+    items.push({
+      source: 'card', id: p.id, groupId: p.purchaseGroup ?? `${p.cardId}:${p.description}:${p.purchaseDate}`, kind: 'card',
+      description: p.description, cardName: cardsById.get(p.cardId) ?? null,
+      installmentNumber: p.installmentNumber, installmentsTotal: p.installmentsTotal,
+      amountCents: amount, receivedCents: 0, remainingCents: invoice?.status === 'cancelled' ? 0 : amount,
+      dueDate: invoice?.dueDate ?? null,
+      referenceMonth: invoice?.referenceMonth ?? (typeof p.purchaseDate === 'string' ? p.purchaseDate.slice(0, 7) : null),
+      invoiceStatus: invoice?.status ?? null,
+      status: invoice?.status === 'paid' ? 'paid' : invoice?.status === 'cancelled' ? 'cancelled' : 'pending',
+    });
+  }
+  items.sort((a, b) => String(a.referenceMonth).localeCompare(String(b.referenceMonth))
+    || String(a.description).localeCompare(String(b.description)) || (a.installmentNumber - b.installmentNumber));
+  const openCents = debtorPendingCents(debtor);
+  const listedCents = Math.min(openCents, items.reduce((t, i) => t + i.remainingCents, 0));
+  return { items, openCents, listedCents, unlistedCents: openCents - listedCents };
 }
 
 /**

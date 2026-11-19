@@ -19,6 +19,11 @@ import {
 import {
   buildEntity,
   applyPaymentToDebtor,
+  addMonths,
+  isValidIsoDate,
+  clampDayInMonth,
+  splitInstallments,
+  centsToMoneyString,
   DEBT_STATUSES,
   formatCents,
   parseMoneyToCents,
@@ -28,6 +33,7 @@ const DEBTS = COLLECTIONS.debts;
 const PAYMENTS = COLLECTIONS.debtPayments;
 const DEBTORS = COLLECTIONS.debtors;
 const MAX_INSTALLMENT = 360;
+const MAX_PLAN_INSTALLMENTS = 120; // 2 escritas por parcela (+ devedor) no mesmo lote (limite de 500)
 
 export async function listDebts(uid, debtorId) {
   return list(uid, DEBTS, { where: [['debtorId', '==', debtorId]] });
@@ -59,6 +65,51 @@ export async function createDebt(uid, rawData, deps = {}) {
   if (!ok) return { ok: false, errors };
   const id = await createAudited(uid, DEBTS, data, deps);
   return { ok: true, id };
+}
+
+/**
+ * Cria uma dívida do devedor, à vista (`installments` 1) ou parcelada (N), em UM lote atômico (VF-2-03m).
+ * `rawData`: { debtorId, description, totalCents (string pt-BR), installments (padrão 1), firstDueDate }.
+ * Parcelas mensais no mesmo dia (com clamp ao fim do mês), valores em centavos inteiros (a 1ª leva o
+ * resto da divisão), todas com `installmentsTotal` e o mesmo `debtGroupId`. O total soma ao `lentCents`
+ * do devedor (agregado mantido pelo service; o pendente continua `lentCents − receivedCents`).
+ * Devedor precisa existir e estar em aberto. `io`: getById, commitAtomic, groupId() injetáveis.
+ */
+export async function createDebtPlan(uid, rawData, io = {}) {
+  const fetch = io.getById ?? getById;
+  const debtor = rawData?.debtorId ? await fetch(uid, DEBTORS, String(rawData.debtorId)) : null;
+  if (!debtor) return { ok: false, errors: { debtorId: 'Devedor não encontrado.' } };
+  if (debtor.status !== 'open') return { ok: false, errors: { _form: 'Só é possível criar dívidas para devedor em aberto.' } };
+
+  const rawN = rawData.installments === undefined || rawData.installments === '' ? 1 : Number(rawData.installments);
+  if (!Number.isInteger(rawN) || rawN < 1 || rawN > MAX_PLAN_INSTALLMENTS) {
+    return { ok: false, errors: { installments: `Informe de 1 a ${MAX_PLAN_INSTALLMENTS} parcelas.` } };
+  }
+  const total = parseMoneyToCents(rawData.totalCents);
+  if (!Number.isInteger(total) || total <= 0) return { ok: false, errors: { totalCents: 'Informe um valor maior que zero.' } };
+  const parts = splitInstallments(total, rawN);
+  if (!parts) return { ok: false, errors: { totalCents: 'O valor deve ser de ao menos 1 centavo por parcela.' } };
+  const first = /^(\d{4}-\d{2})-(\d{2})$/.exec(rawData.firstDueDate ?? '');
+  if (!first || !isValidIsoDate(rawData.firstDueDate)) return { ok: false, errors: { firstDueDate: 'Data inválida (use AAAA-MM-DD).' } };
+  const day = Number(first[2]);
+
+  const groupId = io.groupId ? io.groupId() : `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const ops = [];
+  for (let n = 1; n <= rawN; n += 1) {
+    const month = addMonths(first[1], n - 1);
+    const built = buildEntity('debts', {
+      debtorId: debtor.id ?? rawData.debtorId, description: rawData.description, principalCents: centsToMoneyString(parts[n - 1]),
+      dueDate: clampDayInMonth(month, day), installmentNumber: n, installmentsTotal: rawN, debtGroupId: groupId, status: 'pending',
+    });
+    if (!built.ok) return { ok: false, errors: built.errors };
+    ops.push({ type: 'create', collection: DEBTS, data: built.data });
+  }
+  ops.push({
+    type: 'update', collection: DEBTORS, docId: debtor.id ?? rawData.debtorId, action: 'debt-plan',
+    data: { lentCents: (Number(debtor.lentCents) || 0) + total },
+  });
+  const ids = await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
+  return { ok: true, ids, groupId, installments: rawN, totalCents: total };
 }
 
 /** Cancela parcela pendente/atrasada sem recebimentos. `paid` só nasce de recebimentos. */

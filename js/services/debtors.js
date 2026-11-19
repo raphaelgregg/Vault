@@ -50,6 +50,16 @@ export async function listDebtors(uid, options = {}) {
   return list(uid, COLLECTION, constraints);
 }
 
+/**
+ * Devedores em aberto, por nome (seletor da compra de cartão). Sem `where`+`orderBy` no servidor:
+ * `status == open` com `orderBy loanDate` exigiria índice composto inexistente em `firestore.indexes.json`
+ * (o emulador não exige índices; o Firestore real responde `failed-precondition`). Filtra/ordena no cliente.
+ */
+export async function listOpenDebtors(uid, io = {}) {
+  const all = await (io.list ?? list)(uid, COLLECTION, {});
+  return all.filter((d) => d.status === 'open').sort((a, b) => String(a.name).localeCompare(String(b.name)));
+}
+
 export async function getDebtor(uid, debtorId) {
   return getById(uid, COLLECTION, debtorId);
 }

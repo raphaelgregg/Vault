@@ -93,6 +93,24 @@ try {
   await page.selectOption('#statement-month', monthValues.at(-1));
   await page.locator('.modal').getByText('Fogão').waitFor();
 
+  log('VF-2-03m: dívida parcelada pela UI convive com a de cartão (lista única, total em aberto somado)');
+  await page.goto(`${app.base}/pages/devedores.html`);
+  await page.waitForSelector('#page-content tbody tr');
+  await page.getByRole('button', { name: 'Parcelas e recebimentos de Maria' }).click();
+  await page.getByRole('button', { name: 'Nova dívida' }).click();
+  await page.fill('#description', 'Moto');
+  await page.fill('#totalCents', '600,00');
+  await page.fill('#installments', '3');
+  await page.locator('#debt-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Dívida criada em 3 parcelas/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForSelector('#statement-month');
+  await page.selectOption('#statement-month', 'all');
+  await page.waitForFunction(() => /Moto/.test(document.querySelector('.modal')?.innerText ?? ''));
+  const all = await page.locator('.modal').innerText();
+  for (const re of [/Moto\s+1\/3/, /Moto\s+2\/3/, /Moto\s+3\/3/, /Geladeira/, /Parcelada/, /Cartão/]) assert.match(all, re);
+  assert.match(all, /Total em aberto\s+R\$\s?1\.900,00/); // 1.000 + 300 (cartão) + 600 (dívida)
+  assert.doesNotMatch(all, /duplicidade/i);
+
   assert.deepEqual(app.problems, [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E devedores OK');
 } catch (error) {

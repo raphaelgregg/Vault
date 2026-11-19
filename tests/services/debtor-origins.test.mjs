@@ -4,8 +4,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { registerCardPurchase, deleteCardPurchase } from '../../js/services/creditCards.js';
-import { deleteDebtor, getDebtorOverview, loadDebtorStatements, getDebtorStatement, DEBTOR_LINK_QUERIES } from '../../js/services/debtors.js';
-import { debtorOverview, debtorMonthStatement } from '../../js/core/model.js';
+import { createDebtPlan } from '../../js/services/debtPayments.js';
+import { deleteDebtor, getDebtorOverview, listOpenDebtors, loadDebtorStatements, getDebtorStatement, DEBTOR_LINK_QUERIES } from '../../js/services/debtors.js';
+import { debtorOverview, debtorMonthStatement, debtorObligations } from '../../js/core/model.js';
 import { describeError } from '../../js/utils/errors.js';
 import { loadDashboard, DASHBOARD_SOURCES } from '../../js/services/dashboard.js';
 
@@ -178,13 +179,10 @@ describe('fechamento do mês por devedor (VF-2-03j)', () => {
     assert.equal(st.capped, true);
     assert.equal(debtorMonthStatement({ debtor: debtor({ status: 'cancelled' }), month: '2026-11', purchases: buys, invoicesById: inv, debts }).totalCents, 0);
   });
-  it('sem fatura usa o mês da compra; sinaliza duplicidade empréstimo × cartão', () => {
+  it('sem fatura usa o mês da compra', () => {
     const st = debtorMonthStatement({ debtor: d, month: '2026-11', purchases: [{ ...buys[0], invoiceId: undefined }], debts });
     assert.equal(st.cardCents, 15000);
-    // parcelas ativas = 30000; parte de empréstimo = 100000 − 15000 = 85000 → sem overlap
-    assert.equal(st.overlapCents, 0);
-    const dup = debtorMonthStatement({ debtor: debtor({ lentCents: 40000, receivedCents: 0 }), month: '2026-11', purchases: buys, invoicesById: inv, debts });
-    assert.equal(dup.overlapCents, 30000 - (40000 - 30000)); // 20000
+    assert.equal('overlapCents' in st, false); // sem alerta de duplicidade (VF-2-03m)
   });
   it('loadDebtorStatements: consultas `in` por lote, só devedores abertos, recebimentos por parcela', async () => {
     const calls = [];
@@ -215,5 +213,97 @@ describe('fechamento do mês por devedor (VF-2-03j)', () => {
     const seen = [];
     await loadDebtorStatements(uid, many, '2026-11', { list: async (u, c, o) => { if (c === 'cardPurchases') seen.push(o.where[0][2].length); return []; } });
     assert.deepEqual(seen, [30, 30, 5]);
+  });
+});
+
+describe('listOpenDebtors (seletor da compra de cartão)', () => {
+  it('lista sem where/orderBy no servidor (evita índice composto) e filtra/ordena no cliente', async () => {
+    const calls = [];
+    const rows = [debtor({ id: 'a', name: 'Zé' }), debtor({ id: 'b', name: 'Ana' }), debtor({ id: 'c', name: 'Bia', status: 'cancelled' }), debtor({ id: 'd', name: 'Caio', status: 'paid' })];
+    const out = await listOpenDebtors(uid, { list: async (u, c, opts) => { calls.push({ c, opts }); return rows; } });
+    assert.deepEqual(out.map((d) => d.name), ['Ana', 'Zé']);
+    assert.deepEqual(calls, [{ c: 'debtors', opts: {} }]); // sem where/orderBy
+  });
+});
+
+describe('dívidas do devedor (VF-2-03m)', () => {
+  const planIo = (debtors = [debtor({ lentCents: 0, receivedCents: 0 })]) => {
+    const atomic = [];
+    return {
+      atomic,
+      io: {
+        getById: async (u, c, id) => debtors.find((x) => x.id === id) ?? null,
+        commitAtomic: async (u, ops) => { atomic.push(ops); return ops.map((o, i) => `n${i}`); },
+        groupId: () => 'grp1',
+      },
+    };
+  };
+  const plan = (o = {}) => ({ debtorId: 'd1', description: 'Moto', totalCents: '1.000,01', installments: 3, firstDueDate: '2026-01-31', ...o });
+
+  it('parcelada: N parcelas em um lote, centavos exatos, mesmo grupo, vencimento mensal com clamp e lentCents += total', async () => {
+    const { io, atomic } = planIo();
+    const r = await createDebtPlan(uid, plan(), io);
+    assert.equal(r.ok, true);
+    const ops = atomic[0];
+    const parcels = ops.filter((o) => o.collection === 'debts');
+    assert.deepEqual(parcels.map((o) => o.data.principalCents), [33335, 33333, 33333]);
+    assert.equal(parcels.reduce((t, o) => t + o.data.principalCents, 0), 100001);
+    assert.deepEqual(parcels.map((o) => o.data.installmentNumber), [1, 2, 3]);
+    assert.ok(parcels.every((o) => o.data.installmentsTotal === 3 && o.data.debtGroupId === 'grp1' && o.data.status === 'pending'));
+    assert.deepEqual(parcels.map((o) => o.data.dueDate), ['2026-01-31', '2026-02-28', '2026-03-31']);
+    assert.deepEqual(ops.at(-1), { type: 'update', collection: 'debtors', docId: 'd1', action: 'debt-plan', data: { lentCents: 100001 } });
+  });
+  it('à vista (1 parcela) e várias dívidas independentes somam no emprestado', async () => {
+    const { io, atomic } = planIo([debtor({ lentCents: 50000, receivedCents: 0 })]);
+    const r = await createDebtPlan(uid, plan({ installments: '', totalCents: '200,00' }), io);
+    assert.equal(r.ok, true);
+    assert.equal(atomic[0].filter((o) => o.collection === 'debts').length, 1);
+    assert.equal(atomic[0].filter((o) => o.collection === 'debts')[0].data.installmentsTotal, 1);
+    assert.equal(atomic[0].at(-1).data.lentCents, 70000);
+  });
+  it('valida devedor, valor, parcelas e data sem gravar', async () => {
+    const bad = [
+      [plan({ debtorId: 'zz' }), 'debtorId'], [plan({ totalCents: '0' }), 'totalCents'], [plan({ installments: 0 }), 'installments'],
+      [plan({ installments: 121 }), 'installments'], [plan({ firstDueDate: '2026-13-01' }), 'firstDueDate'], [plan({ totalCents: '0,02', installments: 3 }), 'totalCents'],
+      [plan({ description: '' }), 'description'],
+    ];
+    for (const [raw, field] of bad) {
+      const { io, atomic } = planIo();
+      const r = await createDebtPlan(uid, raw, io);
+      assert.equal(r.ok, false, field);
+      assert.ok(r.errors[field], field);
+      assert.equal(atomic.length, 0);
+    }
+    const { io, atomic } = planIo([debtor({ status: 'cancelled' })]);
+    assert.equal((await createDebtPlan(uid, plan(), io)).ok, false);
+    assert.equal(atomic.length, 0);
+  });
+  it('obrigações: à vista, parcelada, legada e cartão em lista única; sem alerta de duplicidade', () => {
+    const d = debtor({ lentCents: 200000, receivedCents: 30000 }); // aberto 170000
+    const o = debtorObligations({
+      debtor: d,
+      debts: [
+        { id: 'x1', description: 'Moto', principalCents: 50000, installmentNumber: 1, installmentsTotal: 2, debtGroupId: 'g', dueDate: '2026-11-10', status: 'pending' },
+        { id: 'x2', description: 'Moto', principalCents: 50000, installmentNumber: 2, installmentsTotal: 2, debtGroupId: 'g', dueDate: '2026-12-10', status: 'pending' },
+        { id: 'x3', description: 'Notebook', principalCents: 80000, installmentNumber: 1, installmentsTotal: 1, dueDate: '2026-11-15', status: 'paid' },
+        { id: 'x4', description: 'Antiga', principalCents: 10000, installmentNumber: 1, dueDate: '2026-11-01', status: 'pending' },
+        { id: 'x5', description: 'Cancelada', principalCents: 99999, installmentNumber: 1, installmentsTotal: 1, dueDate: '2026-11-01', status: 'cancelled' },
+      ],
+      receivedByDebt: new Map([['x4', 4000]]),
+      purchases: [{ id: 'p1', cardId: 'c1', description: 'TV', installmentNumber: 2, installmentsTotal: 6, amountCents: 20000, invoiceId: 'i1', purchaseDate: '2026-10-01' }],
+      invoicesById: new Map([['i1', { id: 'i1', referenceMonth: '2026-11', dueDate: '2026-11-17', status: 'closed' }]]),
+      cardsById: new Map([['c1', 'Nubank']]),
+    });
+    assert.deepEqual(o.items.map((i) => `${i.kind}:${i.description}:${i.installmentNumber}`),
+      ['legacy:Antiga:1', 'installment:Moto:1', 'cash:Notebook:1', 'card:TV:2', 'installment:Moto:2']);
+    const tv = o.items.find((i) => i.kind === 'card');
+    assert.deepEqual([tv.cardName, tv.installmentsTotal, tv.amountCents, tv.referenceMonth, tv.dueDate, tv.status], ['Nubank', 6, 20000, '2026-11', '2026-11-17', 'pending']);
+    assert.equal(o.items.find((i) => i.id === 'x3').status, 'paid');
+    assert.equal(o.openCents, 170000);
+    assert.equal(o.listedCents, 6000 + 20000 + 50000 + 50000); // paga e cancelada não entram
+    assert.equal(o.unlistedCents, 170000 - 126000);
+    assert.ok(o.listedCents + o.unlistedCents === o.openCents);
+    // restante listado acima do em aberto é limitado (sem negativo)
+    assert.equal(debtorObligations({ debtor: debtor({ lentCents: 1000, receivedCents: 0 }), purchases: [{ id: 'p', amountCents: 5000 }] }).unlistedCents, 0);
   });
 });

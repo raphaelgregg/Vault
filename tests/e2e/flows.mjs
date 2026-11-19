@@ -178,15 +178,17 @@ try {
   await go('devedores');
   await page.getByRole('button', { name: /Novo devedor/ }).click();
   await page.fill('#name', 'Maria');
-  await page.fill('#lentCents', '500,00');
+  // VF-2-03l/m: devedor SEM empréstimo inicial; a dívida à vista soma ao emprestado.
   await page.locator('#debtor-form button[type="submit"]').click();
   await page.waitForSelector('tbody tr');
   await page.getByRole('button', { name: /Parcelas e recebimentos de Maria/ }).click();
-  await page.getByRole('button', { name: 'Nova parcela' }).click();
+  await page.getByRole('button', { name: 'Nova dívida' }).click();
   await page.fill('#description', 'Parcela única');
-  await page.fill('#principalCents', '500,00');
-  await page.fill('#dueDate', addDays(-3));
+  await page.fill('#totalCents', '500,00');
+  await page.fill('#firstDueDate', addDays(-3));
   await page.locator('#debt-form button[type="submit"]').click();
+  await page.waitForSelector('#statement-month');
+  await page.selectOption('#statement-month', 'all'); // o vencimento pode cair no mês anterior
   await page.waitForSelector('.modal__dialog tbody tr');
   assert.match(await modalText(), /Atrasada/); // derivado: vencida e ainda pendente
   await page.getByRole('button', { name: 'Receber parcela 1' }).click();

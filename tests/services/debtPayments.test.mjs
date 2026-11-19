@@ -42,7 +42,7 @@ function makeIo({ debts = [debt()], debtors = [debtor()], accounts = [account()]
 describe('debts/debtPayments — schema', () => {
   it('chaves e datas espelham as Rules', () => {
     assert.deepEqual(Object.keys(SCHEMAS.debts.fields).sort(),
-      ['debtorId', 'description', 'dueDate', 'installmentNumber', 'principalCents', 'status']);
+      ['debtGroupId', 'debtorId', 'description', 'dueDate', 'installmentNumber', 'installmentsTotal', 'principalCents', 'status']);
     assert.deepEqual(Object.keys(SCHEMAS.debtPayments.fields).sort(),
       ['accountId', 'amountCents', 'date', 'debtId', 'debtorId', 'notes']);
     assert.deepEqual(SCHEMAS.debts.dateFields, ['dueDate']);

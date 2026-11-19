@@ -595,6 +595,25 @@ describe('Parcelas e recebimentos de devedores (VF-2-03b2)', () => {
     return db;
   }
 
+  it('dívida à vista/parcelada (VF-2-03m): parcelas com installmentsTotal/debtGroupId + lentCents do devedor no MESMO lote', async () => {
+    const db = await seed();
+    const batch = writeBatch(db);
+    batch.set(debtDoc(db, 'g1'), debt({ installmentNumber: 1, installmentsTotal: 3, debtGroupId: 'grp1' }));
+    batch.set(debtDoc(db, 'g2'), debt({ installmentNumber: 2, installmentsTotal: 3, debtGroupId: 'grp1', dueDate: noon('2027-01-10') }));
+    batch.set(debtDoc(db, 'g3'), debt({ installmentNumber: 3, installmentsTotal: 3, debtGroupId: 'grp1', dueDate: noon('2027-02-10') }));
+    batch.set(debtDoc(db, 'cash'), debt({ installmentNumber: 1, installmentsTotal: 1, debtGroupId: 'grp2' }));
+    batch.update(debtorDoc(db), { lentCents: 200000, updatedAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('dívida: nega installmentsTotal inválido (< parcela, 0, > 360, não inteiro), debtGroupId longo/não texto e campo extra', async () => {
+    const db = await seed();
+    for (const bad of [{ installmentNumber: 3, installmentsTotal: 2 }, { installmentsTotal: 0 }, { installmentsTotal: 361 }, { installmentsTotal: 2.5 },
+      { installmentsTotal: '3' }, { debtGroupId: 'x'.repeat(129) }, { debtGroupId: 7 }, { extra: 1 }]) {
+      await assertFails(setDoc(debtDoc(db, 'bad'), debt(bad)));
+    }
+  });
+
   it('lote atômico do recebimento: pagamento + parcela paga + devedor quitado', async () => {
     const db = await seed();
     const batch = writeBatch(db);

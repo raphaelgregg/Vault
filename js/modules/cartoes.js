@@ -27,7 +27,8 @@ import {
 } from '../services/creditCards.js';
 import { listAccounts } from '../services/accounts.js';
 import { listCategories } from '../services/categories.js';
-import { listDebtors } from '../services/debtors.js';
+import { listOpenDebtors } from '../services/debtors.js';
+import { describeError } from '../utils/errors.js';
 import { invoiceTotalCents, debtorPendingCents } from '../core/model.js';
 
 export const meta = { title: 'Cartões', icon: 'credit-card' };
@@ -39,7 +40,7 @@ let usage = new Map();
 let accounts = [];
 let categories = [];
 let openDebtors = [];
-let debtorsFailed = false;
+let debtorsFailed = null; // mensagem de diagnóstico quando a leitura falha
 
 export async function render(target, ctx) {
   user = ctx.user;
@@ -52,12 +53,13 @@ export async function render(target, ctx) {
 /** Devedores em aberto (vínculo opcional na compra); falha aqui não impede a tela. Relido a cada compra. */
 async function loadOpenDebtors() {
   try {
-    openDebtors = (await listDebtors(user.uid, { where: [['status', '==', 'open']] })).sort((a, b) => a.name.localeCompare(b.name));
-    debtorsFailed = false;
+    openDebtors = await listOpenDebtors(user.uid);
+    debtorsFailed = null;
   } catch (error) {
     console.error('[cartoes] falha ao listar devedores', error);
     openDebtors = [];
-    debtorsFailed = true;
+    // Diagnóstico visível: mensagem amigável + código técnico (ex.: failed-precondition = índice ausente).
+    debtorsFailed = `${describeError(error)} [${error?.code ?? error?.name ?? 'erro'}]`;
   }
 }
 
@@ -193,7 +195,7 @@ async function openPurchaseModal(card) {
         ...selectOptions(openDebtors.map((x) => ({ value: x.id, label: `${x.name} — pendente ${formatCents(debtorPendingCents(x))}` })), ''),
       ])),
       el('p', { class: 'card__hint', text: debtorsFailed
-        ? 'Não foi possível carregar os devedores; a compra só poderá ser lançada sem vínculo.'
+        ? `Não foi possível carregar os devedores (${debtorsFailed}). A compra só poderá ser lançada sem vínculo.`
         : openDebtors.length
           ? 'Ao vincular a um devedor, o total da compra é somado ao valor emprestado dele.'
           : 'Nenhum devedor em aberto. Cadastre em Devedores (o valor emprestado pode ser 0) para vincular compras.' }),
