@@ -6,8 +6,19 @@
 import { el, toast, refreshIcons } from '../core/ui.js';
 import { openModal, closeModal } from '../components/modal.js';
 import {
-  field, iconButton, statCard, panelHeader, emptyBlock, dataTable,
-  confirmModal, formModal, formatCentsInput, formatDate, formatMonth, optionLabel, selectOptions,
+  field,
+  iconButton,
+  statCard,
+  panelHeader,
+  emptyBlock,
+  dataTable,
+  confirmModal,
+  formModal,
+  formatCentsInput,
+  formatDate,
+  formatMonth,
+  optionLabel,
+  selectOptions,
 } from '../components/form-kit.js';
 import {
   listCards, createCard, updateCard, deleteCard, blockCard, unblockCard, cancelCard,

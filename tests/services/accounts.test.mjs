@@ -7,9 +7,7 @@ import { describe, it, mock, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   listAccounts,
-  getAccount,
   createAccount,
-  updateAccount,
   deleteAccount,
   ACCOUNT_LINK_QUERIES,
   summarizeAccountLinks,

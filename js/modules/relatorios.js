@@ -123,7 +123,7 @@ function draw() {
     ]),
   ]);
 
-  mount(container, 
+  mount(container,
     header, toolbar, alert, notice, cards, evolution,
     categoryPanel('Despesas por categoria', report.expensesByCategory, 'expense', 'despesas-por-categoria'),
     categoryPanel('Receitas por categoria', report.incomesByCategory, 'income', 'receitas-por-categoria'),

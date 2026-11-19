@@ -18,9 +18,9 @@ export function mountTopbar(root, { title, user, onMenuClick } = {}) {
     el('i', { 'data-lucide': 'search', 'aria-hidden': 'true' }),
     el('input', {
       type: 'search',
-      placeholder: 'Pesquisar (Fase 3)',
-      'aria-label': 'Pesquisa global, disponível na fase 3',
-      onInput: () => toast('Pesquisa global chega na Fase 3 — nada foi consultado.'),
+      placeholder: 'Pesquisar (em breve)',
+      'aria-label': 'Pesquisa global, ainda não disponível',
+      onInput: () => toast('A pesquisa global ainda não está disponível — nada foi consultado.'),
     }),
   ]);
 

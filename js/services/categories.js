@@ -11,10 +11,7 @@ import {
   updateAudited,
   removeAudited,
 } from './firestore.js';
-import {
-  validateEntity,
-  buildEntity,
-} from '../core/model.js';
+import { buildEntity } from '../core/model.js';
 
 const COLLECTION = COLLECTIONS.categories;
 

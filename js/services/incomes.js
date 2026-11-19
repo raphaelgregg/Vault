@@ -11,7 +11,6 @@ import {
   removeAudited,
 } from './firestore.js';
 import {
-  validateEntity,
   buildEntity,
   checkCategoryForMovement,
   SCHEMAS,

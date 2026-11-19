@@ -5,7 +5,7 @@
  * - Validação client-side espelhando Security Rules
  * - Persistência em users/{uid}/accounts
  */
-import { el, $, $$, toast, refreshIcons, notImplementedYet } from '../core/ui.js';
+import { el, $, $$, toast, refreshIcons } from '../core/ui.js';
 import { openModal, closeModal } from '../components/modal.js';
 import {
   listAccounts,
@@ -18,10 +18,6 @@ import {
   parseMoneyToCents,
 } from '../services/accounts.js';
 import { listCategories } from '../services/categories.js';
-import { listIncomes } from '../services/incomes.js';
-import { listExpenses } from '../services/expenses.js';
-import { listTransfers } from '../services/transfers.js';
-import { accountBalances } from '../core/model.js';
 
 export const meta = { title: 'Bancos', icon: 'landmark' };
 
@@ -42,14 +38,6 @@ async function loadData() {
     listAccounts(currentUser.uid),
     listCategories(currentUser.uid),
   ]);
-}
-
-/** Calcula saldos derivados para cada conta. */
-function computeBalances() {
-  // Para calcular saldos, precisamos de todas as movimentações
-  // Como é custoso carregar tudo aqui, o saldo será carregado sob demanda
-  // ou podemos carregar tudo em background. Por simplicidade Fase 3:
-  return new Map();
 }
 
 /** Renderiza a página completa. */

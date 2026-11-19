@@ -1,13 +1,13 @@
 /**
  * Cenários E2E (VF-4-04) no navegador contra os emuladores Auth/Firestore.
- * Rodar com `npm run test:e2e`. Sem `playwright` instalado, sai com aviso (código 0).
+ * Rodar com `npm run test:e2e` (E2E_SCREENSHOTS=<pasta> salva capturas de tela). Sem `playwright` instalado, sai com aviso (código 0).
  * Cobre: cadastro → conta/categorias → orçamentos, metas, cartões/faturas, devedores
  * (parcelas/recebimentos), dashboard, relatórios (CSV) e a rota de categorias.
  */
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadPlaywright, startStatic, newContext, registerUser, callService } from './harness.mjs';
+import { loadPlaywright, startStatic, newContext, registerUser } from './harness.mjs';
 
 const pw = loadPlaywright();
 if (!pw) {
@@ -26,7 +26,7 @@ page.on('console', (m) => {
 });
 
 let step = 'início';
-const log = (name) => { step = name; console.log(`  · ${name}`); };
+const log = (name) => { step = name; console.info(`  · ${name}`); };
 const go = async (path) => {
   await page.goto(`${server.base}/pages/${path}.html`);
   await page.waitForSelector('#page-content .panel, #page-content p[role="alert"]', { timeout: 15000 });
@@ -34,6 +34,7 @@ const go = async (path) => {
 const text = () => page.locator('#page-content').innerText();
 const modalText = () => page.locator('.modal__dialog').innerText();
 const row = (needle) => page.locator('tbody tr', { hasText: needle });
+const shot = async (name) => { if (process.env.E2E_SCREENSHOTS) await page.screenshot({ path: join(process.env.E2E_SCREENSHOTS, `${name}.png`), fullPage: true }); };
 const closeToasts = () => page.waitForTimeout(150);
 const iso = (d) => d.toISOString().slice(0, 10);
 const addDays = (days) => iso(new Date(Date.now() + days * 86400000));
@@ -101,6 +102,7 @@ try {
   await page.waitForFunction(() => /133%/.test(document.querySelector('#page-content').innerText));
   assert.match(await row('Mercado').innerText(), /Estourado/);
 
+  await shot('orcamentos');
   log('metas: criar, aportar até concluir, resgatar reativa, excluir bloqueado');
   await go('metas');
   await page.getByRole('button', { name: /Nova meta/ }).click();
@@ -130,6 +132,7 @@ try {
   await page.waitForFunction(() => /não pode ser excluída/.test(document.querySelector('.toast')?.innerText ?? ''));
   assert.match(await text(), /Viagem/);
 
+  await shot('metas');
   log('cartões: criar, compra 3x, fatura, fechar e pagar, limite');
   await go('cartoes');
   await page.getByRole('button', { name: /Novo cartão/ }).click();
@@ -170,6 +173,7 @@ try {
   await page.keyboard.press('Escape');
   assert.match(await text(), /R\$\s?1\.400,00/); // disponível: 2000 − 600 (2 parcelas em fatura não paga)
 
+  await shot('cartoes');
   log('devedores: criar, parcela, recebimento parcial e quitação');
   await go('devedores');
   await page.getByRole('button', { name: /Novo devedor/ }).click();
@@ -211,6 +215,7 @@ try {
   assert.match(await text(), /R\$\s?4\.600,00/); // resultado do mês 5000 − 400
   assert.match(await text(), /Fatura|Nada a vencer/);
 
+  await shot('dashboard');
   log('relatórios: período, totais por categoria e CSV');
   await go('relatorios');
   assert.match(await text(), /Mercado/);
@@ -220,11 +225,23 @@ try {
     page.getByRole('button', { name: 'Exportar CSV' }).first().click(),
   ]);
   assert.match(download.suggestedFilename(), /^evolucao-\d{4}-\d{2}-\d{4}-\d{2}\.csv$/);
+  await shot('relatorios');
   await page.fill('#rep-from', '2026-12');
   await page.fill('#rep-to', '2026-01');
   await page.getByRole('button', { name: 'Atualizar' }).click();
   await page.waitForSelector('.form__error[role="alert"]');
   assert.match(await text(), /Período inválido/);
+
+  log('configurações: perfil e tema persistem na conta (novo dispositivo)');
+  await go('configuracoes');
+  await page.fill('#profile-name', 'Nome Persistido');
+  await page.selectOption('#settings-theme', 'dark');
+  await page.locator('#preferences-form button[type="submit"]').click();
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  await page.evaluate(() => localStorage.clear()); // simula outro dispositivo: sem cache local
+  await go('configuracoes');
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  assert.equal(await page.inputValue('#profile-name'), 'Nome Persistido');
 
   log('rota de categorias e navegação com orçamentos');
   await go('categorias');
@@ -232,7 +249,7 @@ try {
   await closeToasts();
 
   assert.deepEqual(problems, [], `erros de console/página: ${problems.join(' | ')}`);
-  console.log('E2E OK');
+  console.info('E2E OK');
 } catch (error) {
   console.error(`E2E FALHOU na etapa "${step}":`, error.message);
   await page.screenshot({ path: join(tmpdir(), 'vault-e2e-fail.png'), fullPage: true }).catch(() => {});

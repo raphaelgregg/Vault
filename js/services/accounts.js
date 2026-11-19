@@ -11,13 +11,7 @@ import {
   updateAudited,
   removeAudited,
 } from './firestore.js';
-import {
-  validateEntity,
-  buildEntity,
-  formatCents,
-  parseMoneyToCents,
-  ACCOUNT_TYPES,
-} from '../core/model.js';
+import { buildEntity, formatCents, parseMoneyToCents, ACCOUNT_TYPES } from '../core/model.js';
 
 const COLLECTION = COLLECTIONS.accounts;
 

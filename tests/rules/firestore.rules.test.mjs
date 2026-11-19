@@ -22,7 +22,16 @@ import {
   assertFails,
   assertSucceeds,
 } from '@firebase/rules-unit-testing';
-import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, addDoc, writeBatch } from 'firebase/firestore';
+import {
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  collection,
+  addDoc,
+  writeBatch,
+} from 'firebase/firestore';
 import { serverTimestamp } from 'firebase/firestore';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -833,4 +842,3 @@ describe('Orçamentos (VF-2-03e)', () => {
     await assertFails(getDoc(budgetDoc(asAnonymous())));
   });
 });
-

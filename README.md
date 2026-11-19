@@ -10,9 +10,10 @@ Sistema de controle financeiro pessoal em **HTML5 + CSS3 + JavaScript (ES Module
 **Firebase Authentication** e **Cloud Firestore** como backend. Sem framework, sem build
 obrigatório e sem servidor próprio — roda em qualquer hospedagem estática (Vercel Hobby).
 
-> **Fase atual: 2 — Fundação.** Existem autenticação, estrutura de dados, Security Rules
-> testadas e a casca visual navegável. **Não existe lógica financeira ainda**: saldos, somas
-> e relatórios são implementados nas Fases 3 e 4.
+> **Estado atual: módulos financeiros entregues (etapa 2 do `PLAN.md`).** Bancos, receitas,
+> despesas, transferências, categorias, assinaturas, devedores (parcelas e recebimentos), metas,
+> cartões (compras parceladas e faturas), orçamentos, dashboard e relatórios têm service, regras
+> de negócio testadas e interface. Pendências e limitações conhecidas estão em `PLAN.md` e na seção 8.
 
 ---
 
@@ -20,23 +21,30 @@ obrigatório e sem servidor próprio — roda em qualquer hospedagem estática (
 
 | Item | Estado |
 |---|---|
-| Login, cadastro, logout, recuperação de senha | ✅ implementado (Firebase Auth e-mail/senha) |
-| Guarda de sessão nas páginas internas | ✅ redireciona para o login |
-| Layout responsivo, menu recolhível, tema claro/escuro | ✅ |
-| Componentes: cards, tabela, modal, estado vazio, toasts | ✅ |
-| Páginas de todos os módulos com estados vazios | ✅ (Dashboard, Bancos, Receitas, Despesas, Transferências, Assinaturas, Devedores, Metas, Cartões, Relatórios, Configurações) |
-| Constantes de coleções e CRUD genérico | ✅ `js/services/firestore.js` |
-| Security Rules + testes no emulador | ✅ 24 testes, todos passando |
-| Motor de saldo, módulos financeiros, dashboard real | ⛔ Fases 3/4 |
+| Login, cadastro, logout, recuperação de senha | ✅ Firebase Auth e-mail/senha |
+| Guarda de sessão, layout responsivo, tema claro/escuro persistido na conta | ✅ |
+| Contas, categorias, receitas, despesas, transferências | ✅ CRUD + auditoria + exclusão segura (vínculos) |
+| Assinaturas (pausar/retomar/cancelar, avanço de cobrança) | ✅ service + UI (o avanço de cobrança ainda não tem botão na UI) |
+| Devedores, parcelas e recebimentos | ✅ recebimento atômico (lote): recebimento + parcela + devedor + auditoria |
+| Metas e movimentações (aporte/resgate) | ✅ valor guardado derivado; conclusão/reativação atômicas |
+| Cartões, compras parceladas e faturas | ✅ limite derivado; fechar/pagar fatura (ver limitações) |
+| Orçamentos por categoria/mês | ✅ gasto derivado das despesas do mês |
+| Dashboard e relatórios (período, categorias, CSV) | ✅ somente leitura, leituras limitadas |
+| Security Rules + testes no emulador | ✅ 65 testes |
+| Testes unitários (modelo + services) | ✅ 332 testes |
+| Lint sem dependências, CI (GitHub Actions), E2E Playwright | ✅ ver seção 3 (CI e E2E não executados no GitHub) |
 
-**Nada é inventado na tela:** com o banco vazio, indicadores mostram `—` e as listas exibem
-estado vazio. Não há dados DEMO.
+**Nada é inventado na tela:** com o banco vazio, indicadores mostram zeros/`—` e as listas exibem
+estado vazio. Não há dados DEMO. Saldo, limites, gasto de orçamento, valor guardado e totais de
+fatura aberta são **derivados**, nunca gravados.
 
 ---
 
 ## 2. Pré-requisitos
 
-- Node.js 18+ (só para o emulador e testes; a aplicação não precisa de build).
+- Node.js 18+ (só para o emulador e testes; a aplicação não precisa de build). Testes executados
+  no Node 22; o Node 18 só roda no CI (matriz) — não foi executado localmente.
+- Java 11+ (emulador do Firestore, usado por `npm run test:rules`).
 - Java 11+ (exigido pelo emulador do Firestore).
 - Conta Google para criar o projeto no Firebase (plano **Spark**, gratuito).
 
@@ -93,14 +101,19 @@ Abrindo em `localhost` com `?mode=demo`, o app conecta aos emuladores
 (`js/firebase/client.js`). Sem o parâmetro e com a config real preenchida, ele usa o
 Firebase real.
 
-### Testar as Security Rules
+### Testes e qualidade
 
-```bash
-npm run test:rules
-```
+| Comando | O que faz |
+|---|---|
+| `npm run test:unit` | modelo, agregações e services com `io` injetado (sem rede) — 332 testes |
+| `npm run test:rules` | sobe Auth+Firestore no emulador e roda `tests/rules/` — 65 testes |
+| `npm run lint` | sintaxe, espaços, `console.log`, imports não usados, JSON (sem dependências) |
+| `npm run test:e2e` | Playwright em Chromium contra os emuladores (cadastro → orçamentos, metas, cartões, devedores, dashboard, relatórios) |
 
-O comando sobe o emulador, roda `tests/rules/` com `node --test` e derruba tudo. Última
-execução registrada: **24 testes, 24 passando, 0 falhas**.
+O E2E **não** adiciona dependência ao projeto: usa o `playwright` já instalado no ambiente e, sem
+ele, sai com aviso. O harness serve o SDK do Firebase a partir de `node_modules` (a CDN pode estar
+bloqueada) e remove o SRI do import map só durante o teste. `E2E_SCREENSHOTS=<pasta>` salva capturas.
+O workflow `.github/workflows/ci.yml` roda lint, unit e Rules (Node 18 e 22); E2E fica fora do CI.
 
 ---
 
@@ -118,13 +131,15 @@ execução registrada: **24 testes, 24 passando, 0 falhas**.
 ├── js/
 │   ├── app.js                  # entrada das páginas internas
 │   ├── auth-page.js            # entrada da tela de login
-│   ├── core/                   # guard.js (sessão), ui.js (DOM, toast)
+│   ├── core/                   # guard.js (sessão), ui.js (DOM, toast), model.js (schemas/cálculos), aggregates.js (orçamento/dashboard/relatórios)
 │   ├── firebase/               # config.js (placeholders), client.js (SDK + emuladores)
-│   ├── services/               # auth.js, firestore.js (CRUD genérico + auditoria)
-│   ├── components/             # sidebar, topbar, tema, card, tabela, modal, vazio
-│   ├── modules/                # um módulo por página (Fase 2: estruturas vazias)
+│   ├── services/               # firestore.js (CRUD, lote atômico, auditoria) + um service por módulo
+│   ├── components/             # sidebar, topbar, tema, card, tabela, modal, vazio, form-kit (módulos de formulário)
+│   ├── modules/                # um módulo por página (+ devedores-parcelas.js)
 │   └── utils/                  # constants, money (centavos), dates, nav
-├── tests/rules/                # testes das Rules no emulador
+├── tests/                      # model/, services/ (unit), rules/ (emulador), e2e/ (Playwright)
+├── scripts/lint.mjs            # lint sem dependências
+├── .github/workflows/ci.yml    # CI (lint, unit, Rules)
 ├── firestore.rules
 ├── firestore.indexes.json
 ├── firebase.json               # emuladores Auth + Firestore
@@ -205,40 +220,53 @@ O projeto não habilita nada fora do Spark e não faz chamadas pagas.
 
 ---
 
-## 7. Decisões técnicas desta fase
+## 7. Decisões técnicas
 
 1. **ES Modules nativos + SDK do Firebase v10 via CDN** — zero build, deploy estático.
-2. **CRUD genérico** (`js/services/firestore.js`) em vez de um service por coleção: evita
-   duplicação agora e serve de base para os módulos financeiros.
-3. **Rules com schemas fechados por coleção** — mais verbosas, porém impedem gravação de
-   campos inventados (ex.: snapshot de saldo).
-4. **`exists()` nas referências** — integridade referencial real no banco; custa 1 leitura
-   por referência validada. Documentado para controle de cota.
-5. **Sem SweetAlert2/Chart.js/Day.js/Papa Parse nesta fase** — não há uso real ainda; cada um
-   entra quando a funcionalidade existir (evita peso morto). Lucide já é usado nos ícones.
-6. **Sem botão sem implementação** — busca global, exportação e ações de CRUD mostram aviso de
-   fase futura em vez de fingir funcionamento.
+2. **Auditoria e CRUD por helpers** (`createAudited`/`updateAudited`/`removeAudited`) com `io`
+   injetável; operações multi-documento usam `commitAtomic` (lote Firestore com auditoria no
+   mesmo lote).
+3. **Rules com schemas fechados por coleção** — impedem campos inventados (ex.: snapshot de saldo).
+   Saldos, limites, gasto de orçamento, valor guardado de metas e totais de fatura aberta são derivados.
+4. **`exists()` nas referências (decisão mantida).** Dá integridade referencial real, custa 1 leitura
+   por referência, mas **não enxerga documentos criados no mesmo lote**. Efeito: parcela de cartão não
+   pode referenciar fatura criada no mesmo lote — a compra grava **dois lotes** (1º faturas novas,
+   2º parcelas), cada um atômico; se o 2º falhar sobram faturas abertas vazias, reaproveitadas na
+   próxima compra (ID determinístico `cardId_AAAA-MM`). Alternativa avaliada: `existsAfter()` nas
+   Rules (um só lote). **Não adotada** porque exige republicar as Rules em produção e revisar todas as
+   referências (`ref()`/`optionalRef()`) — decisão de segurança que depende de aprovação. O contrato
+   atual está documentado por teste em `tests/rules/`. Se adotada no futuro, o service volta a um lote.
+5. **Datas** em campos `date`/`*Date` são Timestamp em **meio-dia UTC** (o dia de calendário não
+   desloca em nenhum fuso); filtros por data em `where` convertem a string ISO do mesmo modo.
+6. **Sem dependências novas sem aprovação** (nem libs via CDN): gráficos são barras CSS, CSV é gerado
+   no cliente, lint é um script próprio, E2E reaproveita o Playwright do ambiente.
+7. **Sem botão sem implementação** — busca global e exportação PDF ainda não existem e avisam isso.
 
 ---
 
 ## 8. Limitações e pendências
 
-- **Config real do Firebase** precisa ser colada em `js/firebase/config.js` (placeholders).
-- Lógica financeira, dashboard real, importação/exportação e backup: Fases 3–5.
-- Publicação (GitHub + Vercel): Fase 6. Nada foi publicado e nenhum serviço pago foi ativado.
-- Backup do Firestore **não é automático no plano gratuito**; a exportação completa por
-  usuário será implementada na Fase 5. Não presuma backup gerenciado.
-- Testes de UI (Playwright) ainda não existem; nesta fase a cobertura é das Rules.
-- O tema é aplicado por JS após o carregamento (evita `script` inline); pode haver um flash
-  breve de tema claro em conexões muito lentas.
+- **Config real do Firebase** precisa estar em `js/firebase/config.js`; as Rules/índices do repositório
+  precisam ser publicadas manualmente (`firebase deploy --only firestore:rules,firestore:indexes`,
+  somente com autorização). Não verificado: Rules em produção, deploy/preview na Vercel.
+- **Leituras (cota Spark):** dashboard e relatórios têm teto de leitura e avisam quando é atingido;
+  receitas, despesas, transferências e bancos ainda listam sem paginação (VF-4-03 parcial).
+- **Cartões:** pagar fatura não movimenta conta (o schema `invoices` não tem `accountId`) e é sempre
+  integral; não há cancelamento de fatura; parcelas de uma compra não têm `installmentGroupId` (o
+  schema `cardPurchases` não o aceita) e são identificadas por cartão + descrição + data + total.
+- **Concorrência:** leitura prévia + escrita em lote, sem transação (limite de cartão, valores
+  recebidos e unicidade de orçamento por categoria/mês podem ser violados por abas simultâneas).
+- Movimentações de metas e recebimentos são imutáveis (sem estorno); orçamentos consideram só
+  despesas (compras no cartão não entram).
+- Backup do Firestore **não é automático no plano gratuito**; exportação completa por usuário ainda
+  não existe. Não presuma backup gerenciado.
+- Exportação PDF e importação CSV não existem; exportação CSV existe nos relatórios.
+- O tema é aplicado por JS após o carregamento; pode haver um flash breve de tema claro.
 
 ---
 
 ## 9. Roadmap
 
-| Fase | Escopo |
-|---|---|
-| 3 | Bancos, receitas, despesas, transferências, assinaturas, devedores, metas, cartões (CRUD + motor de saldo) |
-| 4 | Dashboard com indicadores e gráficos, orçamentos, projeções, alertas |
-| 5 | Importação CSV, exportação, backup, testes de UI, auditoria financeira |
-| 6 | GitHub, Vercel, produção, App Check, documentação operacional |
+O estado operacional e os IDs (`VF-<fase>-<nn>`) vivem em `PLAN.md`. Próximos: paginação das listas
+legadas (VF-4-03), importação CSV/exportação completa/backup, publicação (GitHub + Vercel), App Check
+e documentação operacional.

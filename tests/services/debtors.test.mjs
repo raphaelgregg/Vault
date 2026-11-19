@@ -13,7 +13,6 @@ import {
   getDebtorStatusOptions,
 } from '../../js/services/debtors.js';
 import {
-  buildEntity,
   validateEntity,
   SCHEMAS,
   debtorPendingCents,

@@ -38,7 +38,7 @@ export function refreshIcons() {
   }
 }
 
-/** Mensagem para funcionalidade de fase futura (sem botão morto). */
+/** Mensagem para funcionalidade ainda não disponível (sem botão morto). */
 export function notImplementedYet() {
-  toast('Disponível na Fase 3 — nada foi gravado.');
+  toast('Funcionalidade ainda não disponível — nada foi gravado.');
 }

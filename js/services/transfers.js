@@ -10,12 +10,7 @@ import {
   updateAudited,
   removeAudited,
 } from './firestore.js';
-import {
-  validateEntity,
-  buildEntity,
-  formatCents,
-  parseMoneyToCents,
-} from '../core/model.js';
+import { buildEntity, formatCents, parseMoneyToCents } from '../core/model.js';
 
 const COLLECTION = COLLECTIONS.transfers;
 
