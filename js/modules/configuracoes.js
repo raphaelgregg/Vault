@@ -5,6 +5,8 @@
 import { el, toast, refreshIcons } from '../core/ui.js';
 import { applyThemePreference } from '../components/theme.js';
 import { isMaintenanceAuthorized } from '../utils/maintenance-config.js';
+import { changePassword, sendResetToCurrentUser } from '../services/auth.js';
+import { hasPasswordProvider, externalProviderLabels, MIN_PASSWORD_LENGTH } from '../utils/password.js';
 import {
   getProfile,
   getSettings,
@@ -115,6 +117,7 @@ export async function render(container, { user }) {
         : null,
       form,
     ]),
+    buildPasswordPanel(user),
     // Atalho ao painel interno (só para quem passa na trava de interface; as Rules continuam valendo).
     ...(isMaintenanceAuthorized({ email: user?.email, hostname: location.hostname })
       ? [el('section', { class: 'panel' }, [el('div', { class: 'panel__body' }, [
@@ -124,4 +127,90 @@ export async function render(container, { user }) {
       : [])
   );
   refreshIcons();
+}
+
+/**
+ * Segurança — senha (VF-2-03x). Contas com provedor `password`: senha atual + nova + confirmação, com
+ * reautenticação antes de `updatePassword`; alternativa por e-mail de redefinição. Contas só com provedor
+ * externo (ex.: Google): aviso de que a senha é gerenciada pelo provedor.
+ */
+function buildPasswordPanel(user) {
+  const header = el('div', { class: 'panel__header' }, [
+    el('span', { class: 'card__icon' }, [el('i', { 'data-lucide': 'key-round', 'aria-hidden': 'true' })]),
+    el('div', {}, [el('h2', { text: 'Segurança — senha' })]),
+  ]);
+
+  if (!hasPasswordProvider(user)) {
+    const providers = externalProviderLabels(user);
+    return el('section', { class: 'panel', id: 'panel-password' }, [
+      header,
+      el('div', { class: 'panel__body' }, [
+        el('p', { class: 'notice', id: 'password-external', role: 'status', text: `Sua conta entra por ${providers.length ? providers.join(', ') : 'um provedor externo'}: a senha é gerenciada por esse provedor e não pode ser alterada aqui.` }),
+      ]),
+    ]);
+  }
+
+  const input = (id, name, autocomplete, label) => ({
+    id,
+    node: el('div', { class: 'field' }, [
+      el('label', { for: id, text: label }),
+      el('input', { type: 'password', id, name, autocomplete, required: true, maxlength: 128 }),
+      el('span', { class: 'form-error', 'data-for': name, role: 'alert' }),
+    ]),
+  });
+  const fields = [
+    input('pw-current', 'currentPassword', 'current-password', 'Senha atual'),
+    input('pw-new', 'newPassword', 'new-password', `Nova senha (mínimo ${MIN_PASSWORD_LENGTH} caracteres)`),
+    input('pw-confirm', 'confirmPassword', 'new-password', 'Confirmar nova senha'),
+  ];
+  const formError = el('p', { class: 'form-error', id: 'pw-form-error', role: 'alert' });
+  const submit = el('button', { type: 'submit', class: 'btn btn--primary', id: 'pw-submit', text: 'Alterar senha' });
+  const form = el('form', { id: 'password-form', novalidate: true }, [...fields.map((f) => f.node), formError, submit]);
+
+  const showErrors = (errors) => {
+    for (const node of form.querySelectorAll('.form-error')) node.textContent = '';
+    for (const [name, message] of Object.entries(errors)) {
+      const target = name === '_form' ? formError : form.querySelector(`.form-error[data-for="${name}"]`);
+      if (target) target.textContent = message;
+    }
+  };
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    showErrors({});
+    try {
+      const value = (name) => form.elements[name].value;
+      const result = await changePassword(user, { current: value('currentPassword'), next: value('newPassword'), confirm: value('confirmPassword') });
+      if (result.ok) {
+        form.reset();
+        toast('Senha alterada com sucesso.');
+      } else {
+        showErrors(result.errors);
+      }
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  const resetBtn = el('button', { type: 'button', class: 'btn btn--secondary', id: 'pw-reset-email', text: 'Enviar e-mail de redefinição' });
+  resetBtn.addEventListener('click', async () => {
+    resetBtn.disabled = true;
+    try {
+      const r = await sendResetToCurrentUser(user);
+      if (r.ok) toast(`E-mail de redefinição enviado para ${r.email}. Verifique a caixa de entrada e o spam.`, 6000);
+      else toast(r.errors._form, 6000);
+    } finally {
+      resetBtn.disabled = false;
+    }
+  });
+
+  return el('section', { class: 'panel', id: 'panel-password' }, [
+    header,
+    el('div', { class: 'panel__body' }, [
+      form,
+      el('p', { class: 'card__hint', text: 'Prefere redefinir por e-mail? Enviamos um link seguro para o e-mail da sua conta.' }),
+      resetBtn,
+    ]),
+  ]);
 }
