@@ -8,7 +8,7 @@ import { mapImportRow, resolveRef, IMPORT_ENTITIES, IMPORT_ENTITY_KEYS, MAX_IMPO
 import { dryRunImport, applyImport, templateCsv, exportCsv, exportAllCsv, loadImportContext } from '../../js/services/importer.js';
 import { makeZip, crc32 } from '../../js/utils/zip.js';
 import { clearCollection, clearUserData, clearScope, clearAllUsersData, discoverUsers, isAdminUser, SCOPES, DOMAIN_COLLECTIONS, BATCH_LIMIT } from '../../js/services/maintenance.js';
-import { isMaintenanceAuthorized, CONFIRM_PHRASES } from '../../js/utils/maintenance-config.js';
+import { isMaintenanceAuthorized, CONFIRM_PHRASES, MAINTENANCE_ALLOWED_EMAILS } from '../../js/utils/maintenance-config.js';
 
 const uid = 'u1';
 
@@ -287,7 +287,17 @@ describe('limpeza em lotes (≤ 500) e banco inteiro', () => {
 });
 
 describe('trava de acesso e confirmações', () => {
-  it('libera localhost/emulador e e-mails da lista; nega o resto (lista vazia por padrão)', () => {
+  it('lista de acesso: congelada, em minúsculas, com o dono; libera só ele fora de localhost (inclusive com caixa/espaços)', () => {
+    assert.equal(Object.isFrozen(MAINTENANCE_ALLOWED_EMAILS), true);
+    assert.deepEqual([...MAINTENANCE_ALLOWED_EMAILS], ['raphaelgregg@gmail.com']);
+    assert.ok(MAINTENANCE_ALLOWED_EMAILS.every((e) => e === e.trim().toLowerCase()));
+    assert.equal(isMaintenanceAuthorized({ hostname: 'vault.rgregg.com.br', email: 'raphaelgregg@gmail.com' }), true);
+    assert.equal(isMaintenanceAuthorized({ hostname: 'vault.rgregg.com.br', email: ' RaphaelGregg@Gmail.com ' }), true);
+    for (const email of ['outro@gmail.com', 'raphaelgregg@gmail.com.br', 'xraphaelgregg@gmail.com', '', undefined]) {
+      assert.equal(isMaintenanceAuthorized({ hostname: 'vault.rgregg.com.br', email }), false, String(email));
+    }
+  });
+  it('libera localhost/emulador e e-mails da lista informada; nega o resto', () => {
     assert.equal(isMaintenanceAuthorized({ hostname: 'localhost' }), true);
     assert.equal(isMaintenanceAuthorized({ hostname: '127.0.0.1', email: 'x@y.z' }), true);
     assert.equal(isMaintenanceAuthorized({ hostname: 'vault.vercel.app', email: 'a@b.c' }), false);

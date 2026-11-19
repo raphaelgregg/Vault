@@ -1,10 +1,10 @@
 /**
  * Acesso ao painel de manutenção (VF-2-03u). É uma TRAVA DE INTERFACE, não segurança: a segurança real são as
  * Firestore Rules (cada usuário só enxerga/altera `users/{uid}/…` do próprio uid). Libera: (a) ambiente local /
- * emulador (localhost, 127.0.0.1) e (b) e-mails da lista abaixo. Em produção a lista nasce VAZIA — para liberar
- * o painel, o dono inclui o próprio e-mail aqui (nunca commite e-mail de terceiros).
+ * emulador (localhost, 127.0.0.1) e (b) e-mails da lista abaixo (minúsculas). Para liberar o painel a alguém, o dono
+ * inclui o e-mail aqui (nunca e-mail de terceiros). ATENÇÃO: este arquivo é servido ao navegador — o e-mail é público.
  */
-export const MAINTENANCE_ALLOWED_EMAILS = Object.freeze([]);
+export const MAINTENANCE_ALLOWED_EMAILS = Object.freeze(['raphaelgregg@gmail.com']);
 
 const LOCAL_HOSTS = Object.freeze(['localhost', '127.0.0.1', '[::1]']);
 
