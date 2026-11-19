@@ -303,3 +303,28 @@ describe('transfers service — saldo suficiente na origem', () => {
     assert.match((await createTransfer(uid, payload(), io)).errors.fromAccountId, /não encontrada/);
   });
 });
+
+describe('transfers service — exclusão (qualquer status)', () => {
+  const uid = 'u1';
+  const io = (status) => {
+    const calls = { remove: [], audit: [] };
+    return { calls, io: {
+      getById: async () => ({ id: 't1', status, fromAccountId: 'a1', toAccountId: 'a2', amountCents: 25000 }),
+      remove: async (_u, c, id) => { calls.remove.push([c, id]); },
+      writeAudit: async (_u, e) => { calls.audit.push(e); },
+    } };
+  };
+  it('exclui confirmada e informa o estorno (saldo é derivado, nada é regravado nas contas)', async () => {
+    const { io: deps, calls } = io('confirmed');
+    const { deleteTransfer } = await import('../../js/services/transfers.js');
+    assert.deepEqual(await deleteTransfer(uid, 't1', deps), { ok: true, reversed: true, amountCents: 25000 });
+    assert.deepEqual(calls.remove, [['transfers', 't1']]);
+    assert.equal(calls.audit[0].action, 'delete');
+  });
+  it('exclui pendente e cancelada sem estorno', async () => {
+    const { deleteTransfer } = await import('../../js/services/transfers.js');
+    for (const status of ['pending', 'cancelled']) {
+      assert.deepEqual(await deleteTransfer(uid, 't1', io(status).io), { ok: true, reversed: false, amountCents: 25000 });
+    }
+  });
+});

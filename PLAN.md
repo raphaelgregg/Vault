@@ -251,6 +251,11 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Limitações: checagem client-side (janela de concorrência; Rules não calculam saldo); saldo lê até 1000 movimentos por coleção (`READ_LIMIT`); outros débitos (despesa paga, aporte em meta, pagamento de fatura) não validam saldo — fora do escopo.
 - Arquivos: `js/services/transfers.js`, `tests/services/transfers.test.mjs`, `tests/e2e/movements.mjs`.
 
+- [x] **VF-2-03ag — Excluir transferência em qualquer status** (funcionalidade) — CONCLUÍDA 2026-11-19 (**`firestore.rules` NÃO alterado**: `delete` já era do dono).
+- Problema [C]: a UI escondia o botão de excluir nas transferências confirmadas (só cancelar).
+- Solução: botão sempre visível; confirmação explica o estorno (saldo derivado: valor volta à origem e sai do destino, nada é regravado); `deleteTransfer` retorna `{ reversed, amountCents }`. Pendente/cancelada não afetam saldo. Limitação: excluir uma confirmada não valida o saldo do destino (mesmo comportamento de receitas/despesas), podendo deixá-lo negativo se o dinheiro já foi usado.
+- Arquivos: `js/modules/transferencias.js`, `js/services/transfers.js`, `tests/services/transfers.test.mjs`, `tests/e2e/movements.mjs`.
+
 ### Fase 3 — Arquitetura, qualidade e refatoração
 
 - [x] **VF-3-01 — Reduzir duplicação nos services** (Médio) — CONCLUÍDA 2026-11-18: extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
@@ -322,3 +327,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-19 — VF-2-03ad concluída (CSV: `conta` só com o nome + coluna `instituicao`; resolução sem ambiguidade; export/reimport sem perda de vínculo). Sem mudança em Rules/índices/modelo de dados.
 - 2026-11-19 — VF-2-03ae concluída (conta sem nome, `accountLabel` único nos selects). **Republicar `firestore.rules`** (`npx firebase deploy --only firestore:rules`, com autorização).
 - 2026-11-19 — VF-2-03af concluída (transferência bloqueada sem saldo na origem). Sem mudança em Rules/índices.
+- 2026-11-19 — VF-2-03ag concluída (excluir transferência confirmada/pendente/cancelada, com estorno explicado).

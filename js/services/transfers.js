@@ -96,13 +96,17 @@ export async function updateTransfer(uid, transferId, rawData, io = {}) {
   return { ok: true };
 }
 
-/** Exclui uma transferência. */
+/**
+ * Exclui uma transferência de qualquer status. O saldo é DERIVADO (só transferências `confirmed` movem dinheiro),
+ * então excluir uma confirmada devolve o valor à origem e o retira do destino sem gravar nada nas contas:
+ * `reversed`/`amountCents` informam o estorno à interface.
+ */
 export async function deleteTransfer(uid, transferId, io = {}) {
   const transfer = await (io.getById ?? getById)(uid, COLLECTION, transferId);
   if (!transfer) return { ok: false, errors: { _form: 'Transferência não encontrada.' } };
 
   await removeAudited(uid, COLLECTION, transferId, transfer, io);
-  return { ok: true };
+  return { ok: true, reversed: transfer.status === 'confirmed', amountCents: Number(transfer.amountCents) || 0 };
 }
 
 /**

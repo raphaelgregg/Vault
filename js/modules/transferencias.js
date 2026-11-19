@@ -298,17 +298,15 @@ function createTransferActions(transfer) {
     })
   );
 
-  if (transfer.status !== 'confirmed') {
-    actions.push(
-      el('button', {
-        type: 'button',
-        class: 'btn btn--icon btn--danger',
-        'aria-label': `Excluir transferência`,
-        onClick: () => confirmDeleteTransfer(transfer),
-        html: '<i data-lucide="trash-2" aria-hidden="true"></i>',
-      })
-    );
-  }
+  actions.push(
+    el('button', {
+      type: 'button',
+      class: 'btn btn--icon btn--danger',
+      'aria-label': `Excluir transferência`,
+      onClick: () => confirmDeleteTransfer(transfer),
+      html: '<i data-lucide="trash-2" aria-hidden="true"></i>',
+    })
+  );
 
   return actions;
 }
@@ -513,7 +511,9 @@ async function confirmCancelTransfer(transfer) {
 function confirmDeleteTransfer(transfer) {
   const body = el('div', {}, [
     el('p', { text: `Tem certeza que deseja excluir a transferência "${transfer.reason}"?` }),
-    el('p', { class: 'card__hint', text: 'Esta ação não pode ser desfeita. Transferências confirmadas não podem ser excluídas (apenas canceladas).' }),
+    el('p', { class: 'card__hint', text: transfer.status === 'confirmed'
+      ? `Transferência confirmada: ao excluir, ${formatCents(Number(transfer.amountCents) || 0)} voltam para ${getAccountLabel(transfer.fromAccountId)} e saem de ${getAccountLabel(transfer.toAccountId)} (o saldo é calculado dos lançamentos, nada é regravado). Esta ação não pode ser desfeita.`
+      : 'Transferência não confirmada: o saldo de nenhuma conta é afetado. Esta ação não pode ser desfeita.' }),
   ]);
 
   const footer = [
@@ -525,7 +525,7 @@ function confirmDeleteTransfer(transfer) {
         closeModal();
         const result = await deleteTransfer(currentUser.uid, transfer.id);
         if (result.ok) {
-          toast('Transferência excluída.');
+          toast(result.reversed ? `Transferência excluída — ${formatCents(result.amountCents)} estornados entre as contas.` : 'Transferência excluída.');
           await loadData();
           renderPage($('.content') || document.getElementById('page-content'));
         } else {

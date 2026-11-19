@@ -310,6 +310,39 @@ try {
   });
   assert.equal(leaked, false, 'transferência sem saldo não pode ser gravada');
 
+  log('transferências: excluir confirmada (estorno derivado) e pendente pela UI');
+  await go('transferencias');
+  const createTransferUi = async (status, reason) => {
+    await page.getByRole('button', { name: 'Nova transferência' }).click();
+    await page.selectOption('#fromAccountId', accounts['Conta A']);
+    await page.selectOption('#toAccountId', alelo.id);
+    await page.fill('#amountCents', '10,00');
+    await page.fill('#reason', reason);
+    await page.selectOption('#status', status);
+    await page.locator('#transfer-form button[type="submit"]').click();
+    await waitText(new RegExp(reason));
+  };
+  const balanceOf = (id) => page.evaluate(async (accountId) => {
+    const { listAccounts } = await import('/js/services/accounts.js');
+    const { loadBalances } = await import('/js/services/balances.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const accs = await listAccounts(auth.currentUser.uid);
+    return (await loadBalances(auth.currentUser.uid, accs)).balances.get(accountId);
+  }, id);
+  const before = await balanceOf(alelo.id);
+  await createTransferUi('confirmed', 'Apagar confirmada UI');
+  assert.equal(await balanceOf(alelo.id), before + 1000);
+  await rows().filter({ hasText: 'Apagar confirmada UI' }).getByRole('button', { name: 'Excluir transferência' }).click();
+  await page.waitForFunction(() => /voltam para/.test(document.querySelector('.modal, [role="dialog"]')?.innerText ?? document.body.innerText));
+  await page.getByRole('button', { name: 'Excluir', exact: true }).click();
+  await page.waitForFunction(() => !/Apagar confirmada UI/.test(document.querySelector('#page-content').innerText));
+  assert.equal(await balanceOf(alelo.id), before, 'saldo volta ao valor anterior');
+  await createTransferUi('pending', 'Apagar pendente UI');
+  await rows().filter({ hasText: 'Apagar pendente UI' }).getByRole('button', { name: 'Excluir transferência' }).click();
+  await page.getByRole('button', { name: 'Excluir', exact: true }).click();
+  await page.waitForFunction(() => !/Apagar pendente UI/.test(document.querySelector('#page-content').innerText));
+  assert.equal(await balanceOf(alelo.id), before);
+
   assert.deepEqual(app.problems, [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E movimentos OK');
 } catch (error) {
