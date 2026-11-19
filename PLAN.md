@@ -9,7 +9,7 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Propósito: controle financeiro pessoal (contas, receitas, despesas, transferências, categorias) por usuário.
 - Stack: HTML/CSS/JS ES Modules puro, Firebase Auth + Firestore (SDK 10.12.2 via CDN/importmap), Vercel estático, npm só para dev.
 - Maturidade: etapa 2 entregue — todos os módulos (contas, receitas, despesas, transferências, categorias, assinaturas, devedores+parcelas/recebimentos, metas, cartões/faturas, orçamentos, dashboard, relatórios) têm service e UI; pendem importação/backup, publicação e verificações em produção (ver Itens não verificados).
-- Testes (executados em 2026-11-19, Node 22): `test:unit` 340 ok · `test:rules` 65 ok (emulador) · `npm run lint` OK · `npm run test:e2e` OK (Chromium, emuladores). Node 18, CI no GitHub, Rules em produção e Vercel: **não verificados**.
+- Testes (executados em 2026-11-19, Node 22): `test:unit` 340 ok · `test:rules` 65 ok (emulador) · `npm run lint` OK · `npm run test:e2e` OK (Chromium, emuladores). Node 18 (2026-11-19, v18.20.8): lint OK · `test:unit` 340 ok · `test:rules` 65 ok. CI no GitHub: runs #1/#2 falharam só no job Node 18 (corrigido; ver Histórico). Rules/índices em produção e Vercel: **não verificados** (deploy bloqueado, ver Itens não verificados).
 - Lint próprio (`scripts/lint.mjs`), CI (`.github/workflows/ci.yml`, não executado no GitHub), sem build.
 
 ## Gap Analysis
@@ -116,9 +116,9 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 
 ## Itens não verificados
 
-- Node 18 localmente (suíte executada só no Node 22; o CI cobre 18, mas **não foi executado**); execução do CI no GitHub Actions.
+- CI no GitHub Actions: confirmar o run do commit de correção (ver Histórico) em Node 18 e 22.
 - Vercel: deploy/preview, headers reais, CSP/SRI sem violação no console e a rota limpa `/categorias` (e demais rewrites).
-- Firestore de produção: publicação de `firestore.rules`/`firestore.indexes.json` (Rules publicadas podem divergir do repositório; índices compostos declarados nunca foram exigidos pelo emulador) e leituras reais por carga de página.
+- Firestore de produção (`vault-finance-d1603`; **bloqueado**: sessão sem `firebase login`/credenciais e sem `.firebaserc`; o deploy exige autenticação do usuário): publicação de `firestore.rules`/`firestore.indexes.json` (Rules publicadas podem divergir do repositório; índices compostos declarados nunca foram exigidos pelo emulador) e leituras reais por carga de página.
 - E2E: só Chromium, SDK local 10.14.1 em vez do 10.12.2 fixado, Lucide bloqueado (ícones não renderizados); fora do CI.
 - Acessibilidade e responsividade (CSS/HTML não auditados em detalhe).
 - `categorias.js`, `assinaturas.js` e `model.js` sem E2E pela UI (lidos/testados por unit e Rules).
@@ -137,3 +137,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-18 — VF-2-03d concluída (cartões, compras parceladas e faturas: modelo, service, testes); descoberta: exists() nas Rules não vê o mesmo lote.
 - 2026-11-19 — VF-2-03e/f/g concluídas (orçamentos, dashboard, relatórios); UIs de cartões, metas e parcelas/recebimentos entregues; VF-3-04, VF-4-02, VF-4-04, VF-4-05 concluídas; VF-3-02 e VF-4-03 parciais; decisão `exists()` mantida (README §7.4).
 - 2026-11-19 — VF-4-03 e VF-3-02 concluídas (paginação por cursor, saldo sob demanda, helpers compartilhados, E2E de bancos/receitas/despesas/transferências); Gap Analysis e Itens não verificados atualizados.
+- 2026-11-19 — Validação externa: CI (#1, #2) falhava só no job `Lint e testes unitários (Node 18)`: `node --test "glob"` entre aspas não expande no Node 18 (package.json:13) e `import.meta.dirname` só existe no Node ≥20.11 (tests/services/routes.test.mjs:8). Corrigido sem dependências; Node 18.20.8 local: lint OK, unit 340 ok, rules 65 ok. Deploy Firebase e preview Vercel **não executados** (sem credenciais/URL nesta sessão).
