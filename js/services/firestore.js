@@ -19,6 +19,7 @@ import {
   startAfter,
   getCountFromServer,
   serverTimestamp,
+  deleteField,
   Timestamp,
   writeBatch,
 } from 'firebase/firestore';
@@ -113,9 +114,14 @@ export async function create(uid, collectionName, data, docId = null) {
   return created.id;
 }
 
+/** Em ATUALIZAÇÕES, valor `null` remove o campo (ex.: assinatura que deixa de ser cobrada no cartão). */
+export function withFieldDeletes(patch) {
+  return Object.fromEntries(Object.entries(patch).map(([key, value]) => [key, value === null ? deleteField() : value]));
+}
+
 export async function update(uid, collectionName, docId, data) {
   await updateDoc(userDoc(uid, collectionName, docId), {
-    ...toFirestoreData(data),
+    ...withFieldDeletes(toFirestoreData(data)),
     updatedAt: serverTimestamp(),
   });
 }

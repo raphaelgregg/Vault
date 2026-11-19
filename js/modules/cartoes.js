@@ -22,7 +22,8 @@ import {
 } from '../components/form-kit.js';
 import {
   listCards, createCard, updateCard, deleteCard, blockCard, unblockCard, cancelCard,
-  registerCardPurchase, deleteCardPurchase, closeInvoice, payInvoice, cancelInvoice,
+  registerCardPurchase, registerInvoiceConsolidation, consolidationDeltaCents, parseMoneyToCents,
+  deleteCardPurchase, closeInvoice, payInvoice, cancelInvoice,
   listInvoices, listCardPurchases, getCardLimitUsage, getCardStatusOptions, getInvoiceStatusOptions, formatCents,
 } from '../services/creditCards.js';
 import { listAccounts } from '../services/accounts.js';
@@ -238,6 +239,36 @@ async function openInvoicesModal(card) {
     onDone: async () => { toast('Fatura paga.'); await refreshModal(); },
   });
 
+  // Consolidado (VF-2-03r): reflete a fatura do mês sem lançar compra a compra. Devedores e assinaturas seguem
+  // lançados à parte (rastreáveis); informe o total do extrato e o consolidado cobre só o que falta.
+  const openConsolidation = () => formModal({
+    title: `Lançar consolidado — ${card.name}`,
+    formId: 'consolidation-form',
+    submitLabel: 'Lançar consolidado',
+    focusId: 'referenceMonth',
+    fields: [
+      el('p', { class: 'card__hint', text: 'Uma única parcela (1x) na fatura do mês escolhido. Faturas fechadas, pagas ou canceladas não são alteradas. Compras de devedores devem continuar lançadas uma a uma; informe o total do extrato para lançar só a diferença.' }),
+      field('Fatura (mês) *', 'referenceMonth', el('input', { type: 'month', id: 'referenceMonth', name: 'referenceMonth', value: new Date().toISOString().slice(0, 7) })),
+      field('Total da fatura no extrato (R$)', 'statementCents', el('input', { type: 'text', id: 'statementCents', name: 'statementCents', placeholder: '0,00 (opcional)', autocomplete: 'off' })),
+      field('Valor a lançar (R$) *', 'amountCents', el('input', { type: 'text', id: 'amountCents', name: 'amountCents', placeholder: '0,00 (ignorado se o total do extrato for informado)', autocomplete: 'off' })),
+      field('Descrição', 'description', el('input', { type: 'text', id: 'description', name: 'description', maxlength: 120, placeholder: 'Consolidado da fatura', autocomplete: 'off' })),
+    ],
+    submit: async (d) => {
+      const month = d.get('referenceMonth');
+      let amount = d.get('amountCents');
+      const statement = String(d.get('statementCents') ?? '').trim();
+      if (statement) {
+        const inv = invoices.find((i) => i.referenceMonth === month);
+        const current = inv ? totalOf(inv) : 0;
+        const delta = consolidationDeltaCents(current, parseMoneyToCents(statement));
+        if (delta === null) return { ok: false, errors: { statementCents: `O extrato precisa exceder o já lançado (${formatCents(current)}).` } };
+        amount = (delta / 100).toFixed(2).replace('.', ',');
+      }
+      return registerInvoiceConsolidation(user.uid, card.id, { referenceMonth: month, amountCents: amount, description: String(d.get('description') ?? '').trim() });
+    },
+    onDone: async () => { toast('Consolidado lançado na fatura.'); await refreshModal(); },
+  });
+
   const invoiceTable = invoices.length
     ? dataTable({
       columns: [
@@ -271,6 +302,7 @@ async function openInvoicesModal(card) {
         { key: 'installmentNumber', label: 'Parcela', numeric: true, render: (v, p) => `${v}/${p.installmentsTotal}` },
         { key: 'invoiceId', label: 'Fatura', render: (v) => formatMonth(invoiceById.get(v)?.referenceMonth) },
         { key: 'amountCents', label: 'Valor', numeric: true, render: (v) => formatCents(v) },
+        { key: 'notes', label: 'Origem', render: (v, p) => (p.debtorId ? 'Devedor' : v === 'Assinatura' ? 'Assinatura' : v === 'Lançamento consolidado da fatura' ? 'Consolidado' : 'Compra') },
       ],
       rows: sorted,
       actions: (p) => [iconButton(`Excluir parcela ${p.installmentNumber}/${p.installmentsTotal} de ${p.description}`, 'trash-2', async () => {
@@ -282,7 +314,7 @@ async function openInvoicesModal(card) {
 
   openModal({
     title: `Faturas e compras — ${card.name}`,
-    body: el('div', {}, [el('h3', { text: 'Faturas' }), invoiceTable, el('h3', { text: 'Compras (parcelas)' }), purchaseTable]),
+    body: el('div', {}, [el('h3', { text: 'Faturas' }), card.status === 'active' ? el('button', { type: 'button', class: 'btn btn--secondary', onClick: openConsolidation, text: 'Lançar consolidado' }) : null, invoiceTable, el('h3', { text: 'Compras (parcelas)' }), purchaseTable]),
     footer: [el('button', { type: 'button', class: 'btn btn--secondary', onClick: closeModal, text: 'Fechar' })],
   });
   refreshIcons();

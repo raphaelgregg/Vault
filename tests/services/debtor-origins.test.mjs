@@ -12,6 +12,10 @@ import { allocateLinkedGoalBalances, isAccountLinkedGoal } from '../../js/core/m
 import { registerGoalTransaction } from '../../js/services/goals.js';
 import { monthForecast } from '../../js/core/aggregates.js';
 import { cardInvoicesSummary } from '../../js/core/model.js';
+import { registerSubscriptionCharge, createSubscription } from '../../js/services/subscriptions.js';
+import { registerInvoiceConsolidation, deleteCard } from '../../js/services/creditCards.js';
+import { consolidationDeltaCents } from '../../js/core/model.js';
+import { upcomingDue } from '../../js/core/aggregates.js';
 import { loadDashboard, DASHBOARD_SOURCES } from '../../js/services/dashboard.js';
 
 const uid = 'u1';
@@ -494,3 +498,97 @@ describe('dashboard enriquecido (VF-2-03q)', () => {
   });
 });
 async function silentRun(fn) { const orig = console.error; console.error = () => {}; try { return await fn(); } finally { console.error = orig; } }
+
+describe('assinaturas × cartão × fatura (VF-2-03r)', () => {
+  const cardX = { id: 'c1', name: 'Nubank', brand: 'M', limitCents: 500000, closingDay: 10, dueDay: 17, status: 'active' };
+  const subCard = (o = {}) => ({ id: 's1', name: 'Netflix', amountCents: 5590, periodicity: 'monthly', nextChargeDate: '2026-11-05', accountId: 'a1', categoryId: 'cat', cardId: 'c1', status: 'active', ...o });
+  const mk = ({ sub = subCard(), invoices = [], purchases = [] } = {}) => {
+    const atomic = [];
+    const updates = [];
+    return {
+      atomic, updates,
+      io: {
+        getById: async (u, c, id) => ({ subscriptions: [sub], creditCards: [cardX], categories: [{ id: 'cat', kind: 'expense' }] }[c] ?? []).find((x) => x.id === id) ?? null,
+        list: async (u, c) => (c === 'invoices' ? invoices : purchases),
+        commitAtomic: async (u, ops) => { atomic.push(ops); return ops.map((o, i) => o.docId ?? `n${i}`); },
+        update: async (u, c, id, data) => updates.push({ c, id, data }),
+        writeAudit: async () => ({ ok: true }),
+        now: () => new Date('2026-11-05T12:00:00Z'),
+      },
+    };
+  };
+
+  it('cobrança de assinatura no cartão: 1 parcela na fatura + avanço da data no MESMO lote; sem despesa nem escrita separada', async () => {
+    const { io, atomic, updates } = mk();
+    const r = await registerSubscriptionCharge(uid, 's1', io);
+    assert.deepEqual([r.ok, r.via, r.nextChargeDate], [true, 'card', '2026-12-05']);
+    const ops = atomic.at(-1);
+    const buy = ops.filter((o) => o.collection === 'cardPurchases');
+    assert.equal(buy.length, 1);
+    assert.deepEqual([buy[0].data.amountCents, buy[0].data.installmentsTotal, buy[0].data.description, buy[0].data.categoryId], [5590, 1, 'Netflix', 'cat']);
+    assert.deepEqual(ops.at(-1), { type: 'update', collection: 'subscriptions', docId: 's1', data: { nextChargeDate: '2026-12-05' }, action: 'charge' });
+    assert.equal(ops.some((o) => o.collection === 'expenses'), false); // sem despesa em conta
+    assert.equal(updates.length, 0); // a data NÃO é gravada fora do lote
+  });
+  it('fatura do mês paga/fechada não é alterada: a cobrança vai para a próxima fatura aberta', async () => {
+    const paid = { id: 'c1_2026-11', cardId: 'c1', referenceMonth: '2026-11', status: 'paid', totalCents: 9000 };
+    const { io, atomic } = mk({ invoices: [paid] });
+    const r = await registerSubscriptionCharge(uid, 's1', io);
+    assert.equal(r.ok, true);
+    const ops = atomic.flat();
+    assert.equal(ops.some((o) => o.docId === 'c1_2026-11'), false); // fatura liquidada intocada
+    assert.equal(ops.find((o) => o.collection === 'cardPurchases').data.invoiceId, 'c1_2026-12');
+  });
+  it('cartão bloqueado/inexistente ou assinatura pausada: nada é gravado', async () => {
+    const blocked = mk();
+    blocked.io.getById = async (u, c, id) => (c === 'creditCards' ? { ...cardX, status: 'blocked' } : (c === 'subscriptions' ? subCard() : { id, kind: 'expense' }));
+    assert.equal((await registerSubscriptionCharge(uid, 's1', blocked.io)).ok, false);
+    assert.equal(blocked.atomic.length, 0);
+    const paused = mk({ sub: subCard({ status: 'paused' }) });
+    assert.equal((await registerSubscriptionCharge(uid, 's1', paused.io)).ok, false);
+    assert.equal(paused.atomic.length, 0);
+  });
+  it('cadastro valida o cartão; assinatura no cartão não aparece em "próximos vencimentos" (já está na fatura)', async () => {
+    const raw = { name: 'Spotify', amountCents: '21,90', periodicity: 'monthly', nextChargeDate: '2026-12-01', accountId: 'a1', categoryId: 'cat', cardId: 'zz', status: 'active' };
+    const bad = await createSubscription(uid, raw, { lookupCategory: async () => ({ id: 'cat', kind: 'expense' }), lookupCard: async () => null, create: async () => 'x', writeAudit: async () => ({ ok: true }) });
+    assert.equal(bad.ok, false);
+    assert.ok(bad.errors.cardId);
+    const good = await createSubscription(uid, { ...raw, cardId: 'c1' }, { lookupCategory: async () => ({ id: 'cat', kind: 'expense' }), lookupCard: async () => cardX, create: async () => 'x', writeAudit: async () => ({ ok: true }) });
+    assert.equal(good.ok, true);
+    const up = upcomingDue({ today: '2026-11-19', subscriptions: [
+      { id: 'a', name: 'Direta', status: 'active', nextChargeDate: '2026-11-20', amountCents: 1000 },
+      { id: 'b', name: 'No cartão', status: 'active', nextChargeDate: '2026-11-21', amountCents: 2000, cardId: 'c1' },
+    ] });
+    assert.deepEqual(up.map((i) => i.label), ['Direta']);
+  });
+  it('consolidado de fatura: 1x na fatura do mês (dia de fechamento), só em fatura aberta/inexistente; liquidadas intactas', async () => {
+    const { io, atomic } = mk();
+    const ok = await registerInvoiceConsolidation(uid, 'c1', { referenceMonth: '2026-12', amountCents: '1.234,56' }, io);
+    assert.equal(ok.ok, true);
+    const buy = atomic.at(-1).find((o) => o.collection === 'cardPurchases').data;
+    assert.deepEqual([buy.amountCents, buy.installmentsTotal, buy.invoiceId, buy.notes], [123456, 1, 'c1_2026-12', 'Lançamento consolidado da fatura']);
+    assert.match(buy.description, /Consolidado da fatura 12\/2026/);
+    for (const status of ['paid', 'closed', 'cancelled']) {
+      const m = mk({ invoices: [{ id: 'c1_2026-12', cardId: 'c1', referenceMonth: '2026-12', status }] });
+      const r = await registerInvoiceConsolidation(uid, 'c1', { referenceMonth: '2026-12', amountCents: '10,00' }, m.io);
+      assert.equal(r.ok, false, status);
+      assert.ok(r.errors.referenceMonth);
+      assert.equal(m.atomic.length, 0);
+    }
+    const open = mk({ invoices: [{ id: 'c1_2026-12', cardId: 'c1', referenceMonth: '2026-12', status: 'open' }] });
+    assert.equal((await registerInvoiceConsolidation(uid, 'c1', { referenceMonth: '2026-12', amountCents: '10,00', description: 'Mercado' }, open.io)).ok, true);
+    assert.equal((await registerInvoiceConsolidation(uid, 'c1', { referenceMonth: '2026-13', amountCents: '10,00' }, mk().io)).ok, false);
+    assert.equal((await registerInvoiceConsolidation(uid, 'zz', { referenceMonth: '2026-12', amountCents: '10,00' }, { ...mk().io, getById: async () => null })).ok, false);
+  });
+  it('delta do consolidado = extrato − já lançado (devedores, assinaturas, avulsos), em centavos inteiros', () => {
+    assert.equal(consolidationDeltaCents(30000, 100000), 70000);
+    assert.equal(consolidationDeltaCents(100000, 100000), null);
+    assert.equal(consolidationDeltaCents(120000, 100000), null);
+    assert.equal(consolidationDeltaCents(1.5, 100), null);
+  });
+  it('excluir cartão com assinaturas vinculadas é bloqueado', async () => {
+    const r = await deleteCard(uid, 'c1', { getById: async () => cardX, count: async (u, c) => (c === 'subscriptions' ? 1 : 0) });
+    assert.equal(r.ok, false);
+    assert.match(r.errors._form, /1 assinaturas/);
+  });
+});

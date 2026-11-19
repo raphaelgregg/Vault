@@ -83,7 +83,9 @@ export function upcomingDue({ expenses = [], subscriptions = [], invoices = [], 
       items.push({ kind: 'expense', id: e.id, label: e.description, date: e.dueDate, amountCents: cents(e.amountCents) });
     }
   }
+  // Assinatura cobrada no cartão já está dentro da fatura (VF-2-03r): listá-la também duplicaria o vencimento.
   for (const s of subscriptions) {
+    if (s?.cardId) continue;
     if (s?.status === 'active' && s.nextChargeDate >= today) {
       items.push({ kind: 'subscription', id: s.id, label: s.name, date: s.nextChargeDate, amountCents: cents(s.amountCents) });
     }

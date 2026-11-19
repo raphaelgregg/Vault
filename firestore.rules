@@ -239,7 +239,7 @@ service cloud.firestore {
       allow read: if isOwner(userId);
       allow create, update: if isOwner(userId)
         && keysOk(['name', 'amountCents', 'periodicity', 'nextChargeDate', 'accountId',
-                   'categoryId', 'status', 'notes', 'createdAt', 'updatedAt'])
+                   'cardId', 'categoryId', 'status', 'notes', 'createdAt', 'updatedAt'])
         && requiredOk(['name', 'amountCents', 'periodicity', 'nextChargeDate',
                        'accountId', 'categoryId', 'status', 'createdAt', 'updatedAt'])
         && text('name', 80)
@@ -247,6 +247,7 @@ service cloud.firestore {
         && oneOf('periodicity', ['monthly', 'weekly', 'yearly'])
         && stamp(data().nextChargeDate)
         && ref(userId, 'accounts', 'accountId')
+        && optionalRef(userId, 'creditCards', 'cardId')
         && ref(userId, 'categories', 'categoryId')
         && oneOf('status', ['active', 'paused', 'cancelled'])
         && optionalString('notes', 500)

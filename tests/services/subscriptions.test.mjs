@@ -55,7 +55,7 @@ describe('subscriptions — schema (espelha firestore.rules)', () => {
   it('chaves e enums iguais às Rules', () => {
     assert.deepEqual(
       Object.keys(SCHEMAS.subscriptions.fields).sort(),
-      ['accountId', 'amountCents', 'categoryId', 'name', 'nextChargeDate', 'notes', 'periodicity', 'status']
+      ['accountId', 'amountCents', 'cardId', 'categoryId', 'name', 'nextChargeDate', 'notes', 'periodicity', 'status']
     );
     assert.deepEqual(getPeriodicityOptions().map((o) => o.value), ['monthly', 'weekly', 'yearly']);
     assert.deepEqual(getSubscriptionStatusOptions().map((o) => o.value), ['active', 'paused', 'cancelled']);

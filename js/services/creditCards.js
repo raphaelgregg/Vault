@@ -29,9 +29,11 @@ import {
   cardLimitUsage,
   centsToMoneyString,
   invoiceDatesFor,
+  clampDayInMonth,
   invoiceMonthForPurchase,
   invoiceTotalCents,
   splitInstallments,
+  consolidationDeltaCents,
   parseMoneyToCents,
   formatCents,
   isValidIsoDate,
@@ -108,6 +110,7 @@ export async function deleteCard(uid, cardId, io = {}) {
     counts = await Promise.all([
       countFn(uid, PURCHASES, byCard(cardId)).then((n) => ({ n, label: 'compras' })),
       countFn(uid, INVOICES, byCard(cardId)).then((n) => ({ n, label: 'faturas' })),
+      countFn(uid, COLLECTIONS.subscriptions, byCard(cardId)).then((n) => ({ n, label: 'assinaturas' })),
     ]);
   } catch (error) {
     console.error('[creditCards] falha ao verificar vínculos', error);
@@ -222,6 +225,8 @@ export async function registerCardPurchase(uid, cardId, rawData, io = {}) {
   // (todas atômicas entre si). Falha no 2º deixa faturas abertas vazias, reaproveitadas depois.
   const commit = io.commitAtomic ?? commitAtomic;
   if (invoiceOps.length) await commit(uid, invoiceOps, io);
+  // `io.extraOps` (ex.: avançar a próxima cobrança da assinatura) entra no MESMO lote das parcelas.
+  if (io.extraOps?.length) purchaseOps.push(...io.extraOps);
   // O devedor é atualizado no MESMO lote das parcelas (atômico): lentCents += total da compra.
   if (debtor) {
     purchaseOps.push({
@@ -269,6 +274,32 @@ export async function closeInvoice(uid, invoiceId, io = {}) {
   const totalCents = invoiceTotalCents(purchases);
   await updateAudited(uid, INVOICES, invoiceId, { status: 'closed', totalCents }, io, 'close');
   return { ok: true, totalCents };
+}
+
+/**
+ * Lançamento CONSOLIDADO de fatura (VF-2-03r): uma única parcela (1x) que representa gastos do mês sem cadastrar
+ * compra a compra. `rawData`: { referenceMonth "YYYY-MM", amountCents (string pt-BR), description? }.
+ * Cai na fatura de `referenceMonth` (data = dia de fechamento daquele mês). A fatura precisa estar ABERTA ou ainda
+ * não existir: fechada/paga/cancelada NÃO é alterada (o valor liquidado fica intacto). Respeita o limite do cartão.
+ * Compras de devedores e assinaturas continuam lançadas à parte (rastreáveis); o consolidado cobre só o restante
+ * (ver `consolidationDeltaCents`). Retorna o mesmo formato de `registerCardPurchase`.
+ */
+export async function registerInvoiceConsolidation(uid, cardId, rawData = {}, io = {}) {
+  const fetch = io.getById ?? getById;
+  const card = await fetch(uid, CARDS, cardId);
+  if (!card) return { ok: false, errors: { _form: 'Cartão não encontrado.' } };
+  const month = String(rawData.referenceMonth ?? '');
+  const purchaseDate = clampDayInMonth(month, Number(card.closingDay));
+  if (!purchaseDate) return { ok: false, errors: { referenceMonth: 'Mês inválido (use AAAA-MM).' } };
+  const invoices = await (io.list ?? list)(uid, INVOICES, byCard(cardId));
+  const existing = invoices.find((i) => i.referenceMonth === month);
+  if (existing && existing.status !== 'open') {
+    return { ok: false, errors: { referenceMonth: `A fatura de ${month.slice(5)}/${month.slice(0, 4)} já está ${existing.status === 'paid' ? 'paga' : existing.status === 'closed' ? 'fechada' : 'cancelada'} e não é alterada.` } };
+  }
+  const description = String(rawData.description ?? '').trim() || `Consolidado da fatura ${month.slice(5)}/${month.slice(0, 4)}`;
+  return registerCardPurchase(uid, cardId, {
+    description, amountCents: rawData.amountCents, purchaseDate, installmentsTotal: 1, notes: 'Lançamento consolidado da fatura',
+  }, io);
 }
 
 /**
@@ -325,4 +356,4 @@ export async function cancelInvoice(uid, invoiceId, io = {}) {
 export const getCardStatusOptions = () => CARD_STATUSES.map((s) => ({ value: s.value, label: s.label }));
 export const getInvoiceStatusOptions = () => INVOICE_STATUSES.map((s) => ({ value: s.value, label: s.label }));
 
-export { cardLimitUsage, invoiceTotalCents, formatCents, parseMoneyToCents };
+export { consolidationDeltaCents, cardLimitUsage, invoiceTotalCents, formatCents, parseMoneyToCents };

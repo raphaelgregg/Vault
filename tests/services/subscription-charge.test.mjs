@@ -54,7 +54,7 @@ describe('registerSubscriptionCharge', () => {
   it('avança a data, grava só nextChargeDate e audita `charge`', async () => {
     const { io, calls } = makeIo(sub());
     const r = await registerSubscriptionCharge(uid, 's1', io);
-    assert.deepEqual(r, { ok: true, nextChargeDate: '2026-12-18' });
+    assert.deepEqual(r, { ok: true, nextChargeDate: '2026-12-18', via: 'account', generatedExpense: false }); // sem despesa/saldo
     assert.deepEqual(calls.update, [{ c: 'subscriptions', id: 's1', data: { nextChargeDate: '2026-12-18' } }]);
     assert.equal(calls.audit[0].action, 'charge');
     assert.deepEqual(calls.audit[0].after, { nextChargeDate: '2026-12-18' });

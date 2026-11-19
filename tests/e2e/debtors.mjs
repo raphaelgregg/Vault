@@ -169,6 +169,51 @@ try {
   assert.equal(await page.getByRole('button', { name: 'Cancelar fatura 01/2031' }).count(), 0);
   await page.keyboard.press('Escape');
 
+  log('VF-2-03r: assinatura no cartão vira parcela na fatura; consolidado em fatura aberta; fatura paga intacta');
+  await page.evaluate(async () => {
+    const { createCategory } = await import('/js/services/categories.js');
+    const { auth } = await import('/js/firebase/client.js');
+    await createCategory(auth.currentUser.uid, { name: 'Streaming', kind: 'expense', color: '#1f8a5b' });
+  });
+  await page.goto(`${app.base}/pages/assinaturas.html`);
+  await page.waitForSelector('#page-content .panel');
+  await page.getByRole('button', { name: /Nova assinatura/ }).click();
+  await page.fill('#name', 'Netflix');
+  await page.fill('#amountCents', '55,90');
+  await page.selectOption('#accountId', { label: 'Banco E2E — Corrente' });
+  await page.selectOption('#categoryId', { index: 1 });
+  await page.selectOption('#cardId', { label: 'Cartão E2E' });
+  await page.locator('#subscription-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Netflix/.test(document.querySelector('#page-content tbody')?.innerText ?? ''));
+  assert.match(await page.locator('#page-content tbody tr', { hasText: 'Netflix' }).innerText(), /Cartão Cartão E2E \(fatura\)/);
+  await page.getByRole('button', { name: 'Registrar cobrança de Netflix' }).click();
+  await page.waitForFunction(() => /Cobrança lançada na fatura do cartão/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.goto(`${app.base}/pages/cartoes.html`);
+  await page.waitForSelector('#page-content .panel');
+  await page.getByRole('button', { name: 'Faturas e compras de Cartão E2E' }).click();
+  await page.waitForSelector('.modal');
+  assert.match(await page.locator('.modal').innerText(), /Netflix[^\n]*R\$\s?55,90[^\n]*Assinatura/);
+  await page.getByRole('button', { name: 'Lançar consolidado' }).click();
+  const paidMonth = await page.evaluate(async () => {
+    const { listCards, listInvoices } = await import('/js/services/creditCards.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const [c] = await listCards(auth.currentUser.uid);
+    return (await listInvoices(auth.currentUser.uid, c.id)).find((i) => i.status === 'paid')?.referenceMonth;
+  });
+  assert.ok(paidMonth, 'há uma fatura paga');
+  await page.fill('#referenceMonth', paidMonth); // fatura já PAGA acima: não pode ser alterada
+  await page.fill('#amountCents', '10,00');
+  await page.locator('#consolidation-form button[type="submit"]').click();
+  await page.waitForSelector('.form__error:not(:empty)');
+  assert.match(await page.locator('.modal').innerText(), /já está paga e não é alterada/);
+  await page.fill('#referenceMonth', '2031-06');
+  await page.fill('#amountCents', '123,45');
+  await page.locator('#consolidation-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Consolidado lançado/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForSelector('.modal');
+  assert.match(await page.locator('.modal').innerText(), /Consolidado da fatura 06\/2031[^\n]*R\$\s?123,45[^\n]*Consolidado/);
+  await page.keyboard.press('Escape');
+
   log('VF-2-03q: dashboard — blocos de saldo livre/vinculado, previsto, faturas do mês e devedores');
   await page.goto(`${app.base}/pages/dashboard.html`);
   await page.waitForSelector('#dashboard-month');

@@ -10,6 +10,7 @@ import {
   updateAudited,
   removeAudited,
 } from './firestore.js';
+import { registerCardPurchase } from './creditCards.js';
 import {
   buildEntity,
   checkCategoryForMovement,
@@ -17,6 +18,7 @@ import {
   SUBSCRIPTION_PERIODICITIES,
   SUBSCRIPTION_STATUSES,
   advanceChargeDate,
+  centsToMoneyString,
   summarizeSubscriptions,
   formatCents,
   parseMoneyToCents,
@@ -56,6 +58,12 @@ export async function getSubscription(uid, subscriptionId) {
 async function validate(uid, rawData, deps) {
   const { ok, data, errors } = buildEntity('subscriptions', rawData);
   if (!ok) return { ok: false, errors };
+  if (data.cardId) {
+    // Cobrada no cartão: o cartão precisa existir e não estar cancelado (VF-2-03r).
+    const card = await (deps.lookupCard ?? ((u, id) => getById(u, COLLECTIONS.creditCards, id)))(uid, data.cardId);
+    if (!card) return { ok: false, errors: { cardId: 'Cartão não encontrado.' } };
+    if (card.status === 'cancelled') return { ok: false, errors: { cardId: 'O cartão está cancelado.' } };
+  }
   const category = await (deps.lookupCategory ?? fetchCategory)(uid, data.categoryId);
   const categoryCheck = checkCategoryForMovement(category, ALLOWED_CATEGORY_KINDS);
   if (!categoryCheck.ok) return categoryCheck;
@@ -74,7 +82,8 @@ export async function createSubscription(uid, rawData, deps = {}) {
 export async function updateSubscription(uid, subscriptionId, rawData, deps = {}) {
   const checked = await validate(uid, rawData, deps);
   if (!checked.ok) return checked;
-  await updateAudited(uid, COLLECTION, subscriptionId, checked.data, deps);
+  // Sem cartão = cobrança direta na conta: remove `cardId` se existia (null → deleteField em `update`).
+  await updateAudited(uid, COLLECTION, subscriptionId, { ...checked.data, cardId: checked.data.cardId ?? null }, deps);
   return { ok: true };
 }
 
@@ -105,8 +114,13 @@ export const resumeSubscription = (uid, id, io) => setSubscriptionStatus(uid, id
 export const cancelSubscription = (uid, id, io) => setSubscriptionStatus(uid, id, 'cancelled', io);
 
 /**
- * Registra a cobrança de uma assinatura ATIVA avançando `nextChargeDate` um período
- * (auditoria `charge`). Não gera despesa (fora do escopo). Retorna { ok, nextChargeDate, errors }.
+ * Registra a cobrança de uma assinatura ATIVA e avança `nextChargeDate` um período (auditoria `charge`).
+ *  - Com `cardId` (VF-2-03r): lança UMA parcela (1x) na fatura do cartão — a fatura aberta do período; fatura
+ *    fechada/paga NUNCA é alterada (a compra vai para a próxima aberta) — e avança a data no MESMO lote
+ *    atômico. Não gera despesa em conta: o débito na conta acontece uma vez, ao pagar a fatura.
+ *  - Sem `cardId`: só avança a data; NÃO gera despesa nem altera saldo (`generatedExpense: false`). Se o
+ *    gasto também for lançado em Despesas, é lá que ele conta — a assinatura não duplica.
+ * Retorna { ok, nextChargeDate, via: 'card'|'account', invoiceIds?, errors }.
  * Leitura+escrita não atômica: duas cobranças simultâneas avançariam uma só vez.
  */
 export async function registerSubscriptionCharge(uid, subscriptionId, io = {}) {
@@ -119,8 +133,19 @@ export async function registerSubscriptionCharge(uid, subscriptionId, io = {}) {
   if (!nextChargeDate) {
     return { ok: false, errors: { _form: 'Data ou periodicidade da assinatura inválida.' } };
   }
+  if (current.cardId) {
+    const r = await registerCardPurchase(uid, current.cardId, {
+      description: current.name, amountCents: centsToMoneyString(current.amountCents), purchaseDate: current.nextChargeDate,
+      installmentsTotal: 1, categoryId: current.categoryId, notes: 'Assinatura',
+    }, {
+      ...io,
+      extraOps: [{ type: 'update', collection: COLLECTION, docId: subscriptionId, data: { nextChargeDate }, action: 'charge' }],
+    });
+    if (!r.ok) return r;
+    return { ok: true, nextChargeDate, via: 'card', invoiceIds: r.invoiceMonths };
+  }
   await updateAudited(uid, COLLECTION, subscriptionId, { nextChargeDate }, io, 'charge');
-  return { ok: true, nextChargeDate };
+  return { ok: true, nextChargeDate, via: 'account', generatedExpense: false };
 }
 
 export function getPeriodicityOptions() {

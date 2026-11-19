@@ -12,6 +12,7 @@ import {
   pauseSubscription,
   resumeSubscription,
   cancelSubscription,
+  registerSubscriptionCharge,
   getPeriodicityOptions,
   getSubscriptionStatusOptions,
   summarizeSubscriptions,
@@ -20,6 +21,7 @@ import {
 } from '../services/subscriptions.js';
 import { listCategories, getCategoryKindOptions } from '../services/categories.js';
 import { listAccounts } from '../services/accounts.js';
+import { listCards } from '../services/creditCards.js';
 
 export const meta = { title: 'Assinaturas', icon: 'repeat' };
 
@@ -28,6 +30,7 @@ let container = null;
 let subscriptionsCache = [];
 let categoriesCache = [];
 let accountsCache = [];
+let cardsCache = [];
 
 export async function render(target, { user }) {
   currentUser = user;
@@ -36,10 +39,11 @@ export async function render(target, { user }) {
 }
 
 async function reload() {
-  [subscriptionsCache, categoriesCache, accountsCache] = await Promise.all([
+  [subscriptionsCache, categoriesCache, accountsCache, cardsCache] = await Promise.all([
     listSubscriptions(currentUser.uid),
     listCategories(currentUser.uid),
     listAccounts(currentUser.uid),
+    listCards(currentUser.uid).catch((error) => { console.error('[assinaturas] falha ao listar cartões', error); return []; }),
   ]);
   renderPage();
 }
@@ -108,7 +112,7 @@ function createTableOrEmpty() {
     { key: 'amountCents', label: 'Valor', numeric: true, render: (v) => formatCents(Number(v) || 0) },
     { key: 'periodicity', label: 'Periodicidade', render: (v) => optionLabel(getPeriodicityOptions(), v) },
     { key: 'nextChargeDate', label: 'Próxima cobrança', render: formatDate },
-    { key: 'accountId', label: 'Conta', render: accountLabel },
+    { key: 'accountId', label: 'Cobrança', render: (v, item) => (item.cardId ? `Cartão ${cardName(item.cardId)} (fatura)` : `Conta ${accountLabel(v)}`) },
     { key: 'status', label: 'Status', render: (v) => optionLabel(getSubscriptionStatusOptions(), v) },
   ];
 
@@ -124,7 +128,7 @@ function createTableOrEmpty() {
         el('tr', {}, [
           ...columns.map((c) => el('td', {
             class: c.numeric ? 'num' : '',
-            text: c.render ? c.render(item[c.key]) : (item[c.key] ?? '—'),
+            text: c.render ? c.render(item[c.key], item) : (item[c.key] ?? '—'),
           })),
           el('td', { class: 'actions' }, createActions(item)),
         ])
@@ -143,8 +147,25 @@ function iconButton(label, icon, onClick, extraClass = '') {
   });
 }
 
+const cardName = (id) => cardsCache.find((c) => c.id === id)?.name ?? '—';
+
+async function chargeNow(item) {
+  const r = await registerSubscriptionCharge(currentUser.uid, item.id);
+  if (r.ok) {
+    toast(r.via === 'card'
+      ? `Cobrança lançada na fatura do cartão ${cardName(item.cardId)}; próxima em ${formatDate(r.nextChargeDate)}.`
+      : `Cobrança registrada; próxima em ${formatDate(r.nextChargeDate)}. (Cobrança direta: não gera despesa nem altera o saldo — lance em Despesas se quiser refletir.)`, 6000);
+    await reload();
+  } else {
+    toast(r.errors?._form ?? Object.values(r.errors ?? {})[0] ?? 'Não foi possível registrar a cobrança.', 6000);
+  }
+}
+
 function createActions(item) {
   const actions = [];
+  if (item.status === 'active') {
+    actions.push(iconButton(`Registrar cobrança de ${item.name}`, 'receipt', () => chargeNow(item), 'btn--success'));
+  }
   if (item.status === 'active') {
     actions.push(iconButton(`Pausar ${item.name}`, 'pause-circle', () => changeStatus(item, pauseSubscription, 'Assinatura pausada.')));
   }
@@ -248,6 +269,11 @@ function openSubscriptionModal(item = null) {
         value: item?.nextChargeDate ?? today,
       })),
     ]),
+    field('Cobrada no cartão (opcional)', 'cardId', el('select', { id: 'cardId', name: 'cardId' }, [
+      el('option', { value: '' }, 'Não — débito direto na conta'),
+      ...cardsCache.filter((c) => c.status !== 'cancelled' || c.id === item?.cardId).map((c) => el('option', { value: c.id, selected: item?.cardId === c.id }, c.name)),
+    ])),
+    el('p', { class: 'card__hint', text: 'No cartão, cada cobrança vira uma parcela na fatura (a conta só é debitada ao pagar a fatura) e não entra em "próximos vencimentos" para não duplicar a fatura.' }),
     el('div', { class: 'form__row' }, [
       field('Conta *', 'accountId', el('select', { id: 'accountId', name: 'accountId', required: true }, [
         el('option', { value: '', disabled: true, selected: !item }, 'Selecione uma conta'),
@@ -297,6 +323,7 @@ function openSubscriptionModal(item = null) {
       periodicity: data.get('periodicity'),
       nextChargeDate: data.get('nextChargeDate'),
       accountId: data.get('accountId'),
+      cardId: data.get('cardId') || undefined,
       categoryId: data.get('categoryId'),
       status: data.get('status'),
       notes: data.get('notes').trim() || undefined,

@@ -33,7 +33,7 @@ import {
   addDoc,
   writeBatch,
 } from 'firebase/firestore';
-import { serverTimestamp } from 'firebase/firestore';
+import { serverTimestamp, deleteField } from 'firebase/firestore';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rules = readFileSync(join(here, '..', '..', 'firestore.rules'), 'utf8');
@@ -487,6 +487,24 @@ describe('Assinaturas (VF-2-03a)', () => {
     await assertSucceeds(setDoc(subDoc(db), sub({ notes: 'plano padrão' })));
     await assertSucceeds(updateDoc(subDoc(db), { status: 'paused', updatedAt: serverTimestamp() }));
     await assertSucceeds(deleteDoc(subDoc(db)));
+  });
+
+  it('assinatura no cartão (VF-2-03r): cardId opcional existente; nega cartão inexistente; remove o vínculo; cobrança = parcela + avanço da data no MESMO lote', async () => {
+    const db = asUser(ALICE);
+    const stamps = () => ({ createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    await assertSucceeds(setDoc(doc(db, 'users', ALICE, 'creditCards', 'cx'), { name: 'Nubank', brand: 'M', limitCents: 500000, closingDay: 10, dueDay: 17, status: 'active', ...stamps() }));
+    await assertFails(setDoc(subDoc(db), sub({ cardId: 'zzz' })));
+    await assertFails(setDoc(subDoc(db), sub({ cardId: 5 })));
+    await assertSucceeds(setDoc(subDoc(db), sub({ cardId: 'cx' })));
+    await assertSucceeds(setDoc(doc(db, 'users', ALICE, 'invoices', 'cx_2026-12'), { cardId: 'cx', referenceMonth: '2026-12', closingDate: new Date('2026-12-10T12:00:00.000Z'), dueDate: new Date('2026-12-17T12:00:00.000Z'), status: 'open', ...stamps() }));
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'users', ALICE, 'cardPurchases', 'p1'), {
+      cardId: 'cx', description: 'Netflix', amountCents: 3990, purchaseDate: new Date('2026-12-05T12:00:00.000Z'), installmentsTotal: 1, installmentNumber: 1,
+      categoryId: 'cat-casa', invoiceId: 'cx_2026-12', notes: 'Assinatura', ...stamps(),
+    });
+    batch.update(subDoc(db), { nextChargeDate: new Date('2027-01-05T12:00:00.000Z'), updatedAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+    await assertSucceeds(updateDoc(subDoc(db), { cardId: deleteField(), updatedAt: serverTimestamp() })); // volta à cobrança direta na conta
   });
 
   it('permite avançar nextChargeDate (patch de registerSubscriptionCharge) e nega data string', async () => {

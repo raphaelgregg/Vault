@@ -170,6 +170,8 @@ export const SCHEMAS = Object.freeze({
       periodicity: { kind: 'enum', required: true, values: SUBSCRIPTION_PERIODICITIES.map((p) => p.value) },
       nextChargeDate: date(),
       accountId: refField(),
+      // Cobrada no cartão (VF-2-03r): a cobrança vira parcela única na FATURA (não é débito direto na conta).
+      cardId: refField(false),
       // Assinaturas são cobradas como despesa: categoria de despesa ou "ambos".
       categoryId: refField(true, ['expense', 'both']),
       status: { kind: 'enum', required: true, values: SUBSCRIPTION_STATUSES.map((s) => s.value) },
@@ -305,7 +307,7 @@ export const REF_FIELDS = Object.freeze({
   incomes: ['categoryId', 'accountId'],
   expenses: ['categoryId', 'accountId'],
   transfers: ['fromAccountId', 'toAccountId'],
-  subscriptions: ['accountId', 'categoryId'],
+  subscriptions: ['accountId', 'categoryId', 'cardId'],
   debtors: [],
   budgets: ['categoryId'],
   creditCards: ['accountId'],
@@ -689,6 +691,17 @@ export function debtorMonthStatement({ debtor, month, purchases = [], invoicesBy
     month, card, loan, cardCents, loanCents, rawCents, totalCents,
     capped: open && rawCents > pending,
   };
+}
+
+/**
+ * Valor a lançar num consolidado de fatura (VF-2-03r) — puro. Dado o total que consta no extrato do cartão e o
+ * total já lançado na fatura (itens avulsos, de devedores, assinaturas), o consolidado cobre só a diferença.
+ * Retorna centavos inteiros > 0, ou null quando o extrato não excede o já lançado/entrada inválida.
+ */
+export function consolidationDeltaCents(currentCents, statementCents) {
+  if (!Number.isInteger(currentCents) || !Number.isInteger(statementCents)) return null;
+  const delta = statementCents - currentCents;
+  return delta > 0 ? delta : null;
 }
 
 /**
