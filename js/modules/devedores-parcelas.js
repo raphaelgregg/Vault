@@ -7,13 +7,14 @@ import { el, toast, refreshIcons } from '../core/ui.js';
 import { openModal, closeModal } from '../components/modal.js';
 import {
   field, iconButton, emptyBlock, dataTable, formModal, confirmModal,
-  formatDate, formatCentsInput, selectOptions, todayIso,
+  formatDate, formatMonth, formatCentsInput, selectOptions, todayIso,
 } from '../components/form-kit.js';
 import {
   listDebts, listDebtPayments, createDebt, cancelDebt, registerDebtPayment, formatCents,
 } from '../services/debtPayments.js';
-import { debtorPendingCents } from '../core/model.js';
-import { getDebtor, getDebtorOverview } from '../services/debtors.js';
+import { debtorPendingCents, debtorOverview } from '../core/model.js';
+import { getDebtor, getDebtorStatement } from '../services/debtors.js';
+import { listCards } from '../services/creditCards.js';
 import { listAccounts } from '../services/accounts.js';
 
 const STATUS_LABELS = { pending: 'Pendente', paid: 'Paga', late: 'Atrasada', cancelled: 'Cancelada' };
@@ -26,13 +27,16 @@ export function displayDebtStatus(debt, today = todayIso()) {
 /**
  * @param {{ user: {uid:string}, debtor: object, onChange: () => Promise<void> }} ctx
  */
-export async function openDebtorInstallments({ user, debtor, onChange }) {
-  const [debts, payments, accounts, overview] = await Promise.all([
+export async function openDebtorInstallments({ user, debtor, onChange, month = todayIso().slice(0, 7) }) {
+  const [debts, payments, accounts, statement, cards] = await Promise.all([
     listDebts(user.uid, debtor.id),
     listDebtPayments(user.uid, { where: [['debtorId', '==', debtor.id]] }),
     listAccounts(user.uid),
-    getDebtorOverview(user.uid, debtor),
+    getDebtorStatement(user.uid, debtor, month),
+    listCards(user.uid).catch(() => []),
   ]);
+  const overview = debtorOverview(debtor, statement.purchases); // sem 2ª leitura das compras
+  const cardName = new Map(cards.map((c) => [c.id, c.name]));
   debts.sort((a, b) => a.installmentNumber - b.installmentNumber);
   const receivedBy = new Map();
   for (const p of payments) receivedBy.set(p.debtId, (receivedBy.get(p.debtId) ?? 0) + p.amountCents);
@@ -42,10 +46,10 @@ export async function openDebtorInstallments({ user, debtor, onChange }) {
   const refresh = async () => {
     await onChange?.();
     const fresh = await getDebtor(user.uid, debtor.id);
-    await openDebtorInstallments({ user, debtor: fresh ?? debtor, onChange });
+    await openDebtorInstallments({ user, debtor: fresh ?? debtor, onChange, month });
   };
 
-  const reopen = () => { closeModal(); openDebtorInstallments({ user, debtor, onChange }); };
+  const reopen = () => { closeModal(); openDebtorInstallments({ user, debtor, onChange, month }); };
 
   const openCreate = () => formModal({
     title: `Nova parcela — ${debtor.name}`,
@@ -120,17 +124,40 @@ export async function openDebtorInstallments({ user, debtor, onChange }) {
     })
     : emptyBlock('list-checks', 'Sem parcelas', 'Crie parcelas para acompanhar os vencimentos e registrar recebimentos.');
 
-  // Débitos consolidados por origem (VF-2-03i): empréstimo direto × compras no cartão vinculadas.
-  const originTable = overview.cardPurchases.length
+  // Débitos consolidados por origem (VF-2-03i) + fechamento e detalhamento por mês (VF-2-03j).
+  const reopenMonth = (m) => { closeModal(); openDebtorInstallments({ user, debtor, onChange, month: m }); };
+  const faturaMonthOf = (p) => statement.invoicesById.get(p.invoiceId)?.referenceMonth ?? (p.purchaseDate ?? '').slice(0, 7);
+  const rows = statement.purchases.map((p) => {
+    const invoice = statement.invoicesById.get(p.invoiceId);
+    return { ...p, referenceMonth: faturaMonthOf(p), invoiceStatus: invoice?.status ?? null };
+  }).sort((x, y) => (x.referenceMonth === y.referenceMonth
+    ? (x.description + x.installmentNumber).localeCompare(y.description + y.installmentNumber)
+    : x.referenceMonth.localeCompare(y.referenceMonth)));
+  const months = [...new Set([...rows.map((r) => r.referenceMonth), month])].sort();
+  const monthSelect = el('select', { id: 'statement-month', 'aria-label': 'Mês de referência', onChange: (e) => reopenMonth(e.target.value) },
+    months.map((m) => el('option', { value: m, selected: m === month }, formatMonth(m))));
+  const invoiceLabel = (st) => (st === 'paid' ? 'Paga' : st === 'cancelled' ? 'Cancelada' : 'Pendente');
+  const cardRows = rows.filter((r) => r.referenceMonth === month);
+  const originTable = rows.length
     ? dataTable({
       columns: [
-        { key: 'purchaseDate', label: 'Data', render: (v) => formatDate(v) },
-        { key: 'description', label: 'Compra no cartão' },
+        { key: 'description', label: 'Compra' },
+        { key: 'cardId', label: 'Cartão', render: (v) => cardName.get(v) ?? '—' },
         { key: 'installmentNumber', label: 'Parcela', render: (v, p) => `${v}/${p.installmentsTotal}` },
-        { key: 'amountCents', label: 'Valor', numeric: true, render: (v) => formatCents(v) },
+        { key: 'amountCents', label: 'Valor da parcela', numeric: true, render: (v) => formatCents(v) },
+        { key: 'referenceMonth', label: 'Fatura', render: (v) => formatMonth(v) },
+        { key: 'invoiceStatus', label: 'Status', render: (v) => invoiceLabel(v) },
       ],
-      rows: overview.cardPurchases,
+      rows: cardRows,
     })
+    : null;
+  const closing = el('div', { class: 'card' }, [
+    el('p', { class: 'card__label', text: `Total a receber em ${formatMonth(month)}` }),
+    el('p', { class: 'card__value', text: isOpen ? formatCents(statement.totalCents) : '—' }),
+    el('p', { class: 'card__hint', text: `Cartão ${formatCents(statement.cardCents)} + empréstimo ${formatCents(statement.loanCents)}${statement.capped ? ` — limitado ao pendente do devedor (${formatCents(debtorPendingCents(debtor))})` : ''}.` }),
+  ]);
+  const overlapNotice = statement.overlapCents > 0
+    ? el('p', { class: 'notice', role: 'status', text: `Atenção: as parcelas de empréstimo cadastradas excedem a parte de empréstimo em ${formatCents(statement.overlapCents)}; pode haver duplicidade com compras no cartão (que já somam ao emprestado).` })
     : null;
 
   openModal({
@@ -138,7 +165,11 @@ export async function openDebtorInstallments({ user, debtor, onChange }) {
     body: el('div', {}, [
       el('p', { class: 'card__hint', text: `Emprestado ${formatCents(debtor.lentCents)} · recebido ${formatCents(debtor.receivedCents ?? 0)} · pendente ${formatCents(debtorPendingCents(debtor))}${isOpen ? '' : ' (devedor não está em aberto: somente consulta)'}` }),
       el('p', { class: 'card__hint', text: `Por origem: empréstimo ${formatCents(overview.loanCents)} · cartão de crédito ${formatCents(overview.cardCents)} (${overview.cardCount} parcela(s) vinculada(s)). O recebido é abatido do total, sem atribuição por origem.` }),
-      originTable,
+      el('div', { class: 'form__field' }, [el('label', { for: 'statement-month', text: 'Mês de referência' }), monthSelect]),
+      closing,
+      overlapNotice,
+      originTable ?? emptyBlock('credit-card', 'Sem compras no cartão', 'Compras vinculadas a este devedor aparecem aqui.'),
+      originTable && !cardRows.length ? el('p', { class: 'card__hint', text: `Nenhuma parcela de cartão na fatura de ${formatMonth(month)}.` }) : null,
       isOpen ? el('button', { type: 'button', class: 'btn btn--primary', onClick: openCreate, text: 'Nova parcela' }) : null,
       table,
     ]),

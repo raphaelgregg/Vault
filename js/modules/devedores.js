@@ -12,6 +12,7 @@ import {
   cancelDebtor,
   reopenDebtor,
   getDebtorStatusOptions,
+  loadDebtorStatements,
   summarizeDebtors,
   debtorPendingCents,
   formatCents,
@@ -25,6 +26,9 @@ export const meta = { title: 'Devedores', icon: 'users' };
 let currentUser = null;
 let container = null;
 let debtorsCache = [];
+let statements = new Map(); // fechamento do mês por devedor (VF-2-03j)
+let statementsFailed = false;
+let month = new Date().toISOString().slice(0, 7);
 
 export async function render(target, { user }) {
   currentUser = user;
@@ -34,7 +38,20 @@ export async function render(target, { user }) {
 
 async function reload() {
   debtorsCache = await listDebtors(currentUser.uid);
+  await reloadStatements();
   renderPage();
+}
+
+/** Isolado: falha no fechamento não esconde a lista de devedores (mostra aviso e "—"). */
+async function reloadStatements() {
+  try {
+    statements = await loadDebtorStatements(currentUser.uid, debtorsCache, month);
+    statementsFailed = false;
+  } catch (error) {
+    console.error('[devedores] falha ao calcular o fechamento do mês', error);
+    statements = new Map();
+    statementsFailed = true;
+  }
 }
 
 function renderPage() {
@@ -58,7 +75,24 @@ function renderPage() {
     ]),
   ]);
 
+  const monthTotal = [...statements.values()].reduce((t, st) => t + st.totalCents, 0);
+  const monthInput = el('input', {
+    type: 'month', id: 'closing-month', value: month, 'aria-label': 'Mês de fechamento',
+    onChange: async (event) => {
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(event.target.value)) return;
+      month = event.target.value;
+      await reloadStatements();
+      renderPage();
+    },
+  });
+  const monthBar = el('div', { class: 'form__field' }, [el('label', { for: 'closing-month', text: 'Mês de fechamento' }), monthInput]);
+  const failedNotice = statementsFailed
+    ? el('p', { class: 'notice', role: 'alert', text: 'Não foi possível calcular o fechamento do mês. A lista abaixo continua válida; recarregue para tentar de novo.' })
+    : null;
+
   const cards = el('div', { class: 'grid grid--cards' }, [
+    statCard(`A receber em ${formatMonth(month)}`, statementsFailed ? '—' : formatCents(monthTotal), 'calendar-check',
+      'Cartão (fatura do mês) + parcelas de empréstimo do mês, limitado ao pendente de cada devedor'),
     statCard('A receber', formatCents(summary.pendingCents), 'hand-coins', `Saldo pendente de ${summary.openCount} em aberto`),
     statCard('Recebido', formatCents(summary.receivedCents), 'check-circle-2', 'Total já devolvido (não cancelados)'),
   ]);
@@ -72,7 +106,7 @@ function renderPage() {
     el('div', { class: 'panel__body panel__body--flush' }, [createTableOrEmpty()]),
   ]);
 
-  container.replaceChildren(header, cards, panel);
+  container.replaceChildren(header, monthBar, failedNotice, cards, panel);
   refreshIcons();
 }
 
@@ -102,6 +136,10 @@ function createTableOrEmpty() {
     { key: 'lentCents', label: 'Emprestado', numeric: true, render: (v) => formatCents(Number(v) || 0) },
     { key: 'receivedCents', label: 'Recebido', numeric: true, render: (v) => formatCents(Number(v) || 0) },
     { key: 'pending', label: 'Pendente', numeric: true, render: (_, item) => formatCents(debtorPendingCents(item)) },
+    {
+      key: 'monthDue', label: `A receber em ${formatMonth(month)}`, numeric: true, strong: true,
+      render: (_, item) => (statementsFailed || item.status !== 'open' ? '—' : formatCents(statements.get(item.id)?.totalCents ?? 0)),
+    },
     { key: 'status', label: 'Status', render: (v) => optionLabel(getDebtorStatusOptions(), v) },
   ];
 
@@ -115,10 +153,10 @@ function createTableOrEmpty() {
       ]),
       el('tbody', {}, debtorsCache.map((item) =>
         el('tr', {}, [
-          ...columns.map((c) => el('td', {
-            class: c.numeric ? 'num' : '',
-            text: c.render ? c.render(item[c.key], item) : (item[c.key] ?? '—'),
-          })),
+          ...columns.map((c) => {
+            const text = c.render ? c.render(item[c.key], item) : (item[c.key] ?? '—');
+            return el('td', { class: c.numeric ? 'num' : '' }, c.strong ? [el('strong', { text })] : [text]);
+          }),
           el('td', { class: 'actions' }, createActions(item)),
         ])
       )),
@@ -304,6 +342,12 @@ function formatDate(value) {
   if (!value) return '—';
   const [y, m, d] = value.split('-');
   return `${d}/${m}/${y}`;
+}
+
+function formatMonth(value) {
+  if (!value) return '—';
+  const [y, m] = value.split('-');
+  return `${m}/${y}`;
 }
 
 function clearErrors(form) {

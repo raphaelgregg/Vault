@@ -4,8 +4,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { registerCardPurchase, deleteCardPurchase } from '../../js/services/creditCards.js';
-import { deleteDebtor, getDebtorOverview, DEBTOR_LINK_QUERIES } from '../../js/services/debtors.js';
-import { debtorOverview } from '../../js/core/model.js';
+import { deleteDebtor, getDebtorOverview, loadDebtorStatements, getDebtorStatement, DEBTOR_LINK_QUERIES } from '../../js/services/debtors.js';
+import { debtorOverview, debtorMonthStatement } from '../../js/core/model.js';
 import { describeError } from '../../js/utils/errors.js';
 import { loadDashboard, DASHBOARD_SOURCES } from '../../js/services/dashboard.js';
 
@@ -130,5 +130,79 @@ describe('dashboard resiliente por fonte', () => {
     assert.equal(d.accountCount, null);
     assert.equal(d.totalBalanceCents, null);
     assert.ok(DASHBOARD_SOURCES.includes('movements'));
+  });
+});
+
+describe('fechamento do mês por devedor (VF-2-03j)', () => {
+  const inv = new Map([
+    ['i11', { id: 'i11', referenceMonth: '2026-11', status: 'open' }],
+    ['i12', { id: 'i12', referenceMonth: '2026-12', status: 'paid' }],
+  ]);
+  const buys = [
+    { id: 'p1', description: 'TV', installmentNumber: 1, installmentsTotal: 2, amountCents: 15000, invoiceId: 'i11', purchaseDate: '2026-11-05' },
+    { id: 'p2', description: 'TV', installmentNumber: 2, installmentsTotal: 2, amountCents: 15000, invoiceId: 'i12', purchaseDate: '2026-11-05' },
+  ];
+  const debts = [
+    { id: 'b1', principalCents: 20000, dueDate: '2026-11-20', status: 'pending' },
+    { id: 'b2', principalCents: 10000, dueDate: '2026-12-20', status: 'pending' },
+    { id: 'b3', principalCents: 5000, dueDate: '2026-11-25', status: 'cancelled' },
+  ];
+  // lent = 100000 (inclui 30000 de cartão); recebido 20000 → pendente 80000
+  const d = debtor({ lentCents: 100000, receivedCents: 20000 });
+
+  it('soma cartão (mês da FATURA) + parcelas de empréstimo do mês (restante), em centavos', () => {
+    const st = debtorMonthStatement({ debtor: d, month: '2026-11', purchases: buys, invoicesById: inv, debts, receivedByDebt: new Map([['b1', 5000]]) });
+    assert.equal(st.cardCents, 15000);
+    assert.equal(st.loanCents, 15000); // 20000 − 5000 recebidos; cancelada e de dezembro fora
+    assert.equal(st.totalCents, 30000);
+    assert.equal(st.capped, false);
+    assert.deepEqual(st.card.map((p) => p.installmentNumber), [1]);
+    assert.equal(debtorMonthStatement({ debtor: d, month: '2026-12', purchases: buys, invoicesById: inv, debts }).cardCents, 15000);
+  });
+  it('limita ao pendente e zera para devedor não aberto', () => {
+    const small = debtor({ lentCents: 100000, receivedCents: 80000 }); // pendente 20000
+    const st = debtorMonthStatement({ debtor: small, month: '2026-11', purchases: buys, invoicesById: inv, debts });
+    assert.equal(st.rawCents, 35000);
+    assert.equal(st.totalCents, 20000);
+    assert.equal(st.capped, true);
+    assert.equal(debtorMonthStatement({ debtor: debtor({ status: 'cancelled' }), month: '2026-11', purchases: buys, invoicesById: inv, debts }).totalCents, 0);
+  });
+  it('sem fatura usa o mês da compra; sinaliza duplicidade empréstimo × cartão', () => {
+    const st = debtorMonthStatement({ debtor: d, month: '2026-11', purchases: [{ ...buys[0], invoiceId: undefined }], debts });
+    assert.equal(st.cardCents, 15000);
+    // parcelas ativas = 30000; parte de empréstimo = 100000 − 15000 = 85000 → sem overlap
+    assert.equal(st.overlapCents, 0);
+    const dup = debtorMonthStatement({ debtor: debtor({ lentCents: 40000, receivedCents: 0 }), month: '2026-11', purchases: buys, invoicesById: inv, debts });
+    assert.equal(dup.overlapCents, 30000 - (40000 - 30000)); // 20000
+  });
+  it('loadDebtorStatements: consultas `in` por lote, só devedores abertos, recebimentos por parcela', async () => {
+    const calls = [];
+    const io = {
+      list: async (u, c, opts) => {
+        calls.push({ c, where: opts.where });
+        return ({
+          cardPurchases: buys.map((p) => ({ ...p, debtorId: 'd1', cardId: 'c1' })),
+          debts: debts.map((x) => ({ ...x, debtorId: 'd1' })),
+          debtPayments: [{ debtId: 'b1', debtorId: 'd1', amountCents: 5000 }],
+          invoices: [...inv.values()],
+        })[c];
+      },
+    };
+    const open = [d, debtor({ id: 'd2', status: 'cancelled' })];
+    const map = await loadDebtorStatements(uid, open, '2026-11', io);
+    assert.deepEqual([...map.keys()], ['d1']);
+    assert.equal(map.get('d1').totalCents, 30000);
+    assert.deepEqual(calls.find((x) => x.c === 'cardPurchases').where, [['debtorId', 'in', ['d1']]]);
+    assert.deepEqual(calls.find((x) => x.c === 'invoices').where, [['cardId', 'in', ['c1']]]);
+    assert.equal((await loadDebtorStatements(uid, [debtor({ status: 'paid' })], '2026-11', io)).size, 0);
+    const single = await getDebtorStatement(uid, debtor({ id: 'd1', status: 'paid' }), '2026-11', io);
+    assert.equal(single.totalCents, 0);
+    assert.equal(single.purchases.length, 2);
+  });
+  it('lotes de 30 no operador `in`', async () => {
+    const many = Array.from({ length: 65 }, (_, i) => debtor({ id: `d${i}` }));
+    const seen = [];
+    await loadDebtorStatements(uid, many, '2026-11', { list: async (u, c, o) => { if (c === 'cardPurchases') seen.push(o.where[0][2].length); return []; } });
+    assert.deepEqual(seen, [30, 30, 5]);
   });
 });

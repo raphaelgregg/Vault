@@ -20,6 +20,7 @@ import {
   DEBTOR_STATUSES,
   debtorPendingCents,
   debtorOverview,
+  debtorMonthStatement,
   summarizeDebtors,
   formatCents,
   parseMoneyToCents,
@@ -152,3 +153,58 @@ export function getDebtorStatusOptions() {
 }
 
 export { summarizeDebtors, debtorPendingCents, formatCents, parseMoneyToCents };
+
+// ---------------------------------------------------------------------------
+// Fechamento do mês por devedor (VF-2-03j)
+// ---------------------------------------------------------------------------
+
+const IN_CHUNK = 30; // limite do operador `in` do Firestore
+
+const chunk = (items) => {
+  const out = [];
+  for (let i = 0; i < items.length; i += IN_CHUNK) out.push(items.slice(i, i + IN_CHUNK));
+  return out;
+};
+
+/**
+ * Carrega e calcula o fechamento de `month` para os devedores em aberto. Leituras: por lote de 30 devedores,
+ * 3 consultas (`cardPurchases`, `debts`, `debtPayments` por `debtorId in`) + faturas dos cartões envolvidos.
+ * Retorna Map(debtorId → { ...debtorMonthStatement, purchases, invoicesById }). `io.list` é injetável;
+ * `io.includeAll` inclui devedores não abertos (detalhamento; o total do mês deles é 0). Falha propaga (a UI isola e mostra aviso).
+ */
+export async function loadDebtorStatements(uid, debtors, month, io = {}) {
+  const fetchList = io.list ?? list;
+  const targets = io.includeAll ? debtors : debtors.filter((d) => d.status === 'open');
+  const result = new Map();
+  if (!targets.length) return result;
+  const ids = targets.map((d) => d.id);
+  const byIn = (collection, field, values) => Promise.all(
+    chunk(values).map((part) => fetchList(uid, collection, { where: [[field, 'in', part]] })),
+  ).then((pages) => pages.flat());
+
+  const [purchases, debts, payments] = await Promise.all([
+    byIn(COLLECTIONS.cardPurchases, 'debtorId', ids),
+    byIn(COLLECTIONS.debts, 'debtorId', ids),
+    byIn(COLLECTIONS.debtPayments, 'debtorId', ids),
+  ]);
+  const cardIds = [...new Set(purchases.map((p) => p.cardId).filter(Boolean))];
+  const invoices = cardIds.length ? await byIn(COLLECTIONS.invoices, 'cardId', cardIds) : [];
+  const invoicesById = new Map(invoices.map((i) => [i.id, i]));
+  const receivedByDebt = new Map();
+  for (const p of payments) receivedByDebt.set(p.debtId, (receivedByDebt.get(p.debtId) ?? 0) + (Number(p.amountCents) || 0));
+
+  for (const debtor of targets) {
+    const own = purchases.filter((p) => p.debtorId === debtor.id);
+    const statement = debtorMonthStatement({
+      debtor, month, purchases: own, invoicesById, debts: debts.filter((d) => d.debtorId === debtor.id), receivedByDebt,
+    });
+    result.set(debtor.id, { ...statement, purchases: own, invoicesById });
+  }
+  return result;
+}
+
+/** Fechamento de um único devedor (usado no detalhamento). */
+export async function getDebtorStatement(uid, debtor, month, io = {}) {
+  const map = await loadDebtorStatements(uid, [debtor], month, { ...io, includeAll: true });
+  return map.get(debtor.id) ?? debtorMonthStatement({ debtor, month });
+}

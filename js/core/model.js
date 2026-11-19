@@ -645,6 +645,49 @@ export function debtorOverview(debtor, cardPurchases = []) {
 }
 
 /**
+ * Fechamento do mês de um devedor (VF-2-03j) — puro. Soma, para `month` ("YYYY-MM"):
+ *  - parcelas de compras no cartão vinculadas (`cardPurchases.debtorId`) cuja FATURA (`invoices.referenceMonth`,
+ *    ou o mês da compra se ainda sem fatura) é o mês;
+ *  - parcelas de empréstimo (`debts`) pendentes com vencimento no mês, pelo restante (principal − recebido).
+ * Sem dupla contagem: `lentCents` já inclui o cartão, mas aqui cada origem vem da SUA coleção e o total do
+ * mês é limitado ao pendente do devedor (nunca cobra mais do que ele deve). Devedor não aberto → 0.
+ * Retorna { month, card: itens, loan: itens, cardCents, loanCents, rawCents, totalCents, capped, overlapCents }.
+ * `overlapCents` > 0 sinaliza parcelas de empréstimo cadastradas além da parte de empréstimo (possível duplicidade
+ * com compras de cartão).
+ */
+export function debtorMonthStatement({ debtor, month, purchases = [], invoicesById = new Map(), debts = [], receivedByDebt = new Map() } = {}) {
+  const card = [];
+  for (const p of purchases) {
+    const invoice = p.invoiceId ? invoicesById.get(p.invoiceId) : null;
+    const referenceMonth = invoice?.referenceMonth ?? (typeof p.purchaseDate === 'string' ? p.purchaseDate.slice(0, 7) : null);
+    if (referenceMonth !== month) continue;
+    card.push({ ...p, referenceMonth, invoiceStatus: invoice?.status ?? null });
+  }
+  const loan = [];
+  let scheduledCents = 0;
+  for (const d of debts) {
+    if (d.status === 'cancelled') continue;
+    scheduledCents += Number(d.principalCents) || 0;
+    if (d.status === 'paid' || typeof d.dueDate !== 'string' || d.dueDate.slice(0, 7) !== month) continue;
+    const remainingCents = (Number(d.principalCents) || 0) - (receivedByDebt.get(d.id) ?? 0);
+    if (remainingCents > 0) loan.push({ ...d, remainingCents });
+  }
+  const cardCents = card.reduce((t, p) => t + (Number(p.amountCents) || 0), 0);
+  const loanCents = loan.reduce((t, d) => t + d.remainingCents, 0);
+  const rawCents = cardCents + loanCents;
+  const open = debtor?.status === 'open';
+  const pending = debtorPendingCents(debtor);
+  const totalCents = open ? Math.min(rawCents, pending) : 0;
+  const allCardCents = purchases.reduce((t, p) => t + (Number(p.amountCents) || 0), 0);
+  const loanPortion = Math.max(0, (Number(debtor?.lentCents) || 0) - allCardCents);
+  return {
+    month, card, loan, cardCents, loanCents, rawCents, totalCents,
+    capped: open && rawCents > pending,
+    overlapCents: Math.max(0, scheduledCents - loanPortion),
+  };
+}
+
+/**
  * Totais dos devedores EM ABERTO (cancelados e quitados não entram em "a receber").
  * Retorna { openCount, pendingCents, receivedCents }; recebido soma os não cancelados.
  */
