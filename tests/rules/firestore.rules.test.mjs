@@ -716,6 +716,20 @@ describe('Metas e movimentações (VF-2-03c)', () => {
     await assertSucceeds(deleteDoc(goalDoc(db, 'g2')));
   });
 
+  it('metas (VF-2-03q): fluxo COMPLETO do createGoal — meta com conta/prazo/descrição + auditLog (after com prazo em string) — é aceito', async () => {
+    const db = await seed();
+    const data = { name: 'Caixinha', targetCents: 100000, deadline: '2027-01-10', accountId: 'acc1', description: 'Nubank' };
+    await assertSucceeds(setDoc(goalDoc(db, 'cx'), goal({ name: 'Caixinha', description: 'Nubank', deadline: noon('2027-01-10') })));
+    await assertSucceeds(addDoc(collection(db, 'users', ALICE, 'auditLog'), {
+      action: 'create', entity: 'goals', entityId: 'cx', after: { ...data, status: 'active' }, actorUid: ALICE, createdAt: serverTimestamp(),
+    }));
+    // mesmo conjunto, em um único lote (como o commitAtomic faria)
+    const batch = writeBatch(db);
+    batch.set(goalDoc(db, 'cx2'), goal({ name: 'Caixinha 2' }));
+    batch.set(doc(collection(db, 'users', ALICE, 'auditLog')), { action: 'create', entity: 'goals', entityId: 'cx2', after: { ...data, status: 'active' }, actorUid: ALICE, createdAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+  });
+
   it('metas: nega alvo <= 0, status inválido, prazo string, conta inexistente e campo extra', async () => {
     const db = await seed();
     await assertFails(setDoc(goalDoc(db, 'g3'), goal({ targetCents: 0 })));
@@ -815,6 +829,17 @@ describe('Cartões, compras e faturas (VF-2-03d)', () => {
     batch.set(invDoc(db), invoice());
     batch.set(buyDoc(db), purchase());
     await assertFails(batch.commit());
+  });
+
+  it('pagar fatura com conta (VF-2-03p): patch status/totalCents/paidCents/accountId/paidAt; nega conta inexistente, paidAt string e extra; cancelar fatura vazia', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(invDoc(db), invoice()));
+    await assertSucceeds(setDoc(invDoc(db, 'c1_2026-12'), invoice({ referenceMonth: '2026-12', closingDate: noon('2026-12-10'), dueDate: noon('2026-12-17') })));
+    await assertFails(updateDoc(invDoc(db), { status: 'paid', paidCents: 3000, accountId: 'zzz', paidAt: noon('2026-11-20'), updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(invDoc(db), { status: 'paid', paidCents: 3000, accountId: 'acc1', paidAt: '2026-11-20', updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(invDoc(db), { status: 'paid', paidCents: 3000, accountId: 'acc1', extra: 1, updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(invDoc(db), { status: 'paid', totalCents: 3000, paidCents: 3000, accountId: 'acc1', paidAt: noon('2026-11-20'), updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(invDoc(db, 'c1_2026-12'), { status: 'cancelled', updatedAt: serverTimestamp() }));
   });
 
   it('compra para devedor (VF-2-03i): parcelas com debtorId + lentCents do devedor no MESMO lote; nega devedor inexistente', async () => {

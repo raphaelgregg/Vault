@@ -198,13 +198,16 @@ try {
   await page.getByRole('button', { name: 'Nova meta' }).click();
   await page.fill('#name', 'Caixinha UI');
   await page.fill('#targetCents', '1.000,00');
+  await page.fill('#deadline', '2027-12-31'); // regressão: prazo ia como string e as Rules negavam (permission-denied)
   await page.selectOption('#accountId', accounts['Conta B']);
   await page.locator('#goal-form button[type="submit"]').click();
   await waitRow(/Caixinha UI/);
+  assert.doesNotMatch(await content(), /\bnull\b/); // regressão: replaceChildren(null) renderizava o texto "null"
   const goalRow = await rows().filter({ hasText: 'Caixinha UI' }).innerText();
   assert.match(goalRow, /saldo de Banco B — Conta B/);
   assert.match(goalRow, /R\$\s?500,00/); // saldo da Conta B (transferência confirmada)
   assert.match(goalRow, /50%/);
+  assert.match(goalRow, /31\/12\/2027/); // prazo gravado como Timestamp e lido de volta
   assert.equal(await page.getByRole('button', { name: 'Aportar em Caixinha UI' }).count(), 0); // fonte única: transferências
 
   log('VF-2-03o: excluir despesa paga e receita recebida com confirmação; saldo derivado estorna');

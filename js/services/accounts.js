@@ -66,6 +66,7 @@ export const ACCOUNT_LINK_QUERIES = Object.freeze([
   { collection: COLLECTIONS.creditCards, field: 'accountId', label: 'cartões' },
   { collection: COLLECTIONS.goals, field: 'accountId', label: 'metas' },
   { collection: COLLECTIONS.goalTransactions, field: 'accountId', label: 'movimentações de metas' },
+  { collection: COLLECTIONS.invoices, field: 'accountId', label: 'faturas pagas' },
 ]);
 
 /** Resume contagens de vínculos. Puro — sem Firebase. */

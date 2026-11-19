@@ -88,15 +88,17 @@ describe('loadBalances', () => {
       transfers: [{ fromAccountId: 'a1', toAccountId: 'a2', status: 'confirmed', amountCents: 100 }],
       debtPayments: [{ accountId: 'a2', amountCents: 50 }],
       goalTransactions: [{ accountId: 'a1', type: 'deposit', amountCents: 30 }],
+      invoices: [{ accountId: 'a1', status: 'paid', paidCents: 400 }, { status: 'paid', paidCents: 999 }], // sem conta: não debita
     };
     const io = { list: async (u, c, opts) => { calls.push([c, opts]); return tables[c]; } };
     const { balances, truncated } = await loadBalances('u', [{ id: 'a1', initialBalanceCents: 1000 }, { id: 'a2', initialBalanceCents: 0 }], io);
-    assert.equal(balances.get('a1'), 1000 + 500 - 200 - 100 - 30);
+    assert.equal(balances.get('a1'), 1000 + 500 - 200 - 100 - 30 - 400);
     assert.equal(balances.get('a2'), 100 + 50);
     assert.deepEqual(truncated, []);
     assert.ok(calls.every(([, o]) => o.limit === READ_LIMIT));
     assert.deepEqual(calls.find(([c]) => c === 'incomes')[1].where, [['status', '==', 'received']]);
     assert.deepEqual(calls.find(([c]) => c === 'transfers')[1].where, [['status', '==', 'confirmed']]);
+    assert.deepEqual(calls.find(([c]) => c === 'invoices')[1].where, [['status', '==', 'paid']]);
   });
   it('sinaliza coleções que atingiram o teto', async () => {
     const io = { list: async (u, c) => (c === 'expenses' ? rows(READ_LIMIT, { status: 'paid' }) : []) };

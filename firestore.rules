@@ -411,7 +411,7 @@ service cloud.firestore {
       allow read: if isOwner(userId);
       allow create, update: if isOwner(userId)
         && keysOk(['cardId', 'referenceMonth', 'closingDate', 'dueDate', 'totalCents',
-                   'paidCents', 'status', 'createdAt', 'updatedAt'])
+                   'paidCents', 'accountId', 'paidAt', 'status', 'createdAt', 'updatedAt'])
         && requiredOk(['cardId', 'referenceMonth', 'dueDate', 'status', 'createdAt', 'updatedAt'])
         && ref(userId, 'creditCards', 'cardId')
         && data().referenceMonth is string
@@ -420,6 +420,8 @@ service cloud.firestore {
         && stamp(data().dueDate)
         && (!('totalCents' in data()) || cents(data().totalCents))
         && (!('paidCents' in data()) || cents(data().paidCents))
+        && optionalRef(userId, 'accounts', 'accountId')
+        && optionalStamp('paidAt')
         && oneOf('status', ['open', 'closed', 'paid', 'cancelled'])
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));

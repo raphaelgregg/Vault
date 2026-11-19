@@ -22,7 +22,7 @@ import {
 } from '../components/form-kit.js';
 import {
   listCards, createCard, updateCard, deleteCard, blockCard, unblockCard, cancelCard,
-  registerCardPurchase, deleteCardPurchase, closeInvoice, payInvoice,
+  registerCardPurchase, deleteCardPurchase, closeInvoice, payInvoice, cancelInvoice,
   listInvoices, listCardPurchases, getCardLimitUsage, getCardStatusOptions, getInvoiceStatusOptions, formatCents,
 } from '../services/creditCards.js';
 import { listAccounts } from '../services/accounts.js';
@@ -222,6 +222,22 @@ async function openInvoicesModal(card) {
     if (r.ok) { toast(okMsg); await refreshModal(); } else toast(r.errors._form, 6000);
   };
 
+  // Pagar fatura (VF-2-03p): escolhe a conta bancária que paga; abate o saldo derivado e libera o limite.
+  const activeAccounts = accounts.filter((a) => a.status === 'active').map((a) => ({ value: a.id, label: accountLabel(a.id) }));
+  const openPayInvoice = (inv) => formModal({
+    title: `Pagar fatura ${formatMonth(inv.referenceMonth)} — ${card.name}`,
+    formId: 'invoice-pay-form',
+    submitLabel: 'Pagar fatura',
+    focusId: 'accountId',
+    fields: [
+      el('p', { class: 'card__hint', text: `Total ${formatCents(totalOf(inv))}. O valor sai do saldo da conta escolhida e o limite do cartão é liberado.${inv.status === 'open' ? ' A fatura aberta será fechada junto.' : ''}` }),
+      field('Conta que paga *', 'accountId', el('select', { id: 'accountId', name: 'accountId' }, selectOptions(activeAccounts, '', { placeholder: 'Selecione uma conta' }))),
+      field('Data do pagamento *', 'date', el('input', { type: 'date', id: 'date', name: 'date', value: new Date().toISOString().slice(0, 10) })),
+    ],
+    submit: (d) => payInvoice(user.uid, inv.id, { accountId: d.get('accountId'), date: d.get('date') }),
+    onDone: async () => { toast('Fatura paga.'); await refreshModal(); },
+  });
+
   const invoiceTable = invoices.length
     ? dataTable({
       columns: [
@@ -230,11 +246,18 @@ async function openInvoicesModal(card) {
         { key: 'dueDate', label: 'Vence', render: (v) => formatDate(v) },
         { key: 'total', label: 'Total', numeric: true, render: (_, i) => formatCents(totalOf(i)) },
         { key: 'status', label: 'Status', render: (v) => optionLabel(getInvoiceStatusOptions(), v) },
+        { key: 'accountId', label: 'Paga com', render: (v, i) => (i.status === 'paid' ? `${accountLabel(v)}${i.paidAt ? ` · ${formatDate(i.paidAt)}` : ''}` : '—') },
       ],
       rows: invoices,
       actions: (inv) => [
         inv.status === 'open' ? iconButton(`Fechar fatura ${formatMonth(inv.referenceMonth)}`, 'lock', () => act(closeInvoice, inv.id, 'Fatura fechada.')) : null,
-        inv.status === 'closed' ? iconButton(`Pagar fatura ${formatMonth(inv.referenceMonth)}`, 'check-circle-2', () => act(payInvoice, inv.id, 'Fatura paga.'), 'btn--success') : null,
+        ['open', 'closed'].includes(inv.status) && totalOf(inv) > 0
+          ? iconButton(`Pagar fatura ${formatMonth(inv.referenceMonth)}`, 'check-circle-2', () => openPayInvoice(inv), 'btn--success') : null,
+        inv.status === 'open' && !purchases.some((p) => p.invoiceId === inv.id)
+          ? iconButton(`Cancelar fatura ${formatMonth(inv.referenceMonth)}`, 'x-circle', () => confirmModal({
+            title: 'Cancelar fatura', message: `Cancelar a fatura ${formatMonth(inv.referenceMonth)} (sem compras)?`, confirmLabel: 'Cancelar fatura',
+            onConfirm: () => act(cancelInvoice, inv.id, 'Fatura cancelada.'),
+          }), 'btn--danger') : null,
       ].filter(Boolean),
     })
     : emptyBlock('receipt', 'Sem faturas', 'As faturas são criadas ao lançar compras.');

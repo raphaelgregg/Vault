@@ -88,10 +88,11 @@ function renderPage() {
     })
     : emptyBlock('target', 'Nenhuma meta criada', 'Crie reserva de emergência, viagem ou qualquer objetivo e acompanhe o progresso.');
   const notice = balancesNotice ? el('p', { class: 'notice', role: 'alert', text: balancesNotice }) : null;
-  container.replaceChildren(header, notice, stats, el('section', { class: 'panel' }, [
+  // `replaceChildren(null)` renderiza o TEXTO "null": só nós reais entram (bug da VF-2-03o).
+  container.replaceChildren(...[header, notice, stats, el('section', { class: 'panel' }, [
     el('div', { class: 'panel__header' }, [el('h2', { text: 'Minhas metas' })]),
     el('div', { class: 'panel__body panel__body--flush' }, [table]),
-  ]));
+  ])].filter(Boolean));
   refreshIcons();
 }
 

@@ -169,9 +169,11 @@ try {
   await page.waitForFunction(() => /Fechada/.test(document.querySelector('.modal__dialog')?.innerText ?? ''));
   assert.match(await row('01/2026').first().innerText(), /R\$\s?300,00/);
   await page.getByRole('button', { name: 'Pagar fatura 01/2026' }).click();
+  await page.selectOption('#accountId', accountId); // VF-2-03p: a fatura é paga com uma conta bancária
+  await page.locator('#invoice-pay-form button[type="submit"]').click();
   await page.waitForFunction(() => /Paga/.test(document.querySelector('.modal__dialog')?.innerText ?? ''));
   await page.keyboard.press('Escape');
-  assert.match(await text(), /R\$\s?1\.400,00/); // disponível: 2000 − 600 (2 parcelas em fatura não paga)
+  await page.waitForFunction(() => /R\$\s?1\.400,00/.test(document.querySelector('#page-content')?.innerText ?? '')); // disponível: 2000 − 600 (2 parcelas em fatura não paga)
 
   await shot('cartoes');
   log('devedores: criar, parcela, recebimento parcial e quitação');
@@ -211,9 +213,9 @@ try {
 
   log('dashboard: saldo derivado com recebimentos, metas e resultado do mês');
   await go('dashboard');
-  // 1000 + 5000 − 400 + 500 (recebimentos) − 900 (aporte 400+700 − resgate 200)
-  assert.match(await text(), /R\$\s?5\.200,00/);
-  assert.match(await text(), /Receitas do mês/);
+  // 1000 + 5000 − 400 + 500 (recebimentos) − 900 (aporte 400+700 − resgate 200) − 300 (fatura 01/2026 paga com a conta)
+  assert.match(await text(), /R\$\s?4\.900,00/);
+  assert.match(await text(), /Receitas/);
   assert.match(await text(), /R\$\s?4\.600,00/); // resultado do mês 5000 − 400
   assert.match(await text(), /Fatura|Nada a vencer/);
 

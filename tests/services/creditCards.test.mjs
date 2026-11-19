@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createCard, updateCard, deleteCard, setCardStatus, cancelCard, blockCard, unblockCard,
-  registerCardPurchase, deleteCardPurchase, closeInvoice, payInvoice, getCardLimitUsage,
+  registerCardPurchase, deleteCardPurchase, closeInvoice, payInvoice, cancelInvoice, getCardLimitUsage,
   getCardStatusOptions, getInvoiceStatusOptions,
 } from '../../js/services/creditCards.js';
 import {
@@ -47,8 +47,8 @@ describe('schemas (espelham as Rules)', () => {
     assert.deepEqual(Object.keys(SCHEMAS.creditCards.fields).sort(), ['accountId', 'brand', 'closingDay', 'color', 'dueDay', 'limitCents', 'name', 'status']);
     assert.deepEqual(Object.keys(SCHEMAS.cardPurchases.fields).sort(),
       ['amountCents', 'cardId', 'categoryId', 'debtorId', 'description', 'installmentNumber', 'installmentsTotal', 'invoiceId', 'notes', 'purchaseDate']);
-    assert.deepEqual(Object.keys(SCHEMAS.invoices.fields).sort(), ['cardId', 'closingDate', 'dueDate', 'paidCents', 'referenceMonth', 'status', 'totalCents']);
-    assert.deepEqual(SCHEMAS.invoices.dateFields, ['closingDate', 'dueDate']);
+    assert.deepEqual(Object.keys(SCHEMAS.invoices.fields).sort(), ['accountId', 'cardId', 'closingDate', 'dueDate', 'paidAt', 'paidCents', 'referenceMonth', 'status', 'totalCents']);
+    assert.deepEqual(SCHEMAS.invoices.dateFields, ['closingDate', 'dueDate', 'paidAt']);
     assert.deepEqual(getCardStatusOptions().map((o) => o.value), ['active', 'blocked', 'cancelled']);
     assert.deepEqual(getInvoiceStatusOptions().map((o) => o.value), ['open', 'closed', 'paid', 'cancelled']);
   });
@@ -257,13 +257,50 @@ describe('faturas — fechar, pagar e excluir compra', () => {
     assert.equal((await closeInvoice(uid, 'zz', makeIo().io)).ok, false);
     assert.equal(early.calls.update.length, 0);
   });
-  it('paga fatura fechada (paidCents = total) e libera limite; só fechadas', async () => {
-    const m = makeIo({ invoices: [closable({ status: 'closed', totalCents: 5000 })] });
-    assert.deepEqual(await payInvoice(uid, 'c1_2026-11', m.io), { ok: true, paidCents: 5000 });
-    assert.deepEqual(m.calls.update[0].data, { status: 'paid', paidCents: 5000 });
+  it('paga fatura fechada com conta (paidCents = total, accountId, paidAt) e libera limite', async () => {
+    const m = makeIo({ invoices: [closable({ status: 'closed', totalCents: 5000 })], accounts: [{ id: 'a1', status: 'active' }] });
+    assert.deepEqual(await payInvoice(uid, 'c1_2026-11', { accountId: 'a1', date: '2026-11-20' }, m.io), { ok: true, paidCents: 5000 });
+    assert.deepEqual(m.calls.update[0].data, { status: 'paid', totalCents: 5000, paidCents: 5000, accountId: 'a1', paidAt: '2026-11-20' });
     assert.equal(m.calls.audit[0].action, 'pay');
-    assert.equal((await payInvoice(uid, 'c1_2026-11', makeIo({ invoices: [closable()] }).io)).ok, false);
-    assert.equal((await payInvoice(uid, 'c1_2026-11', makeIo({ invoices: [closable({ status: 'paid' })] }).io)).ok, false);
+    // limite liberado: compras de fatura paga saem do usado
+    assert.equal(cardLimitUsage(card(), [{ invoiceId: 'c1_2026-11', amountCents: 5000 }], [{ id: 'c1_2026-11', status: 'paid' }]).usedCents, 0);
+  });
+  it('paga fatura ABERTA (fecha junto, total = soma das parcelas) e valida conta, data, zerada e status', async () => {
+    const buy = { id: 'p1', cardId: 'c1', invoiceId: 'c1_2026-11', amountCents: 3434 };
+    const m = makeIo({ invoices: [closable()], purchases: [buy], accounts: [{ id: 'a1', status: 'active' }, { id: 'a2', status: 'archived' }] });
+    const r = await payInvoice(uid, 'c1_2026-11', { accountId: 'a1' }, m.io);
+    assert.deepEqual([r.ok, r.paidCents, m.calls.update[0].data.status, m.calls.update[0].data.totalCents, m.calls.update[0].data.paidAt], [true, 3434, 'paid', 3434, '2026-11-18']);
+    const bad = [
+      [makeIo({ invoices: [closable()], purchases: [buy] }), { accountId: 'zz' }, 'accountId'],
+      [makeIo({ invoices: [closable()], purchases: [buy], accounts: [{ id: 'a2', status: 'archived' }] }), { accountId: 'a2' }, 'accountId'],
+      [makeIo({ invoices: [closable()], purchases: [buy], accounts: [{ id: 'a1', status: 'active' }] }), {}, 'accountId'],
+      [makeIo({ invoices: [closable()], purchases: [buy], accounts: [{ id: 'a1', status: 'active' }] }), { accountId: 'a1', date: '2026-02-30' }, 'date'],
+      [makeIo({ invoices: [closable()], purchases: [], accounts: [{ id: 'a1', status: 'active' }] }), { accountId: 'a1' }, '_form'], // zerada
+      [makeIo({ invoices: [closable({ status: 'paid' })], accounts: [{ id: 'a1', status: 'active' }] }), { accountId: 'a1' }, '_form'],
+      [makeIo({ invoices: [closable({ status: 'cancelled' })], accounts: [{ id: 'a1', status: 'active' }] }), { accountId: 'a1' }, '_form'],
+    ];
+    for (const [{ io, calls }, raw, field] of bad) {
+      const x = await payInvoice(uid, 'c1_2026-11', raw, io);
+      assert.equal(x.ok, false, field);
+      assert.ok(x.errors[field], field);
+      assert.equal(calls.update.length, 0);
+    }
+  });
+  it('cancela fatura aberta sem compras (R$ 0,00); bloqueia com compras, fechada ou falha de leitura', async () => {
+    const m = makeIo({ invoices: [closable()], linked: 0 });
+    assert.deepEqual(await cancelInvoice(uid, 'c1_2026-11', m.io), { ok: true });
+    assert.deepEqual(m.calls.update[0].data, { status: 'cancelled' });
+    assert.equal(m.calls.audit[0].action, 'cancel');
+    for (const mk of [makeIo({ invoices: [closable()], linked: 2 }), makeIo({ invoices: [closable({ status: 'closed' })] }), makeIo({ invoices: [] })]) {
+      assert.equal((await cancelInvoice(uid, 'c1_2026-11', mk.io)).ok, false);
+      assert.equal(mk.calls.update.length, 0);
+    }
+    const boom = makeIo({ invoices: [closable()] });
+    boom.io.count = async () => { throw new Error('x'); };
+    const orig = console.error; console.error = () => {};
+    assert.equal((await cancelInvoice(uid, 'c1_2026-11', boom.io)).ok, false);
+    console.error = orig;
+    assert.equal(boom.calls.update.length, 0);
   });
   it('exclui compra só com fatura aberta', async () => {
     const p = { id: 'p1', invoiceId: 'c1_2026-11', amountCents: 1 };

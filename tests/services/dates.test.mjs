@@ -5,12 +5,31 @@ import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { toFirestoreData, fromFirestoreDoc, Timestamp } from '../../js/services/firestore.js';
 import { isDateFieldName, parseIsoDate, dateToIsoDate } from '../../js/utils/dates.js';
-import { isValidIsoDate } from '../../js/core/model.js';
+import { isValidIsoDate, SCHEMAS, buildEntity } from '../../js/core/model.js';
 
 const ORIGINAL_TZ = process.env.TZ;
 afterEach(() => {
   if (ORIGINAL_TZ === undefined) delete process.env.TZ;
   else process.env.TZ = ORIGINAL_TZ;
+});
+
+describe('campos de data dos schemas × conversão para Timestamp (VF-2-03q)', () => {
+  it('TODO campo em SCHEMAS[*].dateFields é reconhecido por isDateFieldName (senão vai como string e as Rules negam)', () => {
+    for (const [kind, schema] of Object.entries(SCHEMAS)) {
+      for (const field of schema.dateFields ?? []) assert.equal(isDateFieldName(field), true, `${kind}.${field}`);
+    }
+  });
+  it('meta com prazo e fatura paga viram Timestamp ao gravar e voltam como ISO ao ler', () => {
+    const goal = buildEntity('goals', { name: 'Caixinha', targetCents: '1.000,00', deadline: '2027-01-10', accountId: 'a1', status: 'active' });
+    assert.equal(goal.ok, true);
+    const stored = toFirestoreData(goal.data);
+    assert.equal(typeof stored.deadline.toDate, 'function'); // Timestamp (antes: string → permission-denied)
+    assert.equal(stored.deadline.toDate().toISOString(), '2027-01-10T12:00:00.000Z');
+    assert.equal(fromFirestoreDoc('g1', stored).deadline, '2027-01-10');
+    const paid = toFirestoreData({ status: 'paid', paidAt: '2026-11-20' });
+    assert.equal(typeof paid.paidAt.toDate, 'function');
+    assert.equal(fromFirestoreDoc('i1', paid).paidAt, '2026-11-20');
+  });
 });
 
 describe('utils/dates — parse e campos de data', () => {

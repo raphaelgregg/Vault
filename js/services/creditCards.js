@@ -34,6 +34,7 @@ import {
   splitInstallments,
   parseMoneyToCents,
   formatCents,
+  isValidIsoDate,
   SCHEMAS,
   CARD_STATUSES,
   INVOICE_STATUSES,
@@ -270,14 +271,55 @@ export async function closeInvoice(uid, invoiceId, io = {}) {
   return { ok: true, totalCents };
 }
 
-/** Paga integralmente fatura fechada (`paidCents = totalCents`); libera o limite. Não move conta. */
-export async function payInvoice(uid, invoiceId, io = {}) {
+/**
+ * Paga a fatura (`closed` ou `open` → `paid`) debitando uma conta bancária (VF-2-03p). `rawData`: { accountId, date? }.
+ * Grava `paidCents = totalCents`, `accountId` e `paidAt`; se estava aberta, fecha junto (`totalCents` = soma das
+ * parcelas). O saldo da conta continua DERIVADO (`accountBalances` subtrai faturas pagas) e o limite do cartão
+ * é liberado (`cardLimitUsage` ignora faturas pagas). Fatura zerada não é paga: cancele-a.
+ * Retorna { ok, paidCents, errors }.
+ */
+export async function payInvoice(uid, invoiceId, rawData = {}, io = {}) {
+  const fetch = io.getById ?? getById;
+  const invoice = await fetch(uid, INVOICES, invoiceId);
+  if (!invoice) return { ok: false, errors: { _form: 'Fatura não encontrada.' } };
+  if (!['open', 'closed'].includes(invoice.status)) return { ok: false, errors: { _form: 'Só é possível pagar faturas abertas ou fechadas.' } };
+  const date = rawData.date ? String(rawData.date) : todayIso(io);
+  if (!isValidIsoDate(date)) return { ok: false, errors: { date: 'Data inválida (use AAAA-MM-DD).' } };
+  if (!rawData.accountId) return { ok: false, errors: { accountId: 'Selecione a conta que pagou a fatura.' } };
+  const account = await fetch(uid, COLLECTIONS.accounts, String(rawData.accountId));
+  if (!account) return { ok: false, errors: { accountId: 'Conta não encontrada.' } };
+  if (account.status !== 'active') return { ok: false, errors: { accountId: 'A conta precisa estar ativa.' } };
+
+  let totalCents = Number(invoice.totalCents) || 0;
+  if (invoice.status === 'open') {
+    const purchases = await (io.list ?? list)(uid, PURCHASES, { where: [['invoiceId', '==', invoiceId]] });
+    totalCents = invoiceTotalCents(purchases);
+  }
+  if (totalCents <= 0) return { ok: false, errors: { _form: 'Fatura zerada: não há o que pagar. Cancele a fatura.' } };
+  await updateAudited(uid, INVOICES, invoiceId, {
+    status: 'paid', totalCents, paidCents: totalCents, accountId: account.id ?? rawData.accountId, paidAt: date,
+  }, io, 'pay');
+  return { ok: true, paidCents: totalCents };
+}
+
+/**
+ * Cancela fatura ABERTA sem compras vinculadas (ex.: fatura R$ 0,00 remanescente de compra que falhou).
+ * Com compras, bloqueia (exclua as compras ou pague). Leitura fail-closed. Retorna { ok, errors }.
+ */
+export async function cancelInvoice(uid, invoiceId, io = {}) {
   const invoice = await (io.getById ?? getById)(uid, INVOICES, invoiceId);
   if (!invoice) return { ok: false, errors: { _form: 'Fatura não encontrada.' } };
-  if (invoice.status !== 'closed') return { ok: false, errors: { _form: 'Só é possível pagar faturas fechadas.' } };
-  const paidCents = Number(invoice.totalCents) || 0;
-  await updateAudited(uid, INVOICES, invoiceId, { status: 'paid', paidCents }, io, 'pay');
-  return { ok: true, paidCents };
+  if (invoice.status !== 'open') return { ok: false, errors: { _form: 'Só é possível cancelar faturas abertas.' } };
+  let linked;
+  try {
+    linked = await (io.count ?? count)(uid, PURCHASES, { where: [['invoiceId', '==', invoiceId]] });
+  } catch (error) {
+    console.error('[creditCards] falha ao verificar compras da fatura', error);
+    return { ok: false, errors: { _form: 'Não foi possível verificar as compras da fatura. O cancelamento foi interrompido por segurança.' } };
+  }
+  if (linked > 0) return { ok: false, errors: { _form: `A fatura possui ${linked} parcela(s) de compras e não pode ser cancelada.` } };
+  await updateAudited(uid, INVOICES, invoiceId, { status: 'cancelled' }, io, 'cancel');
+  return { ok: true };
 }
 
 export const getCardStatusOptions = () => CARD_STATUSES.map((s) => ({ value: s.value, label: s.label }));

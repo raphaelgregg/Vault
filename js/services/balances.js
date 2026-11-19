@@ -17,14 +17,15 @@ export const READ_LIMIT = 1000;
 export async function loadBalances(uid, accounts, io = {}) {
   const fetchList = io.list ?? list;
   const capped = (collection, extra = {}) => fetchList(uid, collection, { limit: READ_LIMIT, ...extra });
-  const [incomes, expenses, transfers, debtPayments, goalTransactions] = await Promise.all([
+  const [incomes, expenses, transfers, debtPayments, goalTransactions, invoices] = await Promise.all([
     capped(COLLECTIONS.incomes, { where: [['status', '==', 'received']] }),
     capped(COLLECTIONS.expenses, { where: [['status', '==', 'paid']] }),
     capped(COLLECTIONS.transfers, { where: [['status', '==', 'confirmed']] }),
     capped(COLLECTIONS.debtPayments),
     capped(COLLECTIONS.goalTransactions),
+    capped(COLLECTIONS.invoices, { where: [['status', '==', 'paid']] }), // faturas pagas debitam a conta (VF-2-03p)
   ]);
-  const movements = { incomes, expenses, transfers, debtPayments, goalTransactions };
+  const movements = { incomes, expenses, transfers, debtPayments, goalTransactions, invoices };
   const truncated = Object.entries(movements).filter(([, rows]) => rows.length >= READ_LIMIT).map(([name]) => name);
   return { balances: accountBalances(accounts, movements), movements, truncated };
 }

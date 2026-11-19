@@ -8,10 +8,15 @@
  */
 import { COLLECTIONS } from '../utils/constants.js';
 import { list } from './firestore.js';
-import { summarizeDebtors, formatCents } from '../core/model.js';
+import {
+  summarizeDebtors, formatCents, cardInvoicesSummary, allocateLinkedGoalBalances,
+} from '../core/model.js';
+import { loadDebtorStatements } from './debtors.js';
+import { monthBounds } from '../utils/dates.js';
 import { loadBalances, READ_LIMIT } from './balances.js';
 import {
   monthResult,
+  monthForecast,
   totalBalanceCents,
   upcomingDue,
 } from '../core/aggregates.js';
@@ -27,7 +32,10 @@ export function todayParts(now = new Date()) {
 }
 
 /** Fontes de dados do dashboard; `failed` lista as que falharam (isoladas: uma falha não derruba as demais). */
-export const DASHBOARD_SOURCES = Object.freeze(['accounts', 'movements', 'pendingExpenses', 'subscriptions', 'invoices', 'debtors', 'budgets']);
+export const DASHBOARD_SOURCES = Object.freeze([
+  'accounts', 'movements', 'pendingExpenses', 'subscriptions', 'invoices', 'debtors', 'budgets',
+  'goals', 'monthPending', 'cardInvoices', 'debtorMonth',
+]);
 
 /**
  * Retorna { totalBalanceCents, month, result, upcoming, budgets, debtors, truncated, accountCount, failed }.
@@ -36,7 +44,9 @@ export const DASHBOARD_SOURCES = Object.freeze(['accounts', 'movements', 'pendin
  */
 export async function loadDashboard(uid, io = {}) {
   const fetchList = io.list ?? list;
-  const { today, month } = todayParts(io.now ? io.now() : new Date());
+  const { today, month: currentMonth } = todayParts(io.now ? io.now() : new Date());
+  const month = io.month ?? currentMonth; // mês selecionado (padrão: vigente)
+  const bounds = monthBounds(month);
   const capped = (collection, extra = {}) => fetchList(uid, collection, { limit: READ_LIMIT, ...extra });
   const failed = [];
   const attempt = async (source, fn, fallback) => {
@@ -49,7 +59,7 @@ export async function loadDashboard(uid, io = {}) {
     }
   };
 
-  const [accounts, pendingExpenses, subscriptions, invoices, debtors, budgets] = await Promise.all([
+  const [accounts, pendingExpenses, subscriptions, invoices, debtors, budgets, goals, monthPending, cardInvoices] = await Promise.all([
     attempt('accounts', () => fetchList(uid, COLLECTIONS.accounts, {}), null),
     attempt('pendingExpenses', () => fetchList(uid, COLLECTIONS.expenses, {
       where: [['status', '==', 'pending'], ['dueDate', '>=', today]], orderBy: ['dueDate', 'asc'], limit: SHORT_LIMIT,
@@ -62,6 +72,22 @@ export async function loadDashboard(uid, io = {}) {
     }), []),
     attempt('debtors', () => capped(COLLECTIONS.debtors), null),
     attempt('budgets', () => getBudgetProgress(uid, month, { list: fetchList }), null),
+    attempt('goals', () => capped(COLLECTIONS.goals), null),
+    // Previsto do mês: pendentes com data prevista no mês (índices status+data já declarados).
+    attempt('monthPending', async () => {
+      const [incomes, expenses] = await Promise.all([
+        capped(COLLECTIONS.incomes, { where: [['status', '==', 'pending'], ['expectedDate', '>=', bounds.start], ['expectedDate', '<=', bounds.end]], orderBy: ['expectedDate', 'asc'] }),
+        capped(COLLECTIONS.expenses, { where: [['status', '==', 'pending'], ['dueDate', '>=', bounds.start], ['dueDate', '<=', bounds.end]], orderBy: ['dueDate', 'asc'] }),
+      ]);
+      return { incomes, expenses };
+    }, null),
+    // Faturas + compras + cartões: total do mês e limite utilizado (mesmas leituras servem aos dois).
+    attempt('cardInvoices', async () => {
+      const [cards, allInvoices, purchases] = await Promise.all([
+        capped(COLLECTIONS.creditCards), capped(COLLECTIONS.invoices), capped(COLLECTIONS.cardPurchases),
+      ]);
+      return { cards, invoices: allInvoices, purchases, truncated: allInvoices.length >= READ_LIMIT || purchases.length >= READ_LIMIT };
+    }, null),
   ]);
 
   // Saldo/resultado dependem das contas E dos movimentos realizados; sem um deles ficam indisponíveis (null).
@@ -69,15 +95,40 @@ export async function loadDashboard(uid, io = {}) {
     ? await attempt('movements', () => loadBalances(uid, accounts, { list: fetchList }), null)
     : null;
 
+  // Saldo livre × vinculado a metas em conta (caixinha/investimento): mesma repartição da tela de Metas.
+  const activeBalances = new Map();
+  if (loaded) for (const a of accounts) if (a.status === 'active') activeBalances.set(a.id, loaded.balances.get(a.id) ?? 0);
+  let linkedCents = null;
+  if (loaded && goals) {
+    const txCounts = new Map();
+    for (const t of loaded.movements.goalTransactions) txCounts.set(t.goalId, (txCounts.get(t.goalId) ?? 0) + 1);
+    linkedCents = [...allocateLinkedGoalBalances(goals, activeBalances, txCounts).values()].reduce((t, v) => t + v, 0);
+  }
+  const totalCents = loaded ? totalBalanceCents(accounts, loaded.balances) : null;
+  const result = loaded ? monthResult(loaded.movements.incomes, loaded.movements.expenses, month) : null;
+
+  // A receber de devedores no mês (fechamento) — depende da lista de devedores.
+  const debtorMonth = debtors
+    ? await attempt('debtorMonth', async () => {
+      const map = await loadDebtorStatements(uid, debtors, month, { list: fetchList });
+      return [...map.values()].reduce((t, st) => t + st.totalCents, 0);
+    }, null)
+    : null;
+
   return {
     month,
+    isCurrentMonth: month === currentMonth,
     accountCount: accounts ? accounts.filter((a) => a.status === 'active').length : null,
-    totalBalanceCents: loaded ? totalBalanceCents(accounts, loaded.balances) : null,
-    result: loaded ? monthResult(loaded.movements.incomes, loaded.movements.expenses, month) : null,
+    totalBalanceCents: totalCents,
+    linkedGoalsCents: linkedCents,
+    freeBalanceCents: totalCents !== null && linkedCents !== null ? totalCents - linkedCents : null,
+    result,
+    forecast: result && monthPending ? monthForecast(result, monthPending.incomes, monthPending.expenses) : null,
+    cardInvoices: cardInvoices ? cardInvoicesSummary({ ...cardInvoices, month }) : null,
     upcoming: upcomingDue({ expenses: pendingExpenses, subscriptions, invoices, today }),
     budgets: budgets ? budgets.summary : null,
-    debtors: debtors ? summarizeDebtors(debtors) : null,
-    truncated: [...(loaded?.truncated ?? []), ...(budgets?.truncated ? ['budgetExpenses'] : [])],
+    debtors: debtors ? { ...summarizeDebtors(debtors), monthDueCents: debtorMonth } : null,
+    truncated: [...(loaded?.truncated ?? []), ...(budgets?.truncated ? ['budgetExpenses'] : []), ...(cardInvoices?.truncated ? ['cardInvoices'] : [])],
     failed,
   };
 }

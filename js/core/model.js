@@ -270,7 +270,7 @@ export const SCHEMAS = Object.freeze({
   },
   // Faturas — espelha `invoices`. totalCents/paidCents só são gravados no fechamento/pagamento.
   invoices: {
-    dateFields: ['closingDate', 'dueDate'],
+    dateFields: ['closingDate', 'dueDate', 'paidAt'],
     fields: {
       cardId: refField(),
       referenceMonth: monthKey(),
@@ -278,6 +278,9 @@ export const SCHEMAS = Object.freeze({
       dueDate: date(),
       totalCents: optionalCentsNonNegative(),
       paidCents: optionalCentsNonNegative(),
+      // Pagamento (VF-2-03p): conta bancária debitada e data; o saldo da conta segue DERIVADO (accountBalances).
+      accountId: refField(false),
+      paidAt: optionalDate(),
       status: { kind: 'enum', required: true, values: INVOICE_STATUSES.map((s) => s.value) },
     },
   },
@@ -307,7 +310,7 @@ export const REF_FIELDS = Object.freeze({
   budgets: ['categoryId'],
   creditCards: ['accountId'],
   cardPurchases: ['cardId', 'categoryId', 'invoiceId', 'debtorId'],
-  invoices: ['cardId'],
+  invoices: ['cardId', 'accountId'],
   goals: ['accountId'],
   goalTransactions: ['goalId', 'accountId'],
   debts: ['debtorId'],
@@ -524,7 +527,7 @@ export function filterMovements(items, filters = {}, { dateField } = {}) {
          - aportes em metas + resgates (goalTransactions).
  * Transferências pendentes/canceladas não movem dinheiro.
  */
-export function accountBalances(accounts, { incomes = [], expenses = [], transfers = [], debtPayments = [], goalTransactions = [] } = {}) {
+export function accountBalances(accounts, { incomes = [], expenses = [], transfers = [], debtPayments = [], goalTransactions = [], invoices = [] } = {}) {
   const balances = new Map();
   for (const account of accounts) {
     balances.set(account.id, Number(account.initialBalanceCents) || 0);
@@ -542,6 +545,10 @@ export function accountBalances(accounts, { incomes = [], expenses = [], transfe
   // Recebimentos de devedores entram na conta de destino (existir já = dinheiro recebido).
   for (const payment of debtPayments) bump(payment.accountId, payment.amountCents);
   // Aporte em meta tira dinheiro da conta; resgate devolve.
+  // Fatura paga com conta (VF-2-03p) debita a conta UMA vez; as compras do cartão não são despesas (sem dupla contagem).
+  for (const invoice of invoices) {
+    if (invoice.status === 'paid' && invoice.accountId) bump(invoice.accountId, -(Number(invoice.paidCents ?? invoice.totalCents) || 0));
+  }
   for (const t of goalTransactions) bump(t.accountId, t.type === 'deposit' ? -t.amountCents : t.amountCents);
   for (const transfer of transfers) {
     if (transfer.status !== 'confirmed') continue;
@@ -682,6 +689,36 @@ export function debtorMonthStatement({ debtor, month, purchases = [], invoicesBy
     month, card, loan, cardCents, loanCents, rawCents, totalCents,
     capped: open && rawCents > pending,
   };
+}
+
+/**
+ * Faturas de cartão do mês e limite (VF-2-03q) — puro. `month` = referenceMonth da fatura; canceladas fora.
+ * Total da fatura: aberta = soma das parcelas vinculadas; fechada/paga = `totalCents` gravado.
+ * `dueCents` = abertas + fechadas (ainda a pagar); `paidCents` = pagas. Limite/usado/disponível: só cartões
+ * ativos, com `cardLimitUsage` (compras de faturas pagas/canceladas já liberam o limite).
+ * Retorna { count, openCents, closedCents, paidCents, dueCents, limitCents, usedCents, availableCents }.
+ */
+export function cardInvoicesSummary({ cards = [], invoices = [], purchases = [], month } = {}) {
+  const out = { count: 0, openCents: 0, closedCents: 0, paidCents: 0, dueCents: 0, limitCents: 0, usedCents: 0, availableCents: 0 };
+  for (const invoice of invoices) {
+    if (invoice.referenceMonth !== month || invoice.status === 'cancelled') continue;
+    const total = invoice.status === 'open'
+      ? invoiceTotalCents(purchases.filter((p) => p.invoiceId === invoice.id))
+      : Number(invoice.status === 'paid' ? (invoice.paidCents ?? invoice.totalCents) : invoice.totalCents) || 0;
+    out.count += 1;
+    if (invoice.status === 'open') out.openCents += total;
+    else if (invoice.status === 'closed') out.closedCents += total;
+    else if (invoice.status === 'paid') out.paidCents += total;
+  }
+  out.dueCents = out.openCents + out.closedCents;
+  for (const card of cards) {
+    if (card.status !== 'active') continue;
+    const usage = cardLimitUsage(card, purchases.filter((p) => p.cardId === card.id), invoices.filter((i) => i.cardId === card.id));
+    out.limitCents += Number(card.limitCents) || 0;
+    out.usedCents += usage.usedCents;
+    out.availableCents += usage.availableCents;
+  }
+  return out;
 }
 
 /**

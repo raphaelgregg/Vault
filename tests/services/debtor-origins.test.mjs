@@ -10,6 +10,8 @@ import { debtorOverview, debtorMonthStatement, debtorObligations } from '../../j
 import { describeError } from '../../js/utils/errors.js';
 import { allocateLinkedGoalBalances, isAccountLinkedGoal } from '../../js/core/model.js';
 import { registerGoalTransaction } from '../../js/services/goals.js';
+import { monthForecast } from '../../js/core/aggregates.js';
+import { cardInvoicesSummary } from '../../js/core/model.js';
 import { loadDashboard, DASHBOARD_SOURCES } from '../../js/services/dashboard.js';
 
 const uid = 'u1';
@@ -124,7 +126,7 @@ describe('dashboard resiliente por fonte', () => {
     assert.equal(d.debtors.pendingCents, 0);
   });
   it('falha em uma fonte não derruba as demais', async () => {
-    const d = await silent(() => loadDashboard(uid, ioWith(['debtors', 'invoices'])));
+    const d = await silent(() => loadDashboard(uid, ioWith(['debtors', 'invoices:closed'])));
     assert.deepEqual(d.failed.sort(), ['debtors', 'invoices']);
     assert.equal(d.debtors, null);
     assert.equal(typeof d.totalBalanceCents, 'number');
@@ -132,7 +134,7 @@ describe('dashboard resiliente por fonte', () => {
     assert.ok(Array.isArray(d.upcoming));
   });
   it('sem movimentos: saldo e resultado indisponíveis (null), resto intacto', async () => {
-    const d = await silent(() => loadDashboard(uid, ioWith(['incomes'])));
+    const d = await silent(() => loadDashboard(uid, ioWith(['incomes:received'])));
     assert.deepEqual(d.failed, ['movements']);
     assert.equal(d.totalBalanceCents, null);
     assert.equal(d.result, null);
@@ -425,3 +427,70 @@ describe('metas vinculadas a conta (VF-2-03o)', () => {
     assert.equal((await registerGoalTransaction(uid, 'g1', 'deposit', raw, legacy.io)).ok, true);
   });
 });
+
+describe('dashboard enriquecido (VF-2-03q)', () => {
+  it('previsto do mês = realizado + pendentes, sem contar o mesmo lançamento duas vezes', () => {
+    const f = monthForecast({ incomeCents: 100000, expenseCents: 30000 },
+      [{ status: 'pending', amountCents: 20000 }, { status: 'received', amountCents: 999 }],
+      [{ status: 'pending', amountCents: 5000 }, { status: 'paid', amountCents: 777 }, { status: 'cancelled', amountCents: 1 }]);
+    assert.deepEqual(f, { incomeCents: 20000, expenseCents: 5000, forecastResultCents: (100000 + 20000) - (30000 + 5000) });
+  });
+  it('faturas do mês (aberta pelas parcelas, fechada/paga pelo gravado; canceladas fora) e limite só de cartões ativos', () => {
+    const cards = [{ id: 'c1', status: 'active', limitCents: 100000 }, { id: 'c2', status: 'blocked', limitCents: 50000 }];
+    const invoices = [
+      { id: 'i1', cardId: 'c1', referenceMonth: '2026-11', status: 'open' },
+      { id: 'i2', cardId: 'c1', referenceMonth: '2026-11', status: 'closed', totalCents: 7000 },
+      { id: 'i3', cardId: 'c1', referenceMonth: '2026-11', status: 'paid', totalCents: 3000, paidCents: 3000, accountId: 'a' },
+      { id: 'i4', cardId: 'c1', referenceMonth: '2026-11', status: 'cancelled' },
+      { id: 'i5', cardId: 'c1', referenceMonth: '2026-12', status: 'open' },
+    ];
+    const purchases = [
+      { cardId: 'c1', invoiceId: 'i1', amountCents: 10000 }, { cardId: 'c1', invoiceId: 'i2', amountCents: 7000 },
+      { cardId: 'c1', invoiceId: 'i3', amountCents: 3000 }, { cardId: 'c1', invoiceId: 'i5', amountCents: 4000 }, { cardId: 'c2', invoiceId: 'x', amountCents: 9999 },
+    ];
+    const s = cardInvoicesSummary({ cards, invoices, purchases, month: '2026-11' });
+    assert.deepEqual(s, { count: 3, openCents: 10000, closedCents: 7000, paidCents: 3000, dueCents: 17000, limitCents: 100000, usedCents: 21000, availableCents: 79000 });
+    // fatura paga libera limite: usado = 10000 + 7000 + 4000 (i3 paga fora)
+  });
+  it('loadDashboard: saldo livre × vinculado a metas, previsto, faturas do mês, a receber no mês; mês selecionável', async () => {
+    const tables = {
+      accounts: [{ id: 'a1', status: 'active', initialBalanceCents: 100000 }, { id: 'a2', status: 'active', initialBalanceCents: 40000 }],
+      goals: [{ id: 'g1', accountId: 'a2', targetCents: 30000, status: 'active' }],
+      incomes: [{ status: 'pending', amountCents: 20000, expectedDate: '2026-12-05' }],
+      expenses: [{ status: 'pending', amountCents: 5000, dueDate: '2026-12-10' }],
+      creditCards: [{ id: 'c1', status: 'active', limitCents: 100000 }],
+      invoices: [{ id: 'i1', cardId: 'c1', referenceMonth: '2026-12', status: 'open' }, { id: 'i0', cardId: 'c1', referenceMonth: '2026-12', status: 'paid', accountId: 'a1', paidCents: 1000 }],
+      cardPurchases: [{ cardId: 'c1', invoiceId: 'i1', amountCents: 8000 }],
+      debtors: [{ id: 'd1', status: 'open', lentCents: 50000, receivedCents: 0 }],
+    };
+    const calls = [];
+    const io = {
+      now: () => new Date('2026-11-19T12:00:00Z'), month: '2026-12',
+      list: async (u, c, opts = {}) => { calls.push([c, opts]); return tables[c] ?? []; },
+    };
+    const d = await loadDashboard(uid, io);
+    assert.equal(d.month, '2026-12');
+    assert.equal(d.isCurrentMonth, false);
+    assert.deepEqual(d.failed, []);
+    assert.equal(d.totalBalanceCents, 100000 + 40000 - 1000); // fatura paga debita a conta a1
+    assert.equal(d.linkedGoalsCents, 30000); // meta na caixinha a2 (saldo 40000, alvo 30000)
+    assert.equal(d.freeBalanceCents, d.totalBalanceCents - 30000);
+    assert.deepEqual(d.forecast, { incomeCents: 20000, expenseCents: 5000, forecastResultCents: 15000 });
+    assert.equal(d.cardInvoices.openCents, 8000);
+    assert.equal(d.cardInvoices.paidCents, 1000);
+    assert.equal(d.cardInvoices.usedCents, 8000);
+    assert.equal(d.debtors.pendingCents, 50000);
+    assert.equal(typeof d.debtors.monthDueCents, 'number');
+    const pend = calls.find(([c, o]) => c === 'expenses' && o.where?.[1]?.[0] === 'dueDate' && o.where[1][1] === '>=' && o.where[2]);
+    assert.deepEqual(pend[1].where, [['status', '==', 'pending'], ['dueDate', '>=', '2026-12-01'], ['dueDate', '<=', '2026-12-31']]); // índice status+dueDate
+  });
+  it('falha de uma nova fonte não derruba as outras', async () => {
+    const d = await silentRun(() => loadDashboard(uid, { now: () => new Date('2026-11-19T12:00:00Z'), list: async (u, c) => { if (c === 'creditCards' || c === 'goals') throw Object.assign(new Error('x'), { code: 'permission-denied' }); return c === 'accounts' ? [{ id: 'a', status: 'active', initialBalanceCents: 100 }] : []; } }));
+    assert.deepEqual(d.failed.sort(), ['cardInvoices', 'goals']);
+    assert.equal(d.cardInvoices, null);
+    assert.equal(d.freeBalanceCents, null);
+    assert.equal(d.totalBalanceCents, 100);
+    assert.ok(d.forecast);
+  });
+});
+async function silentRun(fn) { const orig = console.error; console.error = () => {}; try { return await fn(); } finally { console.error = orig; } }

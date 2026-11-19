@@ -17,12 +17,15 @@ export function toDate(value) {
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
- * Campos de data gravados como Timestamp: `date` e qualquer `*Date` (expectedDate,
- * dueDate, loanDate…). createdAt/updatedAt são do servidor e ficam de fora.
- * Texto livre (description, notes…) nunca é convertido, mesmo que pareça uma data.
+ * Campos de data gravados como Timestamp: `date`, qualquer `*Date` (expectedDate, dueDate, loanDate…)
+ * e as exceções declaradas em `DATE_FIELD_EXCEPTIONS` (`deadline` de metas, `paidAt` de faturas — VF-2-03q).
+ * createdAt/updatedAt são do servidor e ficam de fora. Texto livre (description, notes…) nunca é
+ * convertido. Toda entrada de `SCHEMAS[*].dateFields` DEVE ser reconhecida aqui (há teste): `deadline`
+ * não era, e a meta com prazo ia como string e era negada pelas Rules (`permission-denied`).
  */
+const DATE_FIELD_EXCEPTIONS = Object.freeze(['deadline', 'paidAt']);
 export function isDateFieldName(key) {
-  return key === 'date' || /Date$/.test(key);
+  return key === 'date' || /Date$/.test(key) || DATE_FIELD_EXCEPTIONS.includes(key);
 }
 
 /** "YYYY-MM-DD" de calendário real → Date; caso contrário null. Puro. */

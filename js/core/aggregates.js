@@ -153,3 +153,20 @@ export function toCsv(rows = [], columns = []) {
   for (const row of rows) lines.push(columns.map((c) => escape(row[c.key])).join(';'));
   return lines.join('\r\n');
 }
+
+/**
+ * Previsto do mês (VF-2-03q) — puro. `pendingIncomes`/`pendingExpenses`: lançamentos PENDENTES com data prevista
+ * dentro do mês (o chamador consulta por intervalo); o realizado vem de `monthResult` (recebidas/pagas no mês).
+ * Sem dupla contagem: pendente e realizado são status excludentes do mesmo lançamento.
+ * Retorna { incomeCents, expenseCents } do pendente e { forecastResultCents } = realizado + pendente.
+ */
+export function monthForecast(result = { incomeCents: 0, expenseCents: 0 }, pendingIncomes = [], pendingExpenses = []) {
+  const sum = (rows, status) => rows.reduce((t, r) => (r?.status === status ? t + cents(r.amountCents) : t), 0);
+  const incomeCents = sum(pendingIncomes, 'pending');
+  const expenseCents = sum(pendingExpenses, 'pending');
+  return {
+    incomeCents,
+    expenseCents,
+    forecastResultCents: (result.incomeCents + incomeCents) - (result.expenseCents + expenseCents),
+  };
+}

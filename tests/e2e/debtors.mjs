@@ -139,6 +139,44 @@ try {
   assert.match(after, /Geladeira[^\n]*Pendente/); // compras de cartão intactas
   assert.equal(await page.getByRole('button', { name: /Quitar dívida Moto/ }).count(), 0);
 
+  log('VF-2-03p: pagar fatura com conta bancária e cancelar fatura vazia (modal Faturas e compras)');
+  const seeded2 = await page.evaluate(async () => {
+    const { listCards } = await import('/js/services/creditCards.js');
+    const { create } = await import('/js/services/firestore.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const uid = auth.currentUser.uid;
+    const [card] = await listCards(uid);
+    await create(uid, 'invoices', { cardId: card.id, referenceMonth: '2031-01', dueDate: '2031-01-17', status: 'open' }, `${card.id}_2031-01`);
+    return card.id;
+  });
+  assert.ok(seeded2);
+  await page.goto(`${app.base}/pages/cartoes.html`);
+  await page.waitForSelector('#page-content .panel');
+  await page.getByRole('button', { name: 'Faturas e compras de Cartão E2E' }).click();
+  await page.waitForSelector('.modal');
+  assert.equal(await page.getByRole('button', { name: 'Cancelar fatura 01/2031' }).count(), 1); // fatura R$ 0,00 sem compras
+  assert.equal(await page.getByRole('button', { name: 'Pagar fatura 01/2031' }).count(), 0); // zerada: não paga
+  await page.getByRole('button', { name: /Pagar fatura/ }).first().click();
+  await page.selectOption('#accountId', { label: 'Banco E2E — Corrente' });
+  await page.locator('#invoice-pay-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Fatura paga/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForSelector('.modal');
+  assert.match(await page.locator('.modal').innerText(), /Paga[^\n]*Banco E2E — Corrente/); // paga com a conta
+  await page.getByRole('button', { name: 'Cancelar fatura 01/2031' }).click();
+  await page.getByRole('button', { name: 'Cancelar fatura', exact: true }).click();
+  await page.waitForFunction(() => /Fatura cancelada/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForSelector('.modal');
+  assert.equal(await page.getByRole('button', { name: 'Cancelar fatura 01/2031' }).count(), 0);
+  await page.keyboard.press('Escape');
+
+  log('VF-2-03q: dashboard — blocos de saldo livre/vinculado, previsto, faturas do mês e devedores');
+  await page.goto(`${app.base}/pages/dashboard.html`);
+  await page.waitForSelector('#dashboard-month');
+  const dash = await page.locator('#page-content').innerText();
+  for (const re of [/Saldo total/i, /Livre/, /Vinculado a metas/, /Receitas/, /previsto/i, /Faturas a pagar/i, /Limite utilizado/i, /A receber em/i, /Total em aberto/i]) assert.match(dash, re);
+  assert.doesNotMatch(dash, /\bnull\b/);
+  assert.doesNotMatch(dash, /Não foi possível carregar:/);
+
   assert.deepEqual(app.problems, [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E devedores OK');
 } catch (error) {
