@@ -106,6 +106,7 @@ try {
   log('usuário comum: escopos administrativos indisponíveis (sem claim admin) e log traz executor/escopo');
   assert.equal(await page.locator('#mode-target, #mode-all').count(), 0);
   assert.match(await page.locator('#admin-unavailable').innerText(), /claim admin/);
+  assert.match(await page.locator('#maint-role').innerText(), /usuário comum/); // acesso aberto a qualquer autenticado; escopo = próprio uid
   assert.match(await logText('clean-log'), /Executor \(adminUid\): \S+ · escopo: own/);
   assert.match(await logText('clean-log'), /Auditoria-resumo gravada no log do executor/);
 
@@ -186,6 +187,7 @@ try {
   await page.waitForSelector('#mode-target'); // claim lida do token renovado: opções administrativas aparecem
   assert.equal(await page.locator('#admin-unavailable').count(), 0);
   assert.match(await page.locator('#panel-clean .notice').innerText(), /ADMINISTRADOR/);
+  assert.match(await page.locator('#maint-role').innerText(), /ADMINISTRADOR/);
   assert.deepEqual([await accountsOf(uidB), await accountsOf(uidC), await accountsOf(uidA)], [2, 1, 1]); // admin LÊ dados alheios (necessário para apagar)
 
   await page.click('#btn-detect');
@@ -218,6 +220,19 @@ try {
   assert.ok(allLog.includes(`${uidC}=`) && allLog.includes(`${uidA}=`), allLog); // por usuário
   assert.deepEqual([await accountsOf(uidB), await accountsOf(uidC), await accountsOf(uidA)], [0, 0, 0]);
   assert.match(allLog, /Auditoria-resumo gravada/);
+
+  log('acesso: link em Configurações para qualquer autenticado; sem sessão a rota exige login');
+  await mkUser([]).catch(() => null); // novo usuário comum (sem claim)
+  await page.goto(`${app.base}/pages/configuracoes.html`);
+  await page.waitForSelector('#link-manutencao');
+  await page.click('#link-manutencao');
+  await page.waitForSelector('#btn-seed');
+  assert.match(await page.locator('#maint-role').innerText(), /usuário comum/);
+  assert.equal(await page.locator('#mode-target, #mode-all').count(), 0);
+  await signOut();
+  await page.goto(`${app.base}/pages/manutencao-dados.html`);
+  await page.waitForSelector('#tab-register, #form-login, #login-email', { timeout: 15000 }); // redirecionado ao login
+  assert.equal(await page.locator('#btn-clean').count(), 0);
 
   assert.deepEqual(app.problems.filter((p) => !/permission|PERMISSION|insufficient/i.test(p)), [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E manutenção OK');

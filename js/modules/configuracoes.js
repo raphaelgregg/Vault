@@ -4,7 +4,6 @@
  */
 import { el, toast, refreshIcons } from '../core/ui.js';
 import { applyThemePreference } from '../components/theme.js';
-import { isMaintenanceAuthorized } from '../utils/maintenance-config.js';
 import { changePassword, sendResetToCurrentUser } from '../services/auth.js';
 import { hasPasswordProvider, externalProviderLabels, MIN_PASSWORD_LENGTH } from '../utils/password.js';
 import {
@@ -118,13 +117,11 @@ export async function render(container, { user }) {
       form,
     ]),
     buildPasswordPanel(user),
-    // Atalho ao painel interno (só para quem passa na trava de interface; as Rules continuam valendo).
-    ...(isMaintenanceAuthorized({ email: user?.email, hostname: location.hostname })
-      ? [el('section', { class: 'panel' }, [el('div', { class: 'panel__body' }, [
-        el('p', { class: 'card__hint', text: 'Ferramentas internas: limpeza, massa de testes e importação/exportação CSV.' }),
-        el('a', { class: 'btn btn--secondary', href: 'manutencao-dados.html', id: 'link-manutencao', text: 'Abrir manutenção de dados' }),
-      ])])]
-      : [])
+    // Atalho à manutenção de dados (qualquer usuário autenticado; ações do próprio uid).
+    el('section', { class: 'panel' }, [el('div', { class: 'panel__body' }, [
+      el('p', { class: 'card__hint', text: 'Ferramentas de dados: apagar meus dados, massa de testes e importação/exportação CSV.' }),
+      el('a', { class: 'btn btn--secondary', href: 'manutencao-dados.html', id: 'link-manutencao', text: 'Abrir manutenção de dados' }),
+    ])])
   );
   refreshIcons();
 }

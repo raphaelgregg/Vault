@@ -1,11 +1,12 @@
 /**
  * Manutenção de dados (VF-2-03u): limpeza, massa de testes e importação/exportação CSV. Rota dedicada
- * `/manutencao-dados`, liberada só em ambiente local/emulador ou para e-mails de `maintenance-config.js`
- * (trava de interface; a segurança real são as Rules por uid). Toda ação destrutiva exige confirmação digitada.
+ * `/manutencao-dados`, aberta a QUALQUER usuário autenticado (ações pessoais, restritas ao próprio uid pelas Rules);
+ * os escopos "usuário específico" e "banco inteiro" só aparecem com a claim `admin === true`. Toda ação destrutiva
+ * exige confirmação digitada.
  */
 import { el, $, toast, refreshIcons } from '../core/ui.js';
 import { field, mount, emptyBlock } from '../components/form-kit.js';
-import { isMaintenanceAuthorized, CONFIRM_PHRASES } from '../utils/maintenance-config.js';
+import { canAccessMaintenance, CONFIRM_PHRASES } from '../utils/maintenance-config.js';
 import { clearUserData, clearScope, discoverUsers, isAdminUser, SCOPES } from '../services/maintenance.js';
 import { seedFullTestSuite, MAX_VOLUME } from '../services/seed.js';
 import {
@@ -47,9 +48,9 @@ function makeLog(id) {
 
 export async function render(container, ctx) {
   user = ctx.user;
-  if (!isMaintenanceAuthorized({ email: user?.email, hostname: location.hostname })) {
+  if (!canAccessMaintenance(user)) {
     mount(container, el('section', { class: 'panel' }, [
-      el('div', { class: 'panel__body' }, [emptyBlock('lock', 'Acesso restrito', 'O painel de manutenção só está disponível em ambiente local/emulador ou para usuários autorizados em js/utils/maintenance-config.js.')]),
+      el('div', { class: 'panel__body' }, [emptyBlock('lock', 'Sessão necessária', 'Entre na sua conta para acessar a manutenção de dados.')]),
     ]));
     refreshIcons();
     return;
@@ -261,7 +262,7 @@ export async function render(container, ctx) {
   ]);
 
   mount(container,
-    el('section', { class: 'panel' }, [el('div', { class: 'panel__header' }, [el('div', {}, [el('h2', { text: 'Manutenção de dados' }), el('p', { class: 'card__hint', text: 'Painel interno: limpeza, massa de testes e importação/migração CSV. Afeta apenas o usuário autenticado.' })])])]),
+    el('section', { class: 'panel' }, [el('div', { class: 'panel__header' }, [el('div', {}, [el('h2', { text: 'Manutenção de dados' }), el('p', { class: 'card__hint', text: 'Limpeza, massa de testes e importação/exportação CSV.' }), el('p', { class: 'card__hint', id: 'maint-role', text: admin ? 'Seu acesso: ADMINISTRADOR (claim admin) — além dos seus dados, pode limpar um usuário específico ou todo o banco.' : 'Seu acesso: usuário comum — todas as ações valem apenas para os seus próprios dados.' })])])]),
     cleanPanel, seedPanel, importPanel);
   refreshIcons();
 }

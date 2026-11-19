@@ -8,7 +8,8 @@ import { mapImportRow, resolveRef, IMPORT_ENTITIES, IMPORT_ENTITY_KEYS, MAX_IMPO
 import { dryRunImport, applyImport, templateCsv, exportCsv, exportAllCsv, loadImportContext } from '../../js/services/importer.js';
 import { makeZip, crc32 } from '../../js/utils/zip.js';
 import { clearCollection, clearUserData, clearScope, clearAllUsersData, discoverUsers, isAdminUser, SCOPES, DOMAIN_COLLECTIONS, BATCH_LIMIT } from '../../js/services/maintenance.js';
-import { isMaintenanceAuthorized, CONFIRM_PHRASES, MAINTENANCE_ALLOWED_EMAILS } from '../../js/utils/maintenance-config.js';
+import { canAccessMaintenance, CONFIRM_PHRASES } from '../../js/utils/maintenance-config.js';
+import { readFileSync } from 'node:fs';
 
 const uid = 'u1';
 
@@ -286,25 +287,43 @@ describe('limpeza em lotes (≤ 500) e banco inteiro', () => {
   });
 });
 
-describe('trava de acesso e confirmações', () => {
-  it('lista de acesso: congelada, em minúsculas, com o dono; libera só ele fora de localhost (inclusive com caixa/espaços)', () => {
-    assert.equal(Object.isFrozen(MAINTENANCE_ALLOWED_EMAILS), true);
-    assert.deepEqual([...MAINTENANCE_ALLOWED_EMAILS], ['raphaelgregg@gmail.com']);
-    assert.ok(MAINTENANCE_ALLOWED_EMAILS.every((e) => e === e.trim().toLowerCase()));
-    assert.equal(isMaintenanceAuthorized({ hostname: 'vault.rgregg.com.br', email: 'raphaelgregg@gmail.com' }), true);
-    assert.equal(isMaintenanceAuthorized({ hostname: 'vault.rgregg.com.br', email: ' RaphaelGregg@Gmail.com ' }), true);
-    for (const email of ['outro@gmail.com', 'raphaelgregg@gmail.com.br', 'xraphaelgregg@gmail.com', '', undefined]) {
-      assert.equal(isMaintenanceAuthorized({ hostname: 'vault.rgregg.com.br', email }), false, String(email));
-    }
+describe('acesso: qualquer usuário autenticado; escopos administrativos só com claim (VF-2-03z)', () => {
+  it('qualquer usuário autenticado acessa a manutenção; sem sessão/uid, não', () => {
+    assert.equal(canAccessMaintenance({ uid: 'u1', email: 'qualquer@dominio.com' }), true);
+    assert.equal(canAccessMaintenance({ uid: 'u2' }), true); // sem e-mail (ex.: provedor sem e-mail) também
+    for (const bad of [null, undefined, {}, { uid: '' }, { uid: '  ' }, { uid: 5 }]) assert.equal(canAccessMaintenance(bad), false, JSON.stringify(bad));
   });
-  it('libera localhost/emulador e e-mails da lista informada; nega o resto', () => {
-    assert.equal(isMaintenanceAuthorized({ hostname: 'localhost' }), true);
-    assert.equal(isMaintenanceAuthorized({ hostname: '127.0.0.1', email: 'x@y.z' }), true);
-    assert.equal(isMaintenanceAuthorized({ hostname: 'vault.vercel.app', email: 'a@b.c' }), false);
-    assert.equal(isMaintenanceAuthorized({ hostname: 'vault.vercel.app', email: ' A@B.C ' }, ['a@b.c']), true);
-    assert.equal(isMaintenanceAuthorized({ hostname: 'vault.vercel.app' }, ['']), false);
+  it('nenhum e-mail nem lista de e-mails/host fica no bundle público de maintenance-config.js', () => {
+    const src = readFileSync(new URL('../../js/utils/maintenance-config.js', import.meta.url), 'utf8');
+    assert.doesNotMatch(src, /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}/);
+    assert.doesNotMatch(src, /ALLOWED_EMAILS|localhost|127\.0\.0\.1/);
+  });
+  it('usuário comum: escopos administrativos recusados SEM tocar no Firestore; escopo próprio permitido', async () => {
+    const touched = [];
+    const io = { list: async () => { touched.push('list'); return []; }, listGroup: async () => { touched.push('group'); return []; }, newBatch: () => ({ delete() {}, commit: async () => {} }), userDoc: () => ({}), docAtPath: () => ({}), writeAudit: async () => ({ ok: true }) };
+    for (const scope of [SCOPES.TARGET, SCOPES.ALL]) {
+      const r = await clearScope({ scope, adminUid: 'comum', targetUid: 'outro', admin: false, io });
+      assert.equal(r.ok, false, scope);
+      assert.match(r.error, /claim/);
+    }
+    assert.deepEqual(touched, []);
+    const own = await clearScope({ scope: SCOPES.OWN, adminUid: 'comum', admin: false, io });
+    assert.equal(own.scope, 'own');
+    assert.ok(touched.length > 0); // só o próprio uid é consultado
+  });
+  it('Rules coerentes com a separação: isAdmin exige claim booleana; perfil/configurações/auditLog nunca usam isAdmin', () => {
+    const rules = readFileSync(new URL('../../firestore.rules', import.meta.url), 'utf8');
+    assert.match(rules, /function isAdmin\(\) \{\s*return signedIn\(\) && request\.auth\.token\.admin == true;\s*\}/);
+    for (const coll of ['profile', 'settings', 'auditLog']) {
+      const block = rules.match(new RegExp(`match /users/\\{userId\\}/${coll}/\\{\\w+\\} \\{[\\s\\S]*?\\n    \\}\\n`))?.[0] ?? '';
+      assert.ok(block.length > 0, coll);
+      assert.doesNotMatch(block, /isAdmin\(\)/, coll);
+    }
+    assert.doesNotMatch(rules, /allow (read|write|create|update|delete)[^;]*if (true|request\.auth != null)\s*;/);
+  });
+  it('frases de confirmação por escopo', () => {
     assert.deepEqual(Object.keys(CONFIRM_PHRASES).sort(), ['database', 'reset', 'target', 'user']);
-    assert.equal(CONFIRM_PHRASES.database, 'LIMPAR BANCO INTEIRO');
+    assert.deepEqual([CONFIRM_PHRASES.user, CONFIRM_PHRASES.target, CONFIRM_PHRASES.database], ['LIMPAR MEUS DADOS', 'LIMPAR USUARIO ALVO', 'LIMPAR BANCO INTEIRO']);
   });
 });
 

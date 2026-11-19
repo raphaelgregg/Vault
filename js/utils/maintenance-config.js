@@ -1,19 +1,12 @@
 /**
- * Acesso ao painel de manutenção (VF-2-03u). É uma TRAVA DE INTERFACE, não segurança: a segurança real são as
- * Firestore Rules (cada usuário só enxerga/altera `users/{uid}/…` do próprio uid). Libera: (a) ambiente local /
- * emulador (localhost, 127.0.0.1) e (b) e-mails da lista abaixo (minúsculas). Para liberar o painel a alguém, o dono
- * inclui o e-mail aqui (nunca e-mail de terceiros). ATENÇÃO: este arquivo é servido ao navegador — o e-mail é público.
+ * Acesso ao painel de manutenção (VF-2-03z): QUALQUER usuário autenticado abre `/manutencao-dados` — sem lista de
+ * e-mails e sem checagem de host (nenhum e-mail fica no bundle público). O que cada um pode fazer é decidido por
+ * escopo, e a barreira real são as Firestore Rules:
+ *  - usuário comum: só o PRÓPRIO uid — limpar meus dados, massa de testes, importar/exportar (as Rules negam
+ *    qualquer acesso a outro uid);
+ *  - administrador (claim de token `admin === true`, definida só pelo Admin SDK): além disso vê e executa
+ *    "limpar usuário específico" e "limpar banco inteiro" (a interface esconde; as Rules exigem `isAdmin()`).
  */
-export const MAINTENANCE_ALLOWED_EMAILS = Object.freeze(['raphaelgregg@gmail.com']);
-
-const LOCAL_HOSTS = Object.freeze(['localhost', '127.0.0.1', '[::1]']);
-
-/** Puro: `hostname` e `email` vêm do chamador. */
-export function isMaintenanceAuthorized({ email, hostname } = {}, allowed = MAINTENANCE_ALLOWED_EMAILS) {
-  if (LOCAL_HOSTS.includes(String(hostname ?? '').toLowerCase())) return true;
-  const mail = String(email ?? '').trim().toLowerCase();
-  return mail !== '' && allowed.some((a) => String(a).trim().toLowerCase() === mail);
-}
 
 /** Frases de confirmação digitadas (reforço contra clique acidental). */
 export const CONFIRM_PHRASES = Object.freeze({
@@ -22,3 +15,8 @@ export const CONFIRM_PHRASES = Object.freeze({
   database: 'LIMPAR BANCO INTEIRO',
   reset: 'RESETAR E GERAR',
 });
+
+/** Puro: qualquer usuário autenticado (com `uid`) acessa o painel. Sessão ausente = sem acesso. */
+export function canAccessMaintenance(user) {
+  return Boolean(user) && typeof user.uid === 'string' && user.uid.trim() !== '';
+}

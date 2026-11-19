@@ -9,7 +9,7 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Propósito: controle financeiro pessoal (contas, receitas, despesas, transferências, categorias) por usuário.
 - Stack: HTML/CSS/JS ES Modules puro, Firebase Auth + Firestore (SDK 10.12.2 via CDN/importmap), Vercel estático, npm só para dev.
 - Maturidade: etapa 2 entregue — todos os módulos (contas, receitas, despesas, transferências, categorias, assinaturas, devedores+parcelas/recebimentos, metas, cartões/faturas, orçamentos, dashboard, relatórios) têm service e UI; pendem importação/backup, publicação e verificações em produção (ver Itens não verificados).
-- Testes (executados em 2026-11-19, Node 22): `test:unit` 429 ok · `test:rules` 79 ok (emulador) · `npm run lint` OK · `npm run test:e2e` OK (Chromium, emuladores; inclui devedores/cartão). Node 18.20.8: lint OK · `test:unit` 426 ok. CI no GitHub: runs #1/#2 falharam só no job Node 18 (corrigido; ver Histórico). Rules/índices em produção e Vercel: **não verificados** (deploy bloqueado, ver Itens não verificados).
+- Testes (executados em 2026-11-19, Node 22): `test:unit` 432 ok · `test:rules` 79 ok (emulador) · `npm run lint` OK · `npm run test:e2e` OK (Chromium, emuladores; inclui devedores/cartão). Node 18.20.8: lint OK · `test:unit` 426 ok. CI no GitHub: runs #1/#2 falharam só no job Node 18 (corrigido; ver Histórico). Rules/índices em produção e Vercel: **não verificados** (deploy bloqueado, ver Itens não verificados).
 - Lint próprio (`scripts/lint.mjs`), CI (`.github/workflows/ci.yml`, não executado no GitHub), sem build.
 
 ## Gap Analysis
@@ -196,6 +196,15 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
   - Observação: a navegação interna usa `metas.html` etc. (redirecionadas por `cleanUrls`), por isso só quem digitava a URL limpa via o 404.
   - Arquivos: vercel.json, tests/services/routes.test.mjs.
 
+- [x] **VF-2-03z — Manutenção de dados aberta a qualquer usuário autenticado; escopos administrativos só com a claim `admin`** (segurança/feature) — CONCLUÍDA 2026-11-19 (validada localmente; **`firestore.rules`, `firestore.indexes.json` e `vercel.json` NÃO alterados**).
+  - **Acesso:** removida a trava por lista de e-mails/host (`MAINTENANCE_ALLOWED_EMAILS`, `isMaintenanceAuthorized`) — `js/utils/maintenance-config.js` agora só exporta `CONFIRM_PHRASES` e `canAccessMaintenance(user)` (qualquer usuário com `uid`); **nenhum e-mail fica no bundle público** (teste varre o arquivo). `/manutencao-dados` continua exigindo sessão (`requireSession` redireciona ao login). O atalho em Configurações aparece para qualquer autenticado.
+  - **Usuário comum** (`js/modules/manutencao-dados.js`): limpar MEUS dados (`LIMPAR MEUS DADOS`), massa de testes, resetar + gerar, importar/exportar CSV — todos restritos ao próprio uid (Rules). Vê "Seu acesso: usuário comum" e o aviso de que os escopos administrativos estão indisponíveis.
+  - **Administrador** (claim `admin === true`): além disso vê e executa "Limpar usuário específico" (`LIMPAR USUARIO ALVO`) e "Limpar banco inteiro" (`LIMPAR BANCO INTEIRO`); o serviço (`clearScope`) recusa esses escopos sem a claim antes de tocar no Firestore, e as Rules exigem `isAdmin()` (`request.auth.token.admin == true`).
+  - **Consistência das Rules (verificada por teste):** `isAdmin()` com claim booleana; perfil, configurações e `auditLog` nunca usam `isAdmin`; nenhuma regra aberta. Sem mudança de Rules.
+  - **Atenção:** o e-mail do dono foi commitado em `7dfb638` (VF-2-03y+1) e continua no histórico git/bundles antigos; removê-lo do histórico exigiria reescrita (não feita). Qualquer autenticado agora pode gerar massa de testes e apagar os PRÓPRIOS dados — por desenho (escopo próprio).
+  - Testes: unitários (`tests/services/maintenance.test.mjs`: acesso, sem e-mail no bundle, recusa dos escopos admin sem tocar no Firestore, Rules coerentes) e E2E (`tests/e2e/maintenance.mjs`: usuário comum com papel exibido e sem escopos admin, link em Configurações, admin com claim, rota sem sessão exige login).
+  - Arquivos: utils/maintenance-config.js, modules/{manutencao-dados,configuracoes}.js, tests/{services/maintenance,e2e/maintenance}.
+
 ### Fase 3 — Arquitetura, qualidade e refatoração
 
 - [x] **VF-3-01 — Reduzir duplicação nos services** (Médio) — CONCLUÍDA 2026-11-18: extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
@@ -260,3 +269,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-19 — VF-2-03y concluída (rewrites sem `.html` por causa de `cleanUrls`; CSP inalterada — violações vinham da página de erro 404 da Vercel). Confirmar no preview e promover para main.
 - 2026-11-19 — VF-2-03y promovida: `3bcc413` integrado em `development` (merge) e `main` (fast-forward), com lint/unit 428/rules 79/E2E OK; `MAINTENANCE_ALLOWED_EMAILS` preservado como estava (`[]` — nenhum e-mail estava configurado nas branches). Pendente: confirmar `https://vault.rgregg.com.br/manutencao-dados` e demais rotas limpas após o deploy de `main`.
 - 2026-11-19 — Acesso ao painel `/manutencao-dados` liberado em produção: `MAINTENANCE_ALLOWED_EMAILS = ['raphaelgregg@gmail.com']` (`js/utils/maintenance-config.js:7`, minúsculas, `Object.freeze`); teste unitário cobre a lista. O arquivo é servido ao navegador, logo o e-mail é público (trava de interface; a segurança real são as Rules). Escopos administrativos continuam exigindo a claim `admin`. `firestore.rules`, índices e `vercel.json` inalterados.
+- 2026-11-19 — VF-2-03z concluída (manutenção aberta a qualquer autenticado; limpeza de usuário/banco inteiro só com claim admin; lista de e-mails removida). Promovida para development e main.
