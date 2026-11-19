@@ -224,6 +224,15 @@ export const SCHEMAS = Object.freeze({
       notes: optionalText(300),
     },
   },
+  // Orçamentos (VF-2-03e) — espelha firestore.rules `budgets`. Gasto/restante são derivados.
+  budgets: {
+    dateFields: [],
+    fields: {
+      categoryId: refField(true, ['expense', 'both']),
+      month: monthKey(),
+      limitCents: money(),
+    },
+  },
   // Cartões (VF-2-03d) — espelha firestore.rules `creditCards`.
   creditCards: {
     dateFields: [],
@@ -289,6 +298,7 @@ export const REF_FIELDS = Object.freeze({
   transfers: ['fromAccountId', 'toAccountId'],
   subscriptions: ['accountId', 'categoryId'],
   debtors: [],
+  budgets: ['categoryId'],
   creditCards: ['accountId'],
   cardPurchases: ['cardId', 'categoryId', 'invoiceId'],
   invoices: ['cardId'],

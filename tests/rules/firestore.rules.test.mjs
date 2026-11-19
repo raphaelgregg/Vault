@@ -800,3 +800,37 @@ describe('Cartões, compras e faturas (VF-2-03d)', () => {
   });
 });
 
+describe('Orçamentos (VF-2-03e)', () => {
+  const budgetDoc = (db, id = 'b1') => doc(db, 'users', ALICE, 'budgets', id);
+  const catDoc = (db) => doc(db, 'users', ALICE, 'categories', 'cat1');
+  // Payload equivalente ao gravado por js/services/budgets.js.
+  const budget = (o = {}) => ({ categoryId: 'cat1', month: '2026-11', limitCents: 50000, createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...o });
+  async function seed() {
+    const db = asUser(ALICE);
+    await assertSucceeds(setDoc(catDoc(db), category));
+    return db;
+  }
+
+  it('cria, edita só o limite (patch) e exclui', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(budgetDoc(db), budget()));
+    await assertSucceeds(updateDoc(budgetDoc(db), { limitCents: 80000, updatedAt: serverTimestamp() }));
+    await assertSucceeds(deleteDoc(budgetDoc(db)));
+  });
+
+  it('nega limite <= 0/fracionário, mês inválido, categoria inexistente e campo extra', async () => {
+    const db = await seed();
+    for (const bad of [{ limitCents: 0 }, { limitCents: 10.5 }, { month: '2026-13' }, { month: '2026-1' }, { month: 202611 }, { categoryId: 'zzz' }, { extra: 1 }]) {
+      await assertFails(setDoc(budgetDoc(db, 'b9'), budget(bad)));
+    }
+  });
+
+  it('isolamento: outro usuário e anônimo negados; createdAt imutável', async () => {
+    const db = await seed();
+    await assertSucceeds(setDoc(budgetDoc(db), budget()));
+    await assertFails(updateDoc(budgetDoc(db), { createdAt: new Date('2000-01-01'), updatedAt: serverTimestamp() }));
+    await assertFails(getDoc(budgetDoc(asUser(BOB))));
+    await assertFails(getDoc(budgetDoc(asAnonymous())));
+  });
+});
+

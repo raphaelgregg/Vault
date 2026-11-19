@@ -62,3 +62,28 @@ export function currentMonthKey(date = new Date()) {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   return `${date.getFullYear()}-${month}`;
 }
+
+const MONTH_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;
+
+/** "YYYY-MM" → { start: "YYYY-MM-01", end: "YYYY-MM-<último dia>" }; null se inválido. Puro. */
+export function monthBounds(month) {
+  const m = MONTH_RE.exec(month ?? '');
+  if (!m) return null;
+  const last = new Date(Date.UTC(Number(m[1]), Number(m[2]), 0, 12)).getUTCDate();
+  return { start: `${month}-01`, end: `${month}-${String(last).padStart(2, '0')}` };
+}
+
+/** Lista "YYYY-MM" de `from` a `to` (inclusive, máx. 120); [] se inválido ou invertido. Puro. */
+export function monthsBetween(from, to) {
+  if (!MONTH_RE.test(from ?? '') || !MONTH_RE.test(to ?? '') || from > to) return [];
+  const out = [];
+  let [y, m] = from.split('-').map(Number);
+  while (out.length < 120) {
+    const key = `${y}-${String(m).padStart(2, '0')}`;
+    out.push(key);
+    if (key === to) break;
+    m += 1;
+    if (m > 12) { m = 1; y += 1; }
+  }
+  return out;
+}

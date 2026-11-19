@@ -69,13 +69,22 @@ export async function getById(uid, collectionName, docId) {
 }
 
 /**
+ * Valor de filtro: em campos de data, "YYYY-MM-DD" vira Timestamp (meio-dia UTC), igual à gravação —
+ * assim `where: [['dueDate', '>=', '2026-11-01']]` compara com os dados reais.
+ */
+export function toWhereValue(field, value) {
+  if (typeof value !== 'string' || !isDateFieldName(field)) return value;
+  return toFirestoreData({ [field]: value })[field];
+}
+
+/**
  * Lista documentos com filtros simples.
  * @param {object} options { where: [[campo, op, valor]], orderBy: [campo, 'asc'|'desc'], limit: number }
  */
 export async function list(uid, collectionName, options = {}) {
   const constraints = [];
   for (const [field, op, value] of options.where ?? []) {
-    constraints.push(where(field, op, value));
+    constraints.push(where(field, op, toWhereValue(field, value)));
   }
   if (options.orderBy) {
     const [field, direction = 'asc'] = options.orderBy;
@@ -115,7 +124,7 @@ export async function remove(uid, collectionName, docId) {
 export async function count(uid, collectionName, options = {}) {
   const constraints = [];
   for (const [field, op, value] of options.where ?? []) {
-    constraints.push(where(field, op, value));
+    constraints.push(where(field, op, toWhereValue(field, value)));
   }
   const snapshot = await getCountFromServer(
     query(userCollection(uid, collectionName), ...constraints)
