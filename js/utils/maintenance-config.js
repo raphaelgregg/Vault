@@ -14,6 +14,8 @@ export const CONFIRM_PHRASES = Object.freeze({
   target: 'LIMPAR USUARIO ALVO',
   database: 'LIMPAR BANCO INTEIRO',
   reset: 'RESETAR E GERAR',
+  grantAdmin: 'PROMOVER ADMIN',
+  revokeAdmin: 'REVOGAR ADMIN',
 });
 
 /** Puro: qualquer usuário autenticado (com `uid`) acessa o painel. Sessão ausente = sem acesso. */

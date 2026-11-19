@@ -353,6 +353,44 @@ describe('Separação de privilégios: usuário comum × administrador (VF-2-03w
   });
 });
 
+describe('Promoção de administradores (VF-2-03aa): claims só no servidor; Rules sem caminho de auto-promoção', () => {
+  const ADMIN = 'root-uid';
+  const asAdmin = () => testEnv.authenticatedContext(ADMIN, { admin: true }).firestore();
+  const stamps = () => ({ createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+  const grantAudit = (actor, target = 'alvo-uid') => ({
+    action: 'maintenance_admin_grant', entity: 'maintenance', entityId: target,
+    after: { adminUid: actor, targetUid: target, targetEmail: 'alvo@x.com', admin: true, previousAdmin: false }, actorUid: actor, createdAt: serverTimestamp(),
+  });
+
+  it('auditoria da promoção: o ADMIN grava no PRÓPRIO log; não grava no log de outro nem em nome de outro; é imutável', async () => {
+    const admin = asAdmin();
+    const ref = await assertSucceeds(addDoc(collection(admin, 'users', ADMIN, 'auditLog'), grantAudit(ADMIN)));
+    await assertFails(addDoc(collection(admin, 'users', BOB, 'auditLog'), grantAudit(ADMIN))); // log alheio
+    await assertFails(addDoc(collection(admin, 'users', ADMIN, 'auditLog'), grantAudit(BOB))); // actorUid forjado
+    await assertFails(updateDoc(ref, { action: 'x' }));
+    await assertFails(deleteDoc(ref));
+  });
+
+  it('usuário comum NÃO tem caminho no Firestore para virar admin: nem coleção de admins, nem campo `admin` no perfil/configurações', async () => {
+    const alice = asUser(ALICE);
+    await assertFails(setDoc(doc(alice, 'admins', ALICE), { admin: true }));
+    await assertFails(setDoc(doc(alice, 'users', ALICE, 'admins', 'x'), { admin: true, ...stamps() }));
+    await assertFails(setDoc(doc(alice, 'users', ALICE, 'claims', 'x'), { admin: true }));
+    const profile = { name: 'Ana', email: 'ana@exemplo.com', currency: 'BRL', locale: 'pt-BR', ...stamps() };
+    await assertSucceeds(setDoc(doc(alice, 'users', ALICE, 'profile', 'main'), profile)); // perfil válido: ok
+    await assertFails(setDoc(doc(alice, 'users', ALICE, 'profile', 'main'), { ...profile, admin: true })); // campo extra: negado
+    await assertFails(setDoc(doc(alice, 'users', ALICE, 'settings', 'main'), { theme: 'dark', admin: true, ...stamps() }));
+  });
+
+  it('claim admin NÃO é concedida por documento: admin do token não cria/edita coleções de promoção e usuário comum não finge ser admin', async () => {
+    const admin = asAdmin();
+    await assertFails(setDoc(doc(admin, 'admins', 'alvo-uid'), { admin: true })); // nem o admin promove via Firestore
+    const fake = testEnv.authenticatedContext('falso-uid', { admin: 'true', role: 'admin' }).firestore();
+    await assertFails(getDocs(collection(fake, 'users', BOB, 'accounts')));
+    await assertFails(deleteDoc(doc(fake, 'users', BOB, 'accounts', 'acc-bob')));
+  });
+});
+
 describe('auditLog imutável', () => {
   it('permite leitura do próprio log', async () => {
     const db = asUser(ALICE);

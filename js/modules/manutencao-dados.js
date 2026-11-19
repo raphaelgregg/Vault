@@ -7,6 +7,7 @@
 import { el, $, toast, refreshIcons } from '../core/ui.js';
 import { field, mount, emptyBlock } from '../components/form-kit.js';
 import { canAccessMaintenance, CONFIRM_PHRASES } from '../utils/maintenance-config.js';
+import { setAdminClaim, parseAdminTarget } from '../services/adminClaims.js';
 import { clearUserData, clearScope, discoverUsers, isAdminUser, SCOPES } from '../services/maintenance.js';
 import { seedFullTestSuite, MAX_VOLUME } from '../services/seed.js';
 import {
@@ -130,6 +131,45 @@ export async function render(container, ctx) {
       cleanLog.box,
     ]),
   ]);
+
+  // ---------------- Administradores (só com a claim admin) ----------------
+  let adminPanel = null;
+  if (admin) {
+    const adminTarget = el('input', { type: 'text', id: 'admin-target-input', autocomplete: 'off', placeholder: 'uid ou e-mail do usuário', maxlength: 128 });
+    const adminAction = el('select', { id: 'admin-action', 'aria-label': 'Ação' }, [
+      el('option', { value: 'grant' }, 'Tornar administrador'),
+      el('option', { value: 'revoke' }, 'Revogar administrador'),
+    ]);
+    const adminPhrase = el('input', { type: 'text', id: 'admin-phrase', autocomplete: 'off' });
+    const adminResult = el('div', { id: 'admin-result', class: 'card__hint', role: 'status' });
+    const adminBtn = el('button', { type: 'button', id: 'btn-admin-claim', class: 'btn btn--danger', text: 'Aplicar' });
+    const phraseFor = () => (adminAction.value === 'revoke' ? CONFIRM_PHRASES.revokeAdmin : CONFIRM_PHRASES.grantAdmin);
+    const refreshPhrase = () => { adminPhrase.placeholder = `Digite: ${phraseFor()}`; };
+    adminAction.addEventListener('change', refreshPhrase);
+    refreshPhrase();
+    adminBtn.addEventListener('click', guard(adminBtn, async () => {
+      const parsed = parseAdminTarget(adminTarget.value);
+      if (!parsed.ok) { adminResult.textContent = parsed.error; return; }
+      if (adminPhrase.value.trim() !== phraseFor()) { toast(`Confirmação inválida. Digite exatamente: ${phraseFor()}`, 5000); return; }
+      adminResult.textContent = 'Aplicando…';
+      const res = await setAdminClaim(user, { target: parsed.target, admin: adminAction.value === 'grant' });
+      if (!res.ok) { adminResult.textContent = `Falha: ${res.error}`; toast(res.error, 6000); return; }
+      adminResult.textContent = `${res.admin ? 'PROMOVIDO' : 'REVOGADO'}: ${res.target.email ?? res.target.uid} (uid ${res.target.uid}). ${res.note}${res.previousAdmin === res.admin ? ' (já estava neste estado)' : ''}${res.auditError ? ` Auditoria não gravada: ${res.auditError}` : ' Ação registrada no auditLog.'}`;
+      toast(res.admin ? 'Administrador promovido.' : 'Administrador revogado.');
+      adminPhrase.value = '';
+    }));
+    adminPanel = el('section', { class: 'panel', id: 'panel-admins' }, [
+      el('div', { class: 'panel__header' }, [el('h2', { text: 'Administradores' })]),
+      el('div', { class: 'panel__body' }, [
+        el('p', { class: 'notice', role: 'alert', text: 'Concede ou retira a claim `admin` (leitura e exclusão de dados de TODOS os usuários). A alteração é feita no servidor; o usuário precisa sair e entrar de novo (ou renovar o token; até 1 hora) para valer. Você não pode revogar a si mesmo.' }),
+        field('Usuário (uid ou e-mail) *', 'admin-target-input', adminTarget),
+        field('Ação', 'admin-action', adminAction),
+        field('Confirmação digitada *', 'admin-phrase', adminPhrase),
+        adminBtn,
+        adminResult,
+      ]),
+    ]);
+  }
 
   // ---------------- Massa de testes ----------------
   const volume = el('input', { type: 'number', id: 'seed-volume', min: 0, max: MAX_VOLUME, value: 0 });
@@ -263,6 +303,6 @@ export async function render(container, ctx) {
 
   mount(container,
     el('section', { class: 'panel' }, [el('div', { class: 'panel__header' }, [el('div', {}, [el('h2', { text: 'Manutenção de dados' }), el('p', { class: 'card__hint', text: 'Limpeza, massa de testes e importação/exportação CSV.' }), el('p', { class: 'card__hint', id: 'maint-role', text: admin ? 'Seu acesso: ADMINISTRADOR (claim admin) — além dos seus dados, pode limpar um usuário específico ou todo o banco.' : 'Seu acesso: usuário comum — todas as ações valem apenas para os seus próprios dados.' })])])]),
-    cleanPanel, seedPanel, importPanel);
+    cleanPanel, adminPanel, seedPanel, importPanel);
   refreshIcons();
 }

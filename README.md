@@ -204,6 +204,21 @@ isolamento nas Rules.
 - **Limitação conhecida:** o Firebase Auth usa a chave pública do projeto; abuso de cadastro
   deve ser contido por cotas e, se necessário, App Check (Fase 6).
 
+### Administradores (claim `admin`) e a função de servidor
+
+- Administrador = custom claim de token `admin == true`. **O cliente nunca grava claims**: só a função da Vercel
+  `POST /api/admin-claims` (`api/admin-claims.mjs` → `server/adminClaims.mjs`) altera, e só a pedido de quem já é
+  administrador (validado no servidor pelo estado atual da conta, não só pelo token). Sem dependências: usa a API
+  administrativa do Identity Toolkit com uma service account.
+- Configuração (uma vez, fora do repositório): na Vercel → Settings → Environment Variables, crie
+  `FIREBASE_SERVICE_ACCOUNT` com o JSON da service account do projeto (**secreta**, apenas Production/Preview; nunca
+  `NEXT_PUBLIC_*`, nunca no frontend). Sem ela a função responde `501 not_configured`.
+- **Primeiro administrador (bootstrap):** ninguém pode se auto-promover; defina a claim do primeiro uma única vez
+  pelo Admin SDK (`setCustomUserClaims(uid, { admin: true })`). Depois, administradores promovem/revogam outros em
+  `/manutencao-dados` (por uid ou e-mail). O usuário promovido precisa sair e entrar de novo (o token atual vale até 1 h);
+  uma revogação também só vale por completo quando o token antigo expira.
+- Cada promoção/revogação é registrada no `auditLog` do administrador que executou.
+
 ### Cotas do plano gratuito (Spark) — valores de referência
 
 | Serviço | Cota gratuita diária (referência) |

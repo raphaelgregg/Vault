@@ -322,7 +322,7 @@ describe('acesso: qualquer usuário autenticado; escopos administrativos só com
     assert.doesNotMatch(rules, /allow (read|write|create|update|delete)[^;]*if (true|request\.auth != null)\s*;/);
   });
   it('frases de confirmação por escopo', () => {
-    assert.deepEqual(Object.keys(CONFIRM_PHRASES).sort(), ['database', 'reset', 'target', 'user']);
+    assert.deepEqual(Object.keys(CONFIRM_PHRASES).sort(), ['database', 'grantAdmin', 'reset', 'revokeAdmin', 'target', 'user']);
     assert.deepEqual([CONFIRM_PHRASES.user, CONFIRM_PHRASES.target, CONFIRM_PHRASES.database], ['LIMPAR MEUS DADOS', 'LIMPAR USUARIO ALVO', 'LIMPAR BANCO INTEIRO']);
   });
 });

@@ -9,6 +9,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadPlaywright, launchApp, registerUser } from './harness.mjs';
+import { handleAdminClaims } from '../../server/adminClaims.mjs';
 
 const pw = loadPlaywright();
 if (!pw) {
@@ -158,11 +159,12 @@ try {
 
   log('administrador: claim admin (Auth emulator) — limpa um uid ALVO e depois TODOS os usuários, sem entrar nas contas');
   const signOut = () => page.evaluate(async () => { const { auth } = await import('/js/firebase/client.js'); await auth.signOut(); });
+  const creds = new Map(); // uid → { email, password }
   const mkUser = async (accountNames) => {
     await signOut();
-    await registerUser(page, app.base);
+    const login = await registerUser(page, app.base);
     await page.waitForSelector('#page-content .panel');
-    return page.evaluate(async (names) => {
+    const uid = await page.evaluate(async (names) => {
       const { createAccount } = await import('/js/services/accounts.js');
       const { auth } = await import('/js/firebase/client.js');
       const uid = auth.currentUser.uid;
@@ -172,6 +174,8 @@ try {
       }
       return uid;
     }, accountNames);
+    creds.set(uid, login);
+    return uid;
   };
   const uidB = await mkUser(['B1', 'B2']);
   const uidC = await mkUser(['C1']);
@@ -221,6 +225,86 @@ try {
   assert.deepEqual([await accountsOf(uidB), await accountsOf(uidC), await accountsOf(uidA)], [0, 0, 0]);
   assert.match(allLog, /Auditoria-resumo gravada/);
 
+  log('VF-2-03aa: função de servidor (Auth emulator) — admin promove e revoga outro usuário; comum é barrado');
+  const serverEnv = { FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099', FIREBASE_PROJECT_ID: 'demo-vault-finance', FIREBASE_WEB_API_KEY: 'emulator' };
+  await page.context().route('**/api/admin-claims', async (route) => {
+    const r = route.request();
+    const out = await handleAdminClaims({ method: r.method(), headers: r.headers(), body: r.postData() }, { env: serverEnv });
+    await route.fulfill({ status: out.status, contentType: 'application/json', body: JSON.stringify(out.body) });
+  });
+  const claimsOf = async (uid) => {
+    const res = await fetch('http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/projects/demo-vault-finance/accounts:lookup', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer owner' }, body: JSON.stringify({ localId: [uid] }),
+    });
+    return JSON.parse((await res.json()).users[0].customAttributes || '{}');
+  };
+  const auditActions = () => page.evaluate(async (u) => { const { list } = await import('/js/services/firestore.js'); return (await list(u, 'auditLog', {})).map((e) => `${e.action}:${e.entityId}`); }, uidA);
+  await page.reload();
+  await page.waitForSelector('#panel-admins');
+  assert.equal((await claimsOf(uidB)).admin, undefined);
+  await page.fill('#admin-target-input', uidB);
+  await page.fill('#admin-phrase', 'frase errada');
+  await page.click('#btn-admin-claim');
+  await page.waitForTimeout(400);
+  assert.equal((await claimsOf(uidB)).admin, undefined); // sem confirmação correta nada muda
+  await page.fill('#admin-phrase', 'PROMOVER ADMIN');
+  await page.click('#btn-admin-claim');
+  await page.waitForFunction(() => /PROMOVIDO/.test(document.querySelector('#admin-result')?.innerText ?? ''));
+  const grantText = await page.locator('#admin-result').innerText();
+  assert.match(grantText, /sair e entrar|renovar/); // aviso de renovação de token
+  assert.match(grantText, /Ação registrada no auditLog/);
+  assert.equal((await claimsOf(uidB)).admin, true);
+  assert.ok((await auditActions()).includes(`maintenance_admin_grant:${uidB}`));
+
+  // por e-mail do usuário C (preserva outras claims) e revogação
+  await page.fill('#admin-target-input', creds.get(uidC).email.toUpperCase());
+  await page.fill('#admin-phrase', 'PROMOVER ADMIN');
+  await page.click('#btn-admin-claim');
+  await page.waitForFunction(() => /PROMOVIDO[^\n]*@/.test(document.querySelector('#admin-result')?.innerText ?? ''));
+  assert.equal((await claimsOf(uidC)).admin, true);
+  await page.selectOption('#admin-action', 'revoke');
+  await page.fill('#admin-target-input', uidC);
+  await page.fill('#admin-phrase', 'REVOGAR ADMIN');
+  await page.click('#btn-admin-claim');
+  await page.waitForFunction(() => /REVOGADO/.test(document.querySelector('#admin-result')?.innerText ?? ''));
+  assert.equal((await claimsOf(uidC)).admin, undefined);
+  assert.ok((await auditActions()).includes(`maintenance_admin_revoke:${uidC}`));
+
+  // auto-revogação e alvo inexistente: erros claros e nada muda
+  await page.fill('#admin-target-input', uidA);
+  await page.fill('#admin-phrase', 'REVOGAR ADMIN');
+  await page.click('#btn-admin-claim');
+  await page.waitForFunction(() => /própria claim/.test(document.querySelector('#admin-result')?.innerText ?? ''));
+  assert.equal((await claimsOf(uidA)).admin, true);
+  await page.fill('#admin-target-input', 'ninguem@exemplo.com');
+  await page.fill('#admin-phrase', 'REVOGAR ADMIN');
+  await page.click('#btn-admin-claim');
+  await page.waitForFunction(() => /não encontrado/.test(document.querySelector('#admin-result')?.innerText ?? ''));
+
+  // o promovido (B) só vê a área administrativa após renovar o token (novo login)
+  await signOut();
+  await page.goto(`${app.base}/?mode=demo`);
+  await page.evaluate(async ([mail, pwd]) => { const { signIn } = await import('/js/services/auth.js'); await signIn(mail, pwd); }, [creds.get(uidB).email, creds.get(uidB).password]);
+  await page.goto(`${app.base}/pages/manutencao-dados.html`);
+  await page.waitForSelector('#mode-target');
+  assert.match(await page.locator('#maint-role').innerText(), /ADMINISTRADOR/);
+  assert.equal(await page.locator('#panel-admins').count(), 1);
+
+  // usuário comum: sem painel e a chamada direta à função é barrada (403) sem alterar claims
+  const commonUid = await mkUser([]);
+  await page.goto(`${app.base}/pages/manutencao-dados.html`);
+  await page.waitForSelector('#btn-seed');
+  assert.equal(await page.locator('#panel-admins, #admin-target-input').count(), 0);
+  const attempt = await page.evaluate(async (target) => {
+    const { auth } = await import('/js/firebase/client.js');
+    const res = await fetch('/api/admin-claims', { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${await auth.currentUser.getIdToken()}` }, body: JSON.stringify({ target, admin: true }) });
+    return [res.status, (await res.json()).error];
+  }, commonUid);
+  assert.deepEqual(attempt, [403, 'forbidden']);
+  assert.equal((await claimsOf(commonUid)).admin, undefined); // não se auto-promoveu
+  const noToken = await page.evaluate(async (target) => { const res = await fetch('/api/admin-claims', { method: 'POST', body: JSON.stringify({ target, admin: true }) }); return res.status; }, commonUid);
+  assert.equal(noToken, 401);
+
   log('acesso: link em Configurações para qualquer autenticado; sem sessão a rota exige login');
   await mkUser([]).catch(() => null); // novo usuário comum (sem claim)
   await page.goto(`${app.base}/pages/configuracoes.html`);
@@ -234,7 +318,7 @@ try {
   await page.waitForSelector('#tab-register, #form-login, #login-email', { timeout: 15000 }); // redirecionado ao login
   assert.equal(await page.locator('#btn-clean').count(), 0);
 
-  assert.deepEqual(app.problems.filter((p) => !/permission|PERMISSION|insufficient/i.test(p)), [], `erros de console/página: ${app.problems.join(' | ')}`);
+  assert.deepEqual(app.problems.filter((p) => !/permission|PERMISSION|insufficient|status of (400|401|403|404)/i.test(p)), [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E manutenção OK');
 } catch (error) {
   console.error(`E2E manutenção FALHOU na etapa "${step}":`, error.message);
