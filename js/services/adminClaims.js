@@ -28,7 +28,12 @@ const ERROR_MESSAGES = {
   target_not_found: 'Usuário alvo não encontrado (confira o uid/e-mail; ele precisa ter conta).',
   self_revoke: 'Você não pode revogar a sua própria claim de administrador; peça a outro administrador.',
   invalid_body: 'Dados inválidos.',
-  not_configured: 'O servidor ainda não está configurado para promover administradores (falta FIREBASE_SERVICE_ACCOUNT na Vercel).',
+  not_configured: 'O servidor ainda não está configurado para administrar usuários (falta FIREBASE_SERVICE_ACCOUNT na Vercel).',
+  bad_service_account: 'A credencial FIREBASE_SERVICE_ACCOUNT da Vercel está em formato inválido (veja os logs da função).',
+  server_credential_failed: 'O Google recusou a credencial do servidor (veja os logs da função na Vercel).',
+  auth_unreachable: 'Não foi possível validar a sessão agora. Tente novamente.',
+  lookup_failed: 'Falha ao consultar o Firebase Auth. Tente novamente.',
+  list_failed: 'Falha ao listar os usuários. Tente novamente.',
   method_not_allowed: 'Método não permitido.',
 };
 
@@ -68,4 +73,49 @@ export async function setAdminClaim(user, { target, admin }, io = {}) {
   });
   if (audit?.ok === false) result.auditError = String(audit.error?.message ?? audit.error ?? 'falha ao gravar');
   return result;
+}
+
+/** Mensagem amigável para uma resposta de erro do servidor. */
+const failure = (response, data) => ({
+  ok: false,
+  status: response.status,
+  error: ERROR_MESSAGES[data?.error] ?? data?.message ?? `Falha na operação (HTTP ${response.status}).`,
+});
+
+/**
+ * Lista usuários e administradores (`GET /api/admin-claims`, só administrador — validado no servidor).
+ * Retorna { ok, users, total, truncated, me } ou { ok: false, error, status }. `io.fetch` injetável.
+ */
+export async function listAdminUsers(user, io = {}) {
+  if (!user?.uid || typeof user.getIdToken !== 'function') return { ok: false, error: 'Sessão necessária.' };
+  let response;
+  try {
+    const idToken = await user.getIdToken();
+    response = await (io.fetch ?? globalThis.fetch)(ADMIN_CLAIMS_ENDPOINT, { method: 'GET', headers: { authorization: `Bearer ${idToken}` } });
+  } catch {
+    return { ok: false, error: 'Sem conexão com o servidor. Tente novamente.' };
+  }
+  let data = null;
+  try { data = await response.json(); } catch { data = null; }
+  if (!response.ok || !data?.ok || !Array.isArray(data.users)) return failure(response, data);
+  return { ok: true, users: data.users, total: data.total ?? data.users.length, truncated: Boolean(data.truncated), me: data.me ?? user.uid };
+}
+
+/**
+ * Linhas da tabela de usuários (puro): administradores primeiro, depois os demais (e-mail). `action` = ação rápida:
+ * 'revoke' (admin), 'grant' (não admin); `null` para a própria conta (não se revoga) e contas desativadas.
+ */
+export function buildAdminUserRows(users = [], meUid = null) {
+  const rows = users.map((u) => ({
+    uid: u.uid,
+    email: u.email ?? null,
+    label: u.email ?? u.displayName ?? u.uid,
+    displayName: u.displayName ?? null,
+    disabled: Boolean(u.disabled),
+    admin: Boolean(u.admin),
+    isMe: u.uid === meUid,
+    action: u.uid === meUid ? null : u.admin ? 'revoke' : u.disabled ? null : 'grant',
+  }));
+  rows.sort((a, b) => Number(b.admin) - Number(a.admin) || String(a.label).localeCompare(String(b.label)));
+  return { rows, admins: rows.filter((r) => r.admin).length, others: rows.filter((r) => !r.admin).length };
 }

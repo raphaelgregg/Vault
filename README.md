@@ -212,7 +212,15 @@ isolamento nas Rules.
   administrativa do Identity Toolkit com uma service account.
 - Configuração (uma vez, fora do repositório): na Vercel → Settings → Environment Variables, crie
   `FIREBASE_SERVICE_ACCOUNT` com o JSON da service account do projeto (**secreta**, apenas Production/Preview; nunca
-  `NEXT_PUBLIC_*`, nunca no frontend). Sem ela a função responde `501 not_configured`.
+  `NEXT_PUBLIC_*`, nunca no frontend). Aceita JSON puro, JSON entre aspas ou base64; `private_key` com `\n` literal é
+  normalizada. A conta precisa do papel **Firebase Authentication Admin** (ou equivalente). Erros de configuração NÃO
+  são 401: sem a variável → `501 not_configured`; formato inválido → `500 bad_service_account`; Google recusou a
+  credencial → `502 server_credential_failed` (o motivo técnico, sem segredos, vai para os logs da função na Vercel).
+- **Por que o token é validado localmente:** a chave de API web é restrita por referenciador HTTP no Google Cloud; chamadas
+  de servidor (sem `Referer`) seriam recusadas e davam `401` mesmo com sessão válida. O servidor verifica o ID token
+  (RS256, chaves públicas do Google) e lê a claim ATUAL pela API administrativa — sem usar a chave de API.
+- `GET /api/admin-claims` lista usuários (uid, e-mail, nome, desativado, `admin`) para administradores; a tela
+  `/manutencao-dados` mostra a lista com ação rápida de promover/revogar.
 - **Primeiro administrador (bootstrap):** ninguém pode se auto-promover; defina a claim do primeiro uma única vez
   pelo Admin SDK (`setCustomUserClaims(uid, { admin: true })`). Depois, administradores promovem/revogam outros em
   `/manutencao-dados` (por uid ou e-mail). O usuário promovido precisa sair e entrar de novo (o token atual vale até 1 h);

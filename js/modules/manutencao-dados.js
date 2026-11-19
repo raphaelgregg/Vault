@@ -7,7 +7,7 @@
 import { el, $, toast, refreshIcons } from '../core/ui.js';
 import { field, mount, emptyBlock } from '../components/form-kit.js';
 import { canAccessMaintenance, CONFIRM_PHRASES } from '../utils/maintenance-config.js';
-import { setAdminClaim, parseAdminTarget } from '../services/adminClaims.js';
+import { setAdminClaim, parseAdminTarget, listAdminUsers, buildAdminUserRows } from '../services/adminClaims.js';
 import { clearUserData, clearScope, discoverUsers, isAdminUser, SCOPES } from '../services/maintenance.js';
 import { seedFullTestSuite, MAX_VOLUME } from '../services/seed.js';
 import {
@@ -147,6 +147,39 @@ export async function render(container, ctx) {
     const refreshPhrase = () => { adminPhrase.placeholder = `Digite: ${phraseFor()}`; };
     adminAction.addEventListener('change', refreshPhrase);
     refreshPhrase();
+    // Lista de usuários/administradores (GET /api/admin-claims) com ação rápida que preenche o formulário.
+    const usersBox = el('div', { id: 'admin-users' });
+    const usersSummary = el('p', { class: 'card__hint', id: 'admin-users-summary', role: 'status' });
+    const refreshBtn = el('button', { type: 'button', id: 'btn-admin-refresh', class: 'btn btn--secondary', text: 'Atualizar lista' });
+    const loadUsers = async () => {
+      usersSummary.textContent = 'Carregando usuários…';
+      const res = await listAdminUsers(user);
+      if (!res.ok) { usersSummary.textContent = `Falha ao listar: ${res.error}`; usersBox.replaceChildren(); return; }
+      const { rows, admins, others } = buildAdminUserRows(res.users, res.me);
+      usersSummary.textContent = `${admins} administrador(es) e ${others} outro(s) usuário(s)${res.truncated ? ' — lista truncada em 5.000' : ''}.`;
+      const pick = (row) => {
+        adminTarget.value = row.uid;
+        adminAction.value = row.action === 'revoke' ? 'revoke' : 'grant';
+        refreshPhrase();
+        adminPhrase.value = '';
+        adminPhrase.focus();
+        adminResult.textContent = `Alvo selecionado: ${row.label}. Digite a frase de confirmação (${phraseFor()}) e clique em Aplicar.`;
+      };
+      usersBox.replaceChildren(el('div', { class: 'table-wrap' }, [el('table', { class: 'table', id: 'admin-users-table' }, [
+        el('thead', {}, [el('tr', {}, ['Usuário', 'Nome', 'Papel', 'Situação', 'Ação'].map((h) => el('th', { text: h })))]),
+        el('tbody', {}, rows.map((row) => el('tr', { 'data-uid': row.uid, 'data-admin': String(row.admin) }, [
+          el('td', { text: `${row.label}${row.isMe ? ' (você)' : ''}` }),
+          el('td', { text: row.displayName ?? '—' }),
+          el('td', {}, [el('strong', { text: row.admin ? 'Administrador' : 'Usuário' })]),
+          el('td', { text: row.disabled ? 'Desativado' : 'Ativo' }),
+          el('td', {}, row.action
+            ? [el('button', { type: 'button', class: row.action === 'revoke' ? 'btn btn--danger' : 'btn btn--secondary', 'aria-label': `${row.action === 'revoke' ? 'Revogar admin de' : 'Promover a admin'} ${row.label}`, onClick: () => pick(row), text: row.action === 'revoke' ? 'Revogar admin' : 'Promover a admin' })]
+            : [row.isMe ? '—' : '']),
+        ]))),
+      ])]));
+    };
+    refreshBtn.addEventListener('click', guard(refreshBtn, loadUsers));
+    queueMicrotask(() => { loadUsers(); });
     adminBtn.addEventListener('click', guard(adminBtn, async () => {
       const parsed = parseAdminTarget(adminTarget.value);
       if (!parsed.ok) { adminResult.textContent = parsed.error; return; }
@@ -157,6 +190,7 @@ export async function render(container, ctx) {
       adminResult.textContent = `${res.admin ? 'PROMOVIDO' : 'REVOGADO'}: ${res.target.email ?? res.target.uid} (uid ${res.target.uid}). ${res.note}${res.previousAdmin === res.admin ? ' (já estava neste estado)' : ''}${res.auditError ? ` Auditoria não gravada: ${res.auditError}` : ' Ação registrada no auditLog.'}`;
       toast(res.admin ? 'Administrador promovido.' : 'Administrador revogado.');
       adminPhrase.value = '';
+      await loadUsers(); // lista atualizada com o novo papel
     }));
     adminPanel = el('section', { class: 'panel', id: 'panel-admins' }, [
       el('div', { class: 'panel__header' }, [el('h2', { text: 'Administradores' })]),
@@ -167,6 +201,10 @@ export async function render(container, ctx) {
         field('Confirmação digitada *', 'admin-phrase', adminPhrase),
         adminBtn,
         adminResult,
+        el('h3', { text: 'Usuários e administradores' }),
+        refreshBtn,
+        usersSummary,
+        usersBox,
       ]),
     ]);
   }

@@ -242,7 +242,17 @@ try {
   await page.reload();
   await page.waitForSelector('#panel-admins');
   assert.equal((await claimsOf(uidB)).admin, undefined);
-  await page.fill('#admin-target-input', uidB);
+  // lista de usuários/administradores (GET /api/admin-claims): administradores em destaque e ação rápida por linha
+  await page.waitForSelector('#admin-users-table tbody tr');
+  assert.match(await page.locator('#admin-users-summary').innerText(), /\d+ administrador\(es\) e \d+ outro\(s\) usuário\(s\)/);
+  assert.equal(await page.locator(`#admin-users-table tr[data-uid="${uidA}"]`).getAttribute('data-admin'), 'true');
+  assert.match(await page.locator(`#admin-users-table tr[data-uid="${uidA}"]`).innerText(), /\(você\)/);
+  assert.equal(await page.locator(`#admin-users-table tr[data-uid="${uidA}"] button`).count(), 0); // sem revogar a si mesmo
+  assert.equal(await page.locator(`#admin-users-table tr[data-uid="${uidB}"]`).getAttribute('data-admin'), 'false');
+  assert.equal(await page.locator('#admin-users-table tbody tr').first().getAttribute('data-admin'), 'true'); // admins primeiro
+  await page.click(`#admin-users-table tr[data-uid="${uidB}"] button`); // "Promover a admin": preenche o alvo
+  assert.equal(await page.inputValue('#admin-target-input'), uidB);
+  assert.equal(await page.inputValue('#admin-action'), 'grant');
   await page.fill('#admin-phrase', 'frase errada');
   await page.click('#btn-admin-claim');
   await page.waitForTimeout(400);
@@ -255,6 +265,7 @@ try {
   assert.match(grantText, /Ação registrada no auditLog/);
   assert.equal((await claimsOf(uidB)).admin, true);
   assert.ok((await auditActions()).includes(`maintenance_admin_grant:${uidB}`));
+  await page.waitForFunction((u) => document.querySelector(`#admin-users-table tr[data-uid="${u}"]`)?.getAttribute('data-admin') === 'true', uidB); // lista atualizada
 
   // por e-mail do usuário C (preserva outras claims) e revogação
   await page.fill('#admin-target-input', creds.get(uidC).email.toUpperCase());
@@ -262,8 +273,11 @@ try {
   await page.click('#btn-admin-claim');
   await page.waitForFunction(() => /PROMOVIDO[^\n]*@/.test(document.querySelector('#admin-result')?.innerText ?? ''));
   assert.equal((await claimsOf(uidC)).admin, true);
-  await page.selectOption('#admin-action', 'revoke');
-  await page.fill('#admin-target-input', uidC);
+  await page.click('#btn-admin-refresh');
+  await page.waitForFunction((u) => document.querySelector(`#admin-users-table tr[data-uid="${u}"]`)?.getAttribute('data-admin') === 'true', uidC);
+  await page.click(`#admin-users-table tr[data-uid="${uidC}"] button`); // "Revogar admin"
+  assert.equal(await page.inputValue('#admin-action'), 'revoke');
+  assert.equal(await page.inputValue('#admin-target-input'), uidC);
   await page.fill('#admin-phrase', 'REVOGAR ADMIN');
   await page.click('#btn-admin-claim');
   await page.waitForFunction(() => /REVOGADO/.test(document.querySelector('#admin-result')?.innerText ?? ''));
@@ -301,6 +315,8 @@ try {
     return [res.status, (await res.json()).error];
   }, commonUid);
   assert.deepEqual(attempt, [403, 'forbidden']);
+  const listAttempt = await page.evaluate(async () => { const { auth } = await import('/js/firebase/client.js'); const res = await fetch('/api/admin-claims', { headers: { authorization: `Bearer ${await auth.currentUser.getIdToken()}` } }); return [res.status, (await res.json()).error]; });
+  assert.deepEqual(listAttempt, [403, 'forbidden']); // comum não lista usuários
   assert.equal((await claimsOf(commonUid)).admin, undefined); // não se auto-promoveu
   const noToken = await page.evaluate(async (target) => { const res = await fetch('/api/admin-claims', { method: 'POST', body: JSON.stringify({ target, admin: true }) }); return res.status; }, commonUid);
   assert.equal(noToken, 401);

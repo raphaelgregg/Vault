@@ -1,5 +1,5 @@
 /**
- * Função da Vercel: POST /api/admin-claims — promove/revoga administradores (VF-2-03aa).
+ * Função da Vercel: /api/admin-claims — GET lista usuários/administradores; POST promove/revoga (VF-2-03aa/03ab).
  * Toda a lógica e as garantias de segurança estão em `server/adminClaims.mjs`; aqui só se adapta req/res.
  */
 import { handleAdminClaims } from '../server/adminClaims.mjs';
