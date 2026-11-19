@@ -16,6 +16,7 @@ import {
   where,
   orderBy,
   limit as limitTo,
+  startAfter,
   getCountFromServer,
   serverTimestamp,
   Timestamp,
@@ -79,7 +80,8 @@ export function toWhereValue(field, value) {
 
 /**
  * Lista documentos com filtros simples.
- * @param {object} options { where: [[campo, op, valor]], orderBy: [campo, 'asc'|'desc'], limit: number }
+ * @param {object} options { where: [[campo, op, valor]], orderBy: [campo, 'asc'|'desc'], limit: number,
+ *   startAfterId: id do último documento da página anterior (paginação por cursor; exige orderBy) }
  */
 export async function list(uid, collectionName, options = {}) {
   const constraints = [];
@@ -89,6 +91,12 @@ export async function list(uid, collectionName, options = {}) {
   if (options.orderBy) {
     const [field, direction = 'asc'] = options.orderBy;
     constraints.push(orderBy(field, direction));
+  }
+  if (options.startAfterId) {
+    // Cursor por documento (desempata datas iguais); custa 1 leitura. Documento apagado entre páginas = erro explícito.
+    const cursor = await getDoc(userDoc(uid, collectionName, options.startAfterId));
+    if (!cursor.exists()) throw new Error('Cursor de paginação inválido: o documento não existe mais. Recarregue a lista.');
+    constraints.push(startAfter(cursor));
   }
   if (options.limit) constraints.push(limitTo(options.limit));
   const snapshot = await getDocs(query(userCollection(uid, collectionName), ...constraints));

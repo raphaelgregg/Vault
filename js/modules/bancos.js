@@ -1,12 +1,15 @@
 /**
  * Bancos/Contas — Fase 3: CRUD completo integrado ao Firestore.
- * - Lista contas com saldo derivado
+ * - Lista contas (até 200); saldo atual derivado calculado sob demanda (botão), saldo inicial sempre visível
  * - Modal para criar/editar conta
  * - Validação client-side espelhando Security Rules
  * - Persistência em users/{uid}/accounts
  */
-import { el, $, $$, toast, refreshIcons } from '../core/ui.js';
+import { el, $, toast, refreshIcons } from '../core/ui.js';
 import { openModal, closeModal } from '../components/modal.js';
+import { createStatCard } from '../components/stat-card.js';
+import { formatCentsInput, clearErrors, showFormErrors as showErrors } from '../components/form-kit.js';
+import { loadBalances, READ_LIMIT } from '../services/balances.js';
 import {
   listAccounts,
   createAccount,
@@ -24,6 +27,10 @@ export const meta = { title: 'Bancos', icon: 'landmark' };
 let currentUser = null;
 let accountsCache = [];
 let categoriesCache = [];
+/** Teto de contas listadas (VF-4-03); ao atingir, a página avisa. */
+const ACCOUNT_LIST_LIMIT = 200;
+/** Saldos derivados, calculados SOB DEMANDA (lê movimentos; poupa a cota de leituras): null = não calculado. */
+let derived = null;
 
 /** Render principal do módulo. */
 export async function render(container, { user }) {
@@ -35,9 +42,18 @@ export async function render(container, { user }) {
 /** Carrega dados iniciais. */
 async function loadData() {
   [accountsCache, categoriesCache] = await Promise.all([
-    listAccounts(currentUser.uid),
+    listAccounts(currentUser.uid, { limit: ACCOUNT_LIST_LIMIT }),
     listCategories(currentUser.uid),
   ]);
+  derived = null; // dados mudaram: o saldo derivado anterior ficou obsoleto
+}
+
+/** Calcula o saldo atual derivado (receitas recebidas, despesas pagas, transferências, recebimentos, metas). */
+async function calculateBalances() {
+  const result = await loadBalances(currentUser.uid, accountsCache);
+  derived = result;
+  renderPage($('.content') || document.getElementById('page-content'));
+  if (result.truncated.length) toast('Leitura limitada: o saldo pode estar incompleto.', 6000);
 }
 
 /** Renderiza a página completa. */
@@ -54,6 +70,13 @@ function renderPage(container) {
       el('div', { class: 'topbar__spacer' }),
       el('button', {
         type: 'button',
+        class: 'btn btn--secondary',
+        id: 'calc-balances',
+        onClick: calculateBalances,
+        text: derived ? 'Recalcular saldo atual' : 'Calcular saldo atual',
+      }),
+      el('button', {
+        type: 'button',
         class: 'btn btn--primary',
         onClick: () => openAccountModal(),
         html: '<i data-lucide="plus" aria-hidden="true"></i> Nova conta',
@@ -62,15 +85,26 @@ function renderPage(container) {
   ]);
 
   const cards = el('div', { class: 'grid grid--cards' }, [
-    createStatCard('Saldo total', formatCents(stats.totalBalance), 'wallet', 'income', 'Soma dos saldos de todas as contas ativas'),
+    createStatCard('Saldo total', formatCents(stats.totalBalance), 'wallet', 'income', derived
+      ? 'Saldo atual derivado das movimentações (contas ativas)'
+      : 'Soma dos saldos iniciais; use "Calcular saldo atual" para incluir as movimentações'),
     createStatCard('Contas ativas', String(stats.activeCount), 'landmark', null, 'Contas com status "ativo"'),
   ]);
 
   const table = createAccountsTable();
 
+  const limitNotice = accountsCache.length >= ACCOUNT_LIST_LIMIT
+    ? el('p', { class: 'notice', role: 'status', text: `Exibindo as primeiras ${ACCOUNT_LIST_LIMIT} contas (limite de leitura).` })
+    : null;
+  const balanceNotice = derived?.truncated.length
+    ? el('p', { class: 'notice', role: 'status', text: `Leitura limitada a ${READ_LIMIT} movimentos por tipo (${derived.truncated.join(', ')}): o saldo atual pode estar incompleto.` })
+    : null;
+
   const nodes = [
     header,
     cards,
+    limitNotice,
+    balanceNotice,
     el('section', { class: 'panel' }, [
       el('div', { class: 'panel__header' }, [
         el('h2', { text: 'Contas cadastradas' }),
@@ -81,27 +115,17 @@ function renderPage(container) {
     ]),
   ];
 
-  container.replaceChildren(...nodes);
+  container.replaceChildren(...nodes.filter(Boolean));
   refreshIcons();
-}
-
-/** Cria card de estatística. */
-function createStatCard(label, value, icon, tone, hint) {
-  return el('article', { class: `card${tone ? ` card--${tone}` : ''}` }, [
-    el('div', { class: 'card__icon' }, [el('i', { 'data-lucide': icon, 'aria-hidden': 'true' })]),
-    el('div', { class: 'card__content' }, [
-      el('p', { class: 'card__label', text: label }),
-      el('p', { class: 'card__value', text: value }),
-    ]),
-    hint ? el('p', { class: 'card__hint', text: hint }) : null,
-  ]);
 }
 
 /** Computa estatísticas rápidas. */
 function computeStats() {
   const activeAccounts = accountsCache.filter((a) => a.status === 'active');
-  // Saldos iniciais (sem movimentações por enquanto)
-  const totalBalance = activeAccounts.reduce((sum, acc) => sum + (Number(acc.initialBalanceCents) || 0), 0);
+  // Saldo total: derivado quando calculado sob demanda; senão, soma dos saldos iniciais.
+  const totalBalance = activeAccounts.reduce((sum, acc) => sum + (derived
+    ? (derived.balances.get(acc.id) ?? 0)
+    : (Number(acc.initialBalanceCents) || 0)), 0);
   return { totalBalance, activeCount: activeAccounts.length };
 }
 
@@ -125,7 +149,8 @@ function createAccountsTable() {
     { key: 'institution', label: 'Instituição' },
     { key: 'name', label: 'Conta' },
     { key: 'type', label: 'Tipo', render: (v) => getTypeLabel(v) },
-    { key: 'balance', label: 'Saldo inicial', numeric: true, render: (v) => formatCents(Number(v) || 0) },
+    { key: 'initialBalanceCents', label: 'Saldo inicial', numeric: true, render: (v) => formatCents(Number(v) || 0) },
+    ...(derived ? [{ key: 'id', label: 'Saldo atual', numeric: true, render: (v) => formatCents(derived.balances.get(v) ?? 0) }] : []),
     { key: 'status', label: 'Status', render: (v) => getStatusLabel(v) },
   ];
 
@@ -366,15 +391,6 @@ function confirmDeleteAccount(account) {
   openModal({ title: 'Confirmar exclusão', body, footer });
 }
 
-/** Helpers de formatação e labels. */
-function formatCentsInput(cents) {
-  const abs = Math.abs(Number(cents));
-  const int = Math.trunc(abs / 100);
-  const frac = String(abs % 100).padStart(2, '0');
-  const sign = Number(cents) < 0 ? '-' : '';
-  return `${sign}${int},${frac}`;
-}
-
 function getTypeLabel(value) {
   const types = getAccountTypeOptions();
   const found = types.find((t) => t.value === value);
@@ -385,19 +401,4 @@ function getStatusLabel(value) {
   const statuses = getStatusOptions();
   const found = statuses.find((s) => s.value === value);
   return found?.label ?? value;
-}
-
-function clearErrors(form) {
-  $$('.form__error', form).forEach((el) => (el.textContent = ''));
-  $$('.form__field', form).forEach((el) => el.classList.remove('form__field--error'));
-}
-
-function showErrors(form, errors) {
-  for (const [field, message] of Object.entries(errors)) {
-    const errorEl = $(`.form__error[data-for="${field}"]`, form);
-    const fieldEl = $(`#${field}`, form);
-    if (errorEl) errorEl.textContent = message;
-    if (fieldEl) fieldEl.closest('.form__field')?.classList.add('form__field--error');
-  }
-  if (errors._form) toast(errors._form, 5000);
 }

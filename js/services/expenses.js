@@ -32,6 +32,8 @@ async function fetchCategory(uid, categoryId) {
 export async function listExpenses(uid, options = {}) {
   const constraints = { orderBy: ['dueDate', 'asc'] };
   if (options.where) constraints.where = options.where;
+  if (options.orderBy) constraints.orderBy = options.orderBy;
+  if (options.startAfterId) constraints.startAfterId = options.startAfterId;
   if (options.limit) constraints.limit = options.limit;
   return list(uid, COLLECTION, constraints);
 }

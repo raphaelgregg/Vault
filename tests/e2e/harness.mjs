@@ -78,3 +78,25 @@ export function callService(page, modulePath, fnName, ...args) {
     return m[fn](auth.auth.currentUser.uid, ...a);
   }, [modulePath, fnName, args]);
 }
+
+/**
+ * Sobe servidor + navegador + página com coleta de erros de console. Retorna
+ * { page, base, problems, close }. Usado pelos cenários que não precisam do preâmbulo de flows.mjs.
+ */
+export async function launchApp(pw) {
+  const server = await startStatic();
+  const browser = await pw.chromium.launch();
+  const context = await newContext(browser);
+  const page = await context.newPage();
+  const problems = [];
+  page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
+  page.on('console', (m) => {
+    if (m.type() === 'error' && !/ERR_FAILED|unpkg|lucide/i.test(m.text())) problems.push(`console: ${m.text().slice(0, 200)}`);
+  });
+  return {
+    page,
+    base: server.base,
+    problems,
+    close: async () => { await browser.close(); await server.close(); },
+  };
+}

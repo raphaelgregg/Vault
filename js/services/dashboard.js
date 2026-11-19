@@ -8,7 +8,8 @@
  */
 import { COLLECTIONS } from '../utils/constants.js';
 import { list } from './firestore.js';
-import { accountBalances, summarizeDebtors, formatCents } from '../core/model.js';
+import { summarizeDebtors, formatCents } from '../core/model.js';
+import { loadBalances, READ_LIMIT } from './balances.js';
 import {
   monthResult,
   totalBalanceCents,
@@ -16,7 +17,7 @@ import {
 } from '../core/aggregates.js';
 import { getBudgetProgress } from './budgets.js';
 
-export const READ_LIMIT = 1000;
+export { READ_LIMIT };
 const SHORT_LIMIT = 8;
 
 /** Mês "YYYY-MM" e data "YYYY-MM-DD" de hoje em UTC (mesma convenção das datas gravadas). */
@@ -31,14 +32,9 @@ export async function loadDashboard(uid, io = {}) {
   const { today, month } = todayParts(io.now ? io.now() : new Date());
   const capped = (collection, extra = {}) => fetchList(uid, collection, { limit: READ_LIMIT, ...extra });
 
-  const [accounts, incomes, expenses, transfers, debtPayments, goalTransactions] = await Promise.all([
-    fetchList(uid, COLLECTIONS.accounts, {}),
-    capped(COLLECTIONS.incomes, { where: [['status', '==', 'received']] }),
-    capped(COLLECTIONS.expenses, { where: [['status', '==', 'paid']] }),
-    capped(COLLECTIONS.transfers, { where: [['status', '==', 'confirmed']] }),
-    capped(COLLECTIONS.debtPayments),
-    capped(COLLECTIONS.goalTransactions),
-  ]);
+  const accounts = await fetchList(uid, COLLECTIONS.accounts, {});
+  const { balances, movements, truncated } = await loadBalances(uid, accounts, { list: fetchList });
+  const { incomes, expenses } = movements;
   const [pendingExpenses, subscriptions, invoices, debtors, budgets] = await Promise.all([
     fetchList(uid, COLLECTIONS.expenses, {
       where: [['status', '==', 'pending'], ['dueDate', '>=', today]], orderBy: ['dueDate', 'asc'], limit: SHORT_LIMIT,
@@ -52,11 +48,6 @@ export async function loadDashboard(uid, io = {}) {
     capped(COLLECTIONS.debtors),
     getBudgetProgress(uid, month, { list: fetchList }),
   ]);
-
-  const balances = accountBalances(accounts, { incomes, expenses, transfers, debtPayments, goalTransactions });
-  const truncated = Object.entries({ incomes, expenses, transfers, debtPayments, goalTransactions })
-    .filter(([, rows]) => rows.length >= READ_LIMIT)
-    .map(([name]) => name);
 
   return {
     month,

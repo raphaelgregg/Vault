@@ -16,9 +16,10 @@ import { buildEntity, formatCents, parseMoneyToCents, ACCOUNT_TYPES } from '../c
 const COLLECTION = COLLECTIONS.accounts;
 
 /** Lista todas as contas do usuário ordenadas por instituição e nome. */
-export async function listAccounts(uid) {
+export async function listAccounts(uid, options = {}) {
   return list(uid, COLLECTION, {
     orderBy: ['institution', 'asc'],
+    ...(options.limit ? { limit: options.limit } : {}),
   });
 }
 

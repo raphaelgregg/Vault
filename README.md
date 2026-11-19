@@ -31,7 +31,7 @@ obrigatório e sem servidor próprio — roda em qualquer hospedagem estática (
 | Orçamentos por categoria/mês | ✅ gasto derivado das despesas do mês |
 | Dashboard e relatórios (período, categorias, CSV) | ✅ somente leitura, leituras limitadas |
 | Security Rules + testes no emulador | ✅ 65 testes |
-| Testes unitários (modelo + services) | ✅ 332 testes |
+| Testes unitários (modelo + services) | ✅ 340 testes |
 | Lint sem dependências, CI (GitHub Actions), E2E Playwright | ✅ ver seção 3 (CI e E2E não executados no GitHub) |
 
 **Nada é inventado na tela:** com o banco vazio, indicadores mostram zeros/`—` e as listas exibem
@@ -105,10 +105,10 @@ Firebase real.
 
 | Comando | O que faz |
 |---|---|
-| `npm run test:unit` | modelo, agregações e services com `io` injetado (sem rede) — 332 testes |
+| `npm run test:unit` | modelo, agregações e services com `io` injetado (sem rede) — 340 testes |
 | `npm run test:rules` | sobe Auth+Firestore no emulador e roda `tests/rules/` — 65 testes |
 | `npm run lint` | sintaxe, espaços, `console.log`, imports não usados, JSON (sem dependências) |
-| `npm run test:e2e` | Playwright em Chromium contra os emuladores (cadastro → orçamentos, metas, cartões, devedores, dashboard, relatórios) |
+| `npm run test:e2e` | Playwright em Chromium contra os emuladores: `flows.mjs` (cadastro, orçamentos, metas, cartões, devedores, dashboard, relatórios, configurações) e `movements.mjs` (bancos, receitas, despesas, transferências: CRUD, filtros, paginação, ordenação, saldo derivado) |
 
 O E2E **não** adiciona dependência ao projeto: usa o `playwright` já instalado no ambiente e, sem
 ele, sai com aviso. O harness serve o SDK do Firebase a partir de `node_modules` (a CDN pode estar
@@ -249,8 +249,13 @@ O projeto não habilita nada fora do Spark e não faz chamadas pagas.
 - **Config real do Firebase** precisa estar em `js/firebase/config.js`; as Rules/índices do repositório
   precisam ser publicadas manualmente (`firebase deploy --only firestore:rules,firestore:indexes`,
   somente com autorização). Não verificado: Rules em produção, deploy/preview na Vercel.
-- **Leituras (cota Spark):** dashboard e relatórios têm teto de leitura e avisam quando é atingido;
-  receitas, despesas, transferências e bancos ainda listam sem paginação (VF-4-03 parcial).
+- **Leituras (cota Spark):** receitas, despesas e transferências carregam **100 por página** (cursor por
+  documento, mais recentes primeiro; 101 leituras na 1ª página e +1 de cursor nas seguintes) e mostram
+  "Carregar mais antigas" com aviso de que filtros, meses e totais valem só para o carregado. Bancos lista
+  até 200 contas e calcula o saldo atual **sob demanda** (botão; lê até 1000 movimentos realizados por tipo
+  e avisa se atingir o teto). Dashboard, relatórios e orçamentos têm teto próprio e avisam. Recarregar
+  após criar/editar volta à primeira página. Não medido em produção; índices compostos já declarados
+  (`firestore.indexes.json`) só valem após publicar.
 - **Cartões:** pagar fatura não movimenta conta (o schema `invoices` não tem `accountId`) e é sempre
   integral; não há cancelamento de fatura; parcelas de uma compra não têm `installmentGroupId` (o
   schema `cardPurchases` não o aceita) e são identificadas por cartão + descrição + data + total.
@@ -267,6 +272,5 @@ O projeto não habilita nada fora do Spark e não faz chamadas pagas.
 
 ## 9. Roadmap
 
-O estado operacional e os IDs (`VF-<fase>-<nn>`) vivem em `PLAN.md`. Próximos: paginação das listas
-legadas (VF-4-03), importação CSV/exportação completa/backup, publicação (GitHub + Vercel), App Check
-e documentação operacional.
+O estado operacional e os IDs (`VF-<fase>-<nn>`) vivem em `PLAN.md`. Próximos: importação
+CSV/exportação completa/backup, publicação (GitHub + Vercel), App Check e documentação operacional.

@@ -3,7 +3,7 @@
  * Usado pelos módulos novos (orçamentos, cartões, metas, parcelas); módulos antigos
  * mantêm suas cópias locais (sem refatoração oportunista).
  */
-import { el, $, $$ } from '../core/ui.js';
+import { el, $, $$, toast } from '../core/ui.js';
 import { openModal, closeModal } from './modal.js';
 
 export function field(label, id, control) {
@@ -137,6 +137,16 @@ export function showErrors(form, errors) {
     }
     holder.textContent = errors._form;
   }
+}
+
+/** Variante dos módulos de movimentação: erros por campo + `_form` em toast (comportamento original). */
+export function showFormErrors(form, errors) {
+  for (const [name, message] of Object.entries(errors)) {
+    const errorEl = $(`.form__error[data-for="${name}"]`, form);
+    if (errorEl) errorEl.textContent = message;
+    $(`#${name}`, form)?.closest('.form__field')?.classList.add('form__field--error');
+  }
+  if (errors._form) toast(errors._form, 5000);
 }
 
 /**

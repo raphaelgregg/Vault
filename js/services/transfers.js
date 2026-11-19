@@ -18,6 +18,8 @@ const COLLECTION = COLLECTIONS.transfers;
 export async function listTransfers(uid, options = {}) {
   const constraints = { orderBy: ['date', 'desc'] };
   if (options.where) constraints.where = options.where;
+  if (options.orderBy) constraints.orderBy = options.orderBy;
+  if (options.startAfterId) constraints.startAfterId = options.startAfterId;
   if (options.limit) constraints.limit = options.limit;
   return list(uid, COLLECTION, constraints);
 }

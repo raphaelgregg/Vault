@@ -6,8 +6,10 @@
  * - Validação client-side espelhando Security Rules (conta origem ≠ conta destino)
  * - Persistência em users/{uid}/transfers
  */
-import { el, $, $$, toast, refreshIcons } from '../core/ui.js';
+import { el, $, toast, refreshIcons } from '../core/ui.js';
 import { openModal, closeModal } from '../components/modal.js';
+import { createStatCard } from '../components/stat-card.js';
+import { formatCentsInput, formatDate, clearErrors, showFormErrors as showErrors } from '../components/form-kit.js';
 import {
   listTransfers,
   createTransfer,
@@ -19,12 +21,15 @@ import {
   formatCents,
   parseMoneyToCents,
 } from '../services/transfers.js';
+import { createPager } from '../services/pager.js';
+import { createPagerFooter } from '../components/pager-footer.js';
 import { listAccounts } from '../services/accounts.js';
 
 export const meta = { title: 'Transferências', icon: 'arrow-left-right' };
 
 let currentUser = null;
 let transfersCache = [];
+let pager = null;
 let accountsCache = [];
 let currentFilter = { status: 'all', month: null };
 
@@ -37,10 +42,21 @@ export async function render(container, { user }) {
 
 /** Carrega dados iniciais. */
 async function loadData() {
-  [transfersCache, accountsCache] = await Promise.all([
-    listTransfers(currentUser.uid),
+  // Paginação por cursor (VF-4-03): só a página mais recente; "Carregar mais antigas" no rodapé.
+  pager = createPager({
+    fetchPage: ({ limit, startAfterId }) => listTransfers(currentUser.uid, { limit, startAfterId }),
+  });
+  [, accountsCache] = await Promise.all([
+    pager.loadFirst(),
     listAccounts(currentUser.uid),
   ]);
+  transfersCache = pager.items;
+}
+
+async function loadMore() {
+  await pager.loadMore();
+  transfersCache = pager.items;
+  renderPage($('.content') || document.getElementById('page-content'));
 }
 
 /** Renderiza a página completa. */
@@ -84,22 +100,11 @@ function renderPage(container) {
       ]),
       el('div', { class: 'panel__body panel__body--flush' }, [table]),
     ]),
+    createPagerFooter({ pager, noun: 'transferências', onLoadMore: loadMore }),
   ];
 
-  container.replaceChildren(...nodes);
+  container.replaceChildren(...nodes.filter(Boolean));
   refreshIcons();
-}
-
-/** Cria card de estatística. */
-function createStatCard(label, value, icon, tone, hint) {
-  return el('article', { class: `card${tone ? ` card--${tone}` : ''}` }, [
-    el('div', { class: 'card__icon' }, [el('i', { 'data-lucide': icon, 'aria-hidden': 'true' })]),
-    el('div', { class: 'card__content' }, [
-      el('p', { class: 'card__label', text: label }),
-      el('p', { class: 'card__value', text: value }),
-    ]),
-    hint ? el('p', { class: 'card__hint', text: hint }) : null,
-  ]);
 }
 
 /** Computa estatísticas rápidas do mês atual. */
@@ -222,9 +227,9 @@ function createTransfersTable() {
   }
 
   const columns = [
-    { key: 'from', label: 'Origem', render: (v) => getAccountLabel(v) },
-    { key: 'to', label: 'Destino', render: (v) => getAccountLabel(v) },
-    { key: 'amount', label: 'Valor', numeric: true, render: (v) => formatCents(Number(v) || 0) },
+    { key: 'fromAccountId', label: 'Origem', render: (v) => getAccountLabel(v) },
+    { key: 'toAccountId', label: 'Destino', render: (v) => getAccountLabel(v) },
+    { key: 'amountCents', label: 'Valor', numeric: true, render: (v) => formatCents(Number(v) || 0) },
     { key: 'date', label: 'Data', render: (v) => formatDate(v) },
     { key: 'reason', label: 'Motivo' },
     { key: 'status', label: 'Status', render: (v) => getStatusLabel(v) },
@@ -533,15 +538,6 @@ function confirmDeleteTransfer(transfer) {
   openModal({ title: 'Confirmar exclusão', body, footer });
 }
 
-/** Helpers. */
-function formatCentsInput(cents) {
-  const abs = Math.abs(Number(cents));
-  const int = Math.trunc(abs / 100);
-  const frac = String(abs % 100).padStart(2, '0');
-  const sign = Number(cents) < 0 ? '-' : '';
-  return `${sign}${int},${frac}`;
-}
-
 function getAccountLabel(accountId) {
   const acc = accountsCache.find((a) => a.id === accountId);
   return acc ? `${acc.institution} — ${acc.name}` : accountId ?? '—';
@@ -551,25 +547,4 @@ function getStatusLabel(value) {
   const statuses = getTransferStatusOptions();
   const found = statuses.find((s) => s.value === value);
   return found?.label ?? value;
-}
-
-function formatDate(value) {
-  if (!value) return '—';
-  const [y, m, d] = value.split('-');
-  return `${d}/${m}/${y}`;
-}
-
-function clearErrors(form) {
-  $$('.form__error', form).forEach((el) => (el.textContent = ''));
-  $$('.form__field', form).forEach((el) => el.classList.remove('form__field--error'));
-}
-
-function showErrors(form, errors) {
-  for (const [field, message] of Object.entries(errors)) {
-    const errorEl = $(`.form__error[data-for="${field}"]`, form);
-    const fieldEl = $(`#${field}`, form);
-    if (errorEl) errorEl.textContent = message;
-    if (fieldEl) fieldEl.closest('.form__field')?.classList.add('form__field--error');
-  }
-  if (errors._form) toast(errors._form, 5000);
 }
