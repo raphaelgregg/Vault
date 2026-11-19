@@ -1,0 +1,29 @@
+# Dependências
+node_modules/
+
+# Firebase / emuladores (nunca versionar dados locais ou credenciais)
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+emulator-data/
+firebase-export-*.json
+
+# Credenciais — NUNCA comitar
+serviceAccount*.json
+*-adminsdk*.json
+.env
+.env.*
+!.env.example
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.local
+
+# Cobertura e temporários
+coverage/
+*.log
+.tmp/

@@ -1,0 +1,15 @@
+/* Ponto único de entrada de estilos.
+   Ordem importa: tokens -> base/layout -> componentes. */
+
+@import url("variables.css");
+@import url("layout.css");
+@import url("components.css");
+
+/* Ajustes globais que não pertencem a um componente específico */
+html {
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+}

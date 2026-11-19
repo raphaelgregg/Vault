@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Entrar — Vault Finance</title>
+    <meta name="description" content="Controle financeiro pessoal: contas, receitas, despesas, metas e relatórios." />
+    <link rel="stylesheet" href="css/main.css" />
+    <link rel="icon" href="assets/icons/favicon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <main class="auth">
+      <section class="auth__card" aria-labelledby="auth-title">
+        <div class="auth__brand">
+          <span class="sidebar__logo" aria-hidden="true">VF</span>
+          <div>
+            <h1 id="auth-title" style="font-size: var(--fs-lg); margin: 0">Vault Finance</h1>
+            <p class="card__hint" style="margin: 0">Controle financeiro pessoal</p>
+          </div>
+        </div>
+
+        <div id="config-warning" class="badge" hidden style="margin-bottom: var(--space-4)"></div>
+
+        <div class="auth__tabs" role="tablist" aria-label="Modo de acesso">
+          <button type="button" role="tab" id="tab-login" aria-selected="true" aria-controls="form-login">Entrar</button>
+          <button type="button" role="tab" id="tab-register" aria-selected="false" aria-controls="form-register">Criar conta</button>
+          <button type="button" role="tab" id="tab-reset" aria-selected="false" aria-controls="form-reset">Esqueci a senha</button>
+        </div>
+
+        <form id="form-login" novalidate>
+          <div class="field">
+            <label for="login-email">E-mail</label>
+            <input id="login-email" name="email" type="email" autocomplete="email" required placeholder="voce@exemplo.com" />
+          </div>
+          <div class="field">
+            <label for="login-password">Senha</label>
+            <input id="login-password" name="password" type="password" autocomplete="current-password" required minlength="6" />
+          </div>
+          <p class="form-error" id="login-error" role="alert"></p>
+          <button class="btn btn--primary" type="submit" style="width: 100%">Entrar</button>
+        </form>
+
+        <form id="form-register" novalidate hidden>
+          <div class="field">
+            <label for="register-name">Nome</label>
+            <input id="register-name" name="name" type="text" autocomplete="name" placeholder="Como quer ser chamado" />
+          </div>
+          <div class="field">
+            <label for="register-email">E-mail</label>
+            <input id="register-email" name="email" type="email" autocomplete="email" required />
+          </div>
+          <div class="field">
+            <label for="register-password">Senha</label>
+            <input id="register-password" name="password" type="password" autocomplete="new-password" required minlength="6" />
+            <span class="field__hint">Mínimo de 6 caracteres.</span>
+          </div>
+          <p class="form-error" id="register-error" role="alert"></p>
+          <button class="btn btn--primary" type="submit" style="width: 100%">Criar conta</button>
+        </form>
+
+        <form id="form-reset" novalidate hidden>
+          <div class="field">
+            <label for="reset-email">E-mail cadastrado</label>
+            <input id="reset-email" name="email" type="email" autocomplete="email" required />
+            <span class="field__hint">Enviaremos um link de redefinição do Firebase.</span>
+          </div>
+          <p class="form-error" id="reset-error" role="alert"></p>
+          <button class="btn btn--primary" type="submit" style="width: 100%">Enviar link</button>
+        </form>
+
+        <p class="auth__footer">
+          Seus dados ficam isolados por usuário no Firestore. Nenhuma credencial administrativa
+          é usada no navegador.
+        </p>
+      </section>
+    </main>
+
+    <script src="js/importmap.js"></script>
+    <script type="module" src="js/auth-page.js"></script>
+  </body>
+</html>
