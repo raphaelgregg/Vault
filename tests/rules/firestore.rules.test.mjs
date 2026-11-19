@@ -532,9 +532,12 @@ describe('Devedores (VF-2-03b)', () => {
     await assertSucceeds(deleteDoc(debtorDoc(db)));
   });
 
-  it('nega emprestado <= 0/fracionário, recebido negativo ou maior que emprestado', async () => {
+  it('permite emprestado 0 (VF-2-03l); nega negativo/fracionário, recebido negativo ou maior que emprestado', async () => {
     const db = asUser(ALICE);
-    await assertFails(setDoc(debtorDoc(db), debtor({ lentCents: 0 })));
+    await assertSucceeds(setDoc(debtorDoc(db, 'zero'), debtor({ lentCents: 0 })));
+    await assertSucceeds(updateDoc(debtorDoc(db, 'zero'), { lentCents: 30000, updatedAt: serverTimestamp() })); // compra de cartão soma aqui
+    await assertFails(setDoc(debtorDoc(db), debtor({ lentCents: -1 })));
+    await assertFails(setDoc(debtorDoc(db), debtor({ lentCents: 0, receivedCents: 1 })));
     await assertFails(setDoc(debtorDoc(db), debtor({ lentCents: 10.5 })));
     await assertFails(setDoc(debtorDoc(db), debtor({ receivedCents: -1 })));
     await assertFails(setDoc(debtorDoc(db), debtor({ receivedCents: 100001 })));

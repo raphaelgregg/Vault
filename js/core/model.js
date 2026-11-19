@@ -181,7 +181,8 @@ export const SCHEMAS = Object.freeze({
     fields: {
       name: text(80),
       loanDate: date(),
-      lentCents: money(),
+      // Pode ser 0 (VF-2-03l): devedor sem empréstimo inicial, ex.: só compras no cartão (que somam aqui).
+      lentCents: centsNonNegative(),
       // Gravado pelo service (começa em 0); a Rule exige 0 <= receivedCents <= lentCents.
       receivedCents: centsNonNegative(),
       status: { kind: 'enum', required: true, values: DEBTOR_STATUSES.map((s) => s.value) },

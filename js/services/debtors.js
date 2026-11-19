@@ -63,8 +63,11 @@ export async function getDebtorOverview(uid, debtor, io = {}) {
 
 /** Retorna { ok, id, errors }. `deps` (create, writeAudit) é injetável. */
 export async function createDebtor(uid, rawData, deps = {}) {
+  // Valor emprestado vazio = 0: o devedor existe sem empréstimo inicial (VF-2-03l).
+  const blank = rawData?.lentCents === undefined || rawData.lentCents === null || String(rawData.lentCents).trim() === '';
   const { ok, data, errors } = buildEntity('debtors', {
     ...rawData,
+    lentCents: blank ? '0' : rawData.lentCents,
     receivedCents: 0,
     status: 'open',
   });
@@ -83,8 +86,10 @@ export async function updateDebtor(uid, debtorId, rawData, deps = {}) {
   if (current.status !== 'open') {
     return { ok: false, errors: { _form: 'Só é possível editar devedores em aberto.' } };
   }
+  const blankLent = rawData?.lentCents === undefined || rawData.lentCents === null || String(rawData.lentCents).trim() === '';
   const { ok, data, errors } = buildEntity('debtors', {
     ...rawData,
+    lentCents: blankLent ? '0' : rawData.lentCents,
     // parseMoneyToCents lê número como reais: reenviar o valor em string.
     receivedCents: centsToMoneyString(current.receivedCents ?? 0),
     status: current.status,

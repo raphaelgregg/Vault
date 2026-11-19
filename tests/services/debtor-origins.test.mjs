@@ -47,6 +47,17 @@ describe('compra de cartão vinculada a devedor', () => {
       assert.equal(atomic.length, 0);
     }
   });
+  it('devedor sem empréstimo inicial (lentCents 0): compra soma ao emprestado e o fechamento funciona', async () => {
+    const zero = debtor({ lentCents: 0, receivedCents: 0 });
+    const { io, atomic } = makeIo({ debtors: [zero] });
+    const r = await registerCardPurchase(uid, 'c1', rawBuy(), io);
+    assert.equal(r.ok, true);
+    assert.equal(atomic.at(-1).find((o) => o.collection === 'debtors').data.lentCents, 30000);
+    const none = debtorMonthStatement({ debtor: zero, month: '2026-11' });
+    assert.equal(none.totalCents, 0); // sem nada vinculado: 0, sem erro
+    const st = debtorMonthStatement({ debtor: debtor({ lentCents: 30000, receivedCents: 0 }), month: '2026-11', purchases: [{ amountCents: 10000, purchaseDate: '2026-11-05' }] });
+    assert.equal(st.totalCents, 10000);
+  });
   it('sem devedor, o lote não toca em debtors', async () => {
     const { io, atomic } = makeIo();
     await registerCardPurchase(uid, 'c1', rawBuy({ debtorId: undefined }), io);

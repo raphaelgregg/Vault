@@ -265,7 +265,7 @@ service cloud.firestore {
                        'createdAt', 'updatedAt'])
         && text('name', 80)
         && stamp(data().loanDate)
-        && positiveCents(data().lentCents)
+        && cents(data().lentCents)
         && cents(data().receivedCents)
         && data().receivedCents <= data().lentCents
         && oneOf('status', ['open', 'paid', 'cancelled'])

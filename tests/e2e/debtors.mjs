@@ -65,6 +65,34 @@ try {
   assert.match(detail, /Pendente/);
   assert.match(detail, new RegExp(`Total a receber em ${m}/${y}`, 'i'));
 
+  log('VF-2-03l: devedor sem empréstimo inicial pela UI e compra de cartão vinculada pela modal');
+  await page.goto(`${app.base}/pages/devedores.html`);
+  await page.waitForSelector('#page-content .panel');
+  await page.getByRole('button', { name: 'Novo devedor' }).click();
+  await page.fill('#name', 'Zero Inicial');
+  await page.locator('#debtor-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Zero Inicial/.test(document.querySelector('#page-content tbody')?.innerText ?? ''));
+  assert.match(await page.locator('#page-content tbody tr', { hasText: 'Zero Inicial' }).innerText(), /R\$\s?0,00/);
+  await page.goto(`${app.base}/pages/cartoes.html`);
+  await page.waitForSelector('#page-content .panel');
+  await page.getByRole('button', { name: 'Nova compra em Cartão E2E' }).click();
+  await page.fill('#description', 'Fogão');
+  await page.fill('#amountCents', '200,00');
+  const options = await page.locator('#debtorId option').allInnerTexts();
+  assert.ok(options.some((t) => t.startsWith('Zero Inicial')), `seletor sem o devedor: ${options.join(' | ')}`);
+  await page.selectOption('#debtorId', { label: options.find((t) => t.startsWith('Zero Inicial')) });
+  await page.locator('#purchase-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Compra lançada/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.goto(`${app.base}/pages/devedores.html`);
+  await page.waitForSelector('#page-content tbody tr');
+  assert.match(await page.locator('#page-content tbody tr', { hasText: 'Zero Inicial' }).innerText(), /R\$\s?200,00/);
+  await page.getByRole('button', { name: 'Parcelas e recebimentos de Zero Inicial' }).click();
+  await page.waitForSelector('#statement-month');
+  // a fatura pode cair no mês seguinte (fechamento dia 28): escolhe o último mês listado
+  const monthValues = await page.locator('#statement-month option').evaluateAll((opts) => opts.map((o) => o.value));
+  await page.selectOption('#statement-month', monthValues.at(-1));
+  await page.locator('.modal').getByText('Fogão').waitFor();
+
   assert.deepEqual(app.problems, [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E devedores OK');
 } catch (error) {

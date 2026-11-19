@@ -51,9 +51,10 @@ describe('debtors — schema (espelha firestore.rules)', () => {
     assert.deepEqual(SCHEMAS.debtors.dateFields, ['loanDate']);
   });
 
-  it('rejeita emprestado <= 0, recebido negativo e recebido > emprestado', () => {
+  it('aceita emprestado 0 (VF-2-03l); rejeita negativo, recebido negativo e recebido > emprestado', () => {
     const base = { name: 'A', loanDate: '2026-11-10', status: 'open' };
-    assert.ok(validateEntity('debtors', { ...base, lentCents: 0, receivedCents: 0 }).errors.lentCents);
+    assert.equal(validateEntity('debtors', { ...base, lentCents: 0, receivedCents: 0 }).ok, true);
+    assert.ok(validateEntity('debtors', { ...base, lentCents: -1, receivedCents: 0 }).errors.lentCents);
     assert.ok(validateEntity('debtors', { ...base, lentCents: 100, receivedCents: -1 }).errors.receivedCents);
     assert.ok(validateEntity('debtors', { ...base, lentCents: 100, receivedCents: 101 }).errors.receivedCents);
     assert.equal(validateEntity('debtors', { ...base, lentCents: 100, receivedCents: 100 }).ok, true);
@@ -119,9 +120,19 @@ describe('debtors — service', () => {
     );
   });
 
+  it('create sem empréstimo inicial (vazio, ausente ou 0) grava lentCents 0 e receivedCents 0', async () => {
+    for (const lentCents of ['', undefined, '0', '0,00']) {
+      const { io, calls } = makeIo(null);
+      const r = await createDebtor(uid, raw({ lentCents }), io);
+      assert.equal(r.ok, true);
+      assert.equal(calls.create[0].data.lentCents, 0);
+      assert.equal(calls.create[0].data.receivedCents, 0);
+    }
+  });
+
   it('create inválido: sem escrita nem auditoria', async () => {
     const { io, calls } = makeIo(null);
-    const r = await createDebtor(uid, raw({ lentCents: '0' }), io);
+    const r = await createDebtor(uid, raw({ lentCents: '-5,00' }), io);
     assert.equal(r.ok, false);
     assert.ok(r.errors.lentCents);
     assert.equal(calls.create.length + calls.audit.length, 0);

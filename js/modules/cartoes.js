@@ -28,7 +28,7 @@ import {
 import { listAccounts } from '../services/accounts.js';
 import { listCategories } from '../services/categories.js';
 import { listDebtors } from '../services/debtors.js';
-import { invoiceTotalCents } from '../core/model.js';
+import { invoiceTotalCents, debtorPendingCents } from '../core/model.js';
 
 export const meta = { title: 'Cartões', icon: 'credit-card' };
 
@@ -39,17 +39,26 @@ let usage = new Map();
 let accounts = [];
 let categories = [];
 let openDebtors = [];
+let debtorsFailed = false;
 
 export async function render(target, ctx) {
   user = ctx.user;
   container = target;
   [accounts, categories] = await Promise.all([listAccounts(user.uid), listCategories(user.uid)]);
-  // Devedores em aberto (vínculo opcional na compra); falha aqui não impede a tela.
-  openDebtors = await listDebtors(user.uid, { where: [['status', '==', 'open']] }).catch((error) => {
-    console.error('[cartoes] falha ao listar devedores', error);
-    return [];
-  });
+  await loadOpenDebtors();
   await reload();
+}
+
+/** Devedores em aberto (vínculo opcional na compra); falha aqui não impede a tela. Relido a cada compra. */
+async function loadOpenDebtors() {
+  try {
+    openDebtors = (await listDebtors(user.uid, { where: [['status', '==', 'open']] })).sort((a, b) => a.name.localeCompare(b.name));
+    debtorsFailed = false;
+  } catch (error) {
+    console.error('[cartoes] falha ao listar devedores', error);
+    openDebtors = [];
+    debtorsFailed = true;
+  }
 }
 
 async function reload() {
@@ -161,7 +170,8 @@ function openCardModal(card = null) {
   });
 }
 
-function openPurchaseModal(card) {
+async function openPurchaseModal(card) {
+  await loadOpenDebtors(); // inclui devedores criados após abrir esta tela (VF-2-03l)
   const expenseCats = categories.filter((c) => c.kind === 'expense' || c.kind === 'both').map((c) => ({ value: c.id, label: c.name }));
   const available = usage.get(card.id)?.availableCents ?? 0;
   formModal({
@@ -179,10 +189,14 @@ function openPurchaseModal(card) {
       field('Data da compra *', 'purchaseDate', el('input', { type: 'date', id: 'purchaseDate', name: 'purchaseDate', value: new Date().toISOString().slice(0, 10) })),
       field('Categoria', 'categoryId', el('select', { id: 'categoryId', name: 'categoryId' }, [el('option', { value: '' }, 'Sem categoria'), ...selectOptions(expenseCats, '')])),
       field('Devedor (opcional)', 'debtorId', el('select', { id: 'debtorId', name: 'debtorId' }, [
-        el('option', { value: '' }, 'Compra minha'),
-        ...selectOptions(openDebtors.map((x) => ({ value: x.id, label: x.name })), ''),
+        el('option', { value: '' }, 'Compra minha (sem devedor)'),
+        ...selectOptions(openDebtors.map((x) => ({ value: x.id, label: `${x.name} — pendente ${formatCents(debtorPendingCents(x))}` })), ''),
       ])),
-      el('p', { class: 'card__hint', text: 'Ao vincular a um devedor, o total da compra é somado ao valor emprestado dele.' }),
+      el('p', { class: 'card__hint', text: debtorsFailed
+        ? 'Não foi possível carregar os devedores; a compra só poderá ser lançada sem vínculo.'
+        : openDebtors.length
+          ? 'Ao vincular a um devedor, o total da compra é somado ao valor emprestado dele.'
+          : 'Nenhum devedor em aberto. Cadastre em Devedores (o valor emprestado pode ser 0) para vincular compras.' }),
       field('Observações', 'notes', el('textarea', { id: 'notes', name: 'notes', maxlength: 300, rows: 2 })),
     ],
     submit: (d) => registerCardPurchase(user.uid, card.id, {

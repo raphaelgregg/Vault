@@ -263,12 +263,12 @@ function openDebtorModal(item = null) {
         type: 'text', id: 'name', name: 'name', required: true, maxlength: 80,
         value: item?.name ?? '', autocomplete: 'off',
       })),
-      field('Valor emprestado (R$) *', 'lentCents', el('input', {
-        type: 'text', id: 'lentCents', name: 'lentCents', required: true, placeholder: '0,00',
+      field('Valor emprestado (R$)', 'lentCents', el('input', {
+        type: 'text', id: 'lentCents', name: 'lentCents', placeholder: '0,00 (opcional)',
         value: item?.lentCents ? formatCentsInput(item.lentCents) : '', autocomplete: 'off',
       })),
     ]),
-    field('Data do empréstimo *', 'loanDate', el('input', {
+    field('Data do empréstimo / cadastro *', 'loanDate', el('input', {
       type: 'date', id: 'loanDate', name: 'loanDate', required: true, value: item?.loanDate ?? today,
     })),
     el('div', { class: 'form__field' }, [
