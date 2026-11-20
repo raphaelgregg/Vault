@@ -355,6 +355,8 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - **VF-1-01** (opção A, `before`/`after` completos): `writeAudit` (`js/services/firestore.js`) agora grava `{action, entity, entityId, before?, after?, actorUid, createdAt}` mapeando `collection→entity` e `docId→entityId` (call sites dos 5 services inalterados), remove `undefined` e, em falha, registra `console.error` e devolve `{ok:false, error}` (não lança, para não sinalizar erro após a escrita principal ter sucesso). `firestore.rules` aceita `before`/`after` opcionais do tipo map. Validação: 3 novos testes de Rules (payload com before/after, não-map negado, formato antigo negado). Limite conhecido: sem teste unitário do `writeAudit` contra o SDK (a cobertura do payload está nas Rules). **As Rules precisam ser publicadas** (`firebase deploy --only firestore:rules`) para valer em produção — não executado.
 - **VF-4-01**: scripts `test`, `test:unit` (modelo + serviços, 98 testes) e `test:rules` com glob; `engines.node >=18`. Validação: `npm run test:unit` 98/98; `npm run test:rules` 27/27 no Node 22. Node 18 não testado.
 
+- **VF-ARQ-02 — resultados (2026-11-20, emuladores):** `npm run lint` OK · `npm run test:unit` 633/633 · `npm run test:rules` 109/109 · `npm run test:integration` 95/95 (concorrência 10× por cenário, oráculo independente) · `npm run test:e2e` 6/6 scripts OK (flows, movements, debtors, maintenance, auth, csv). Nada publicado (Rules, Vercel, Firebase).
+
 ## Itens não verificados
 
 - CI no GitHub Actions: confirmar o run do commit de correção (ver Histórico) em Node 18 e 22.
