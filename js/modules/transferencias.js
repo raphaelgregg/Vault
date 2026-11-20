@@ -33,6 +33,8 @@ import { todayInAppZone, currentMonthKey } from '../utils/dates.js';
 import { newOperationId } from '../services/financeApi.js';
 import { openReversalModal } from '../components/reversal-modal.js';
 import { listReversals } from '../services/reversals.js';
+import { readReversals, reversalsUnavailable, loadErrorMessage } from '../utils/reversalsAccess.js';
+import { describeError } from '../utils/errors.js';
 export const meta = { title: 'Transferências', icon: 'arrow-left-right' };
 
 let currentUser = null;
@@ -44,6 +46,7 @@ let goalSaved = new Map(); // goalId → centavos guardados (aportes − resgate
 let goalTxCounts = new Map();
 let recentGoalTxs = [];
 let reversedGoalTxIds = new Set(); // movimentos de meta já estornados (VF-ARQ-02)
+let reversalsUnknown = false; // leitura de estornos negada (Rules antigas): estornos DESCONHECIDOS → modo limitado de metas
 let currentTransferEdit = null;
 const GOAL_PREFIX = 'goal:'; // valor das opções de meta nos selects (contas usam o próprio id)
 let currentFilter = { status: 'all', month: null };
@@ -51,7 +54,16 @@ let currentFilter = { status: 'all', month: null };
 /** Render principal do módulo. */
 export async function render(container, { user }) {
   currentUser = user;
-  await loadData();
+  try {
+    await loadData();
+  } catch (error) {
+    // `app.js` não aguarda o render: sem este tratamento uma falha de carga (rede, indisponibilidade…) deixaria a tela em branco.
+    console.error('[transferencias] falha ao carregar', error);
+    container.replaceChildren(el('section', { class: 'panel' }, [el('div', { class: 'panel__body' }, [
+      el('p', { class: 'notice', role: 'alert', id: 'transfers-load-error', text: `Não foi possível carregar as transferências. ${loadErrorMessage(error, describeError)}` }),
+    ])]));
+    return;
+  }
   renderPage(container);
 }
 
@@ -68,17 +80,19 @@ async function loadData() {
     listRecentGoalTransactions(currentUser.uid, 20),
   ]);
   transfersCache = pager.items;
-  const reversals = await listReversals(currentUser.uid, { limit: 500 }).catch(() => []);
+  // Leitura negada ≠ "nenhum estorno": fica DESCONHECIDO (modo limitado); qualquer outro erro propaga e a tela mostra o erro.
+  const reversals = await readReversals(listReversals(currentUser.uid, { limit: 500 }), { tolerate: true });
+  const txs = await Promise.all(goalsCache.map(async (g) => [g.id, await listGoalTransactions(currentUser.uid, g.id, { tolerateReversalsDenied: true })]));
+  reversalsUnknown = reversalsUnavailable(reversals) || txs.some(([, rows]) => rows.reversalsUnavailable === true);
   reversedGoalTxIds = new Set(reversals.filter((r) => r.targetCollection === 'goalTransactions').map((r) => r.targetId));
-  const txs = await Promise.all(goalsCache.map(async (g) => [g.id, await listGoalTransactions(currentUser.uid, g.id)]));
-  goalSaved = new Map(txs.map(([id, rows]) => [id, goalSavedCents(rows)]));
+  goalSaved = reversalsUnknown ? new Map() : new Map(txs.map(([id, rows]) => [id, goalSavedCents(rows)]));
   goalTxCounts = new Map(txs.map(([id, rows]) => [id, rows.length]));
 }
 
 /** Metas que recebem aportes por transferência (ativas, sem vínculo de conta). */
-const goalDestinations = () => transferableGoals(goalsCache, goalTxCounts);
+const goalDestinations = () => (reversalsUnknown ? [] : transferableGoals(goalsCache, goalTxCounts)); // modo limitado: o guardado é desconhecido
 /** Metas de onde dá para sacar: com valor guardado, ativas/concluídas, sem vínculo de conta. */
-const goalSources = () => goalsCache.filter((g) => ['active', 'completed'].includes(g.status)
+const goalSources = () => (reversalsUnknown ? [] : goalsCache).filter((g) => ['active', 'completed'].includes(g.status)
   && !isAccountLinkedGoal(g, goalTxCounts.get(g.id)) && (goalSaved.get(g.id) ?? 0) > 0);
 const goalName = (id) => goalsCache.find((g) => g.id === id)?.name ?? id;
 
@@ -117,8 +131,12 @@ function renderPage(container) {
   const filterBar = createFilterBar();
   const table = createTransfersTable();
 
+  const limitedNotice = reversalsUnknown
+    ? el('p', { class: 'notice', role: 'alert', id: 'reversals-unavailable', text: 'Limitação: não foi possível ler os estornos (as regras de acesso publicadas ainda não incluem essa coleção). Aportes e resgates de metas, o valor guardado e o histórico de movimentos de meta estão indisponíveis até a publicação; transferências entre contas não são afetadas.' })
+    : null;
   const nodes = [
     header,
+    limitedNotice,
     cards,
     filterBar,
     el('section', { class: 'panel' }, [
@@ -139,6 +157,7 @@ function renderPage(container) {
 
 /** Histórico recente de aportes (conta → meta) e resgates (meta → conta). */
 function createGoalMovementsPanel() {
+  if (reversalsUnknown) return null; // sem estornos legíveis, o histórico (e o botão Estornar) não é confiável
   if (!recentGoalTxs.length) return null;
   const head = el('tr', {}, ['Data', 'Movimento', 'Meta', 'Conta', 'Valor', 'Situação'].map((t, i) => el('th', { class: i === 4 ? 'num' : '', text: t })));
   const body = recentGoalTxs.map((t) => el('tr', {}, [

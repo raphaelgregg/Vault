@@ -16,7 +16,7 @@ import {
   removeAudited,
 } from './firestore.js';
 import { financeResult } from './financeApi.js';
-import { reversalsOrNone } from '../utils/reversalsAccess.js';
+import { readReversals, reversalsUnavailable } from '../utils/reversalsAccess.js';
 import {
   buildEntity,
   isAccountLinkedGoal,
@@ -48,8 +48,8 @@ export async function getGoal(uid, goalId) {
 async function loadGoalLedger(uid, goalId, io = {}) {
   const listFn = io.list ?? list;
   const where = { where: [['goalId', '==', goalId]] };
-  const [transactions, reversals] = await Promise.all([listFn(uid, TXS, where), reversalsOrNone(listFn(uid, COLLECTIONS.reversals, where))]);
-  return { transactions: transactions ?? [], reversals: reversals ?? [] };
+  const [transactions, reversals] = await Promise.all([listFn(uid, TXS, where), readReversals(listFn(uid, COLLECTIONS.reversals, where), { tolerate: io.tolerateReversalsDenied === true })]);
+  return { transactions: transactions ?? [], reversals: reversals ?? [] }; // `reversals` pode vir marcado como desconhecido
 }
 
 /** Guardado líquido (aportes − resgates, ignorando movimentos estornados). */
@@ -62,7 +62,9 @@ async function savedOf(uid, goalId, io = {}) {
 export async function listGoalTransactions(uid, goalId, io = {}) {
   const { transactions, reversals } = await loadGoalLedger(uid, goalId, io);
   const reversed = new Set(reversals.filter((r) => r.targetCollection === 'goalTransactions').map((r) => r.targetId));
-  return transactions.map((t) => (reversed.has(t.id) ? { ...t, reversed: true } : t));
+  const rows = transactions.map((t) => (reversed.has(t.id) ? { ...t, reversed: true } : t));
+  // Estornos DESCONHECIDOS (leitura negada, só com `io.tolerateReversalsDenied`): o chamador não pode usar o guardado/estado.
+  return reversalsUnavailable(reversals) ? Object.assign(rows, { reversalsUnavailable: true }) : rows;
 }
 
 /** Aportes/resgates mais recentes de todas as metas (histórico exibido em Transferências). */

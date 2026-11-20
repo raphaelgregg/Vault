@@ -13,7 +13,7 @@ import {
   updateAudited,
 } from './firestore.js';
 import { financeResult } from './financeApi.js';
-import { reversalsOrNone } from '../utils/reversalsAccess.js';
+import { readReversals, reversalsUnavailable } from '../utils/reversalsAccess.js';
 import {
   buildEntity,
   centsToMoneyString,
@@ -191,7 +191,7 @@ export async function loadDebtorStatements(uid, debtors, month, io = {}) {
     byIn(COLLECTIONS.cardPurchases, 'debtorId', ids),
     byIn(COLLECTIONS.debts, 'debtorId', ids),
     byIn(COLLECTIONS.debtPayments, 'debtorId', ids),
-    reversalsOrNone(byIn(COLLECTIONS.reversals, 'debtorId', ids)), // estornos de recebimento: o recebido da parcela os desconta (negado pelas Rules antigas = nenhum)
+    readReversals(byIn(COLLECTIONS.reversals, 'debtorId', ids), { tolerate: io.tolerateReversalsDenied === true }), // estornos de recebimento: o recebido da parcela os desconta; negado = DESCONHECIDO (erro, ou modo limitado)
   ]);
   const cardIds = [...new Set(purchases.map((p) => p.cardId).filter(Boolean))];
   const invoices = cardIds.length ? await byIn(COLLECTIONS.invoices, 'cardId', cardIds) : [];
@@ -203,7 +203,7 @@ export async function loadDebtorStatements(uid, debtors, month, io = {}) {
     const statement = debtorMonthStatement({
       debtor, month, purchases: own, invoicesById, debts: debts.filter((d) => d.debtorId === debtor.id), receivedByDebt, receivedByPurchase,
     });
-    result.set(debtor.id, { ...statement, purchases: own, invoicesById, debts: debts.filter((d) => d.debtorId === debtor.id), payments: payments.filter((p) => p.debtorId === debtor.id), reversals: reversals.filter((r) => r.debtorId === debtor.id) });
+    result.set(debtor.id, { ...statement, purchases: own, invoicesById, debts: debts.filter((d) => d.debtorId === debtor.id), payments: payments.filter((p) => p.debtorId === debtor.id), reversals: reversals.filter((r) => r.debtorId === debtor.id), ...(reversalsUnavailable(reversals) ? { reversalsUnavailable: true } : {}) });
   }
   return result;
 }

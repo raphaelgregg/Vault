@@ -30,18 +30,30 @@ export function displayDebtStatus(debt, today = todayIso()) {
 /**
  * @param {{ user: {uid:string}, debtor: object, onChange: () => Promise<void> }} ctx
  */
-export async function openDebtorInstallments({ user, debtor, onChange, month = 'all', startCreate = false }) {
+export async function openDebtorInstallments(args) {
+  // Falha de carga (rede, indisponibilidade…) vira aviso explícito, nunca uma ação "morta" sem retorno.
+  try { return await openDebtorInstallmentsInner(args); } catch (error) {
+    console.error('[devedores] falha ao abrir parcelas', error);
+    toast(describeError(error), 7000);
+    return undefined;
+  }
+}
+
+async function openDebtorInstallmentsInner({ user, debtor, onChange, month = 'all', startCreate = false }) {
   const [debts, payments, accounts, statement, cards] = await Promise.all([
     listDebts(user.uid, debtor.id),
     listDebtPayments(user.uid, { where: [['debtorId', '==', debtor.id]] }),
     listAccounts(user.uid),
-    getDebtorStatement(user.uid, debtor, month === 'all' ? todayIso().slice(0, 7) : month),
+    getDebtorStatement(user.uid, debtor, month === 'all' ? todayIso().slice(0, 7) : month, { tolerateReversalsDenied: true }), // negado = estornos DESCONHECIDOS: modo limitado (abaixo)
     listCards(user.uid).catch(() => []),
   ]);
   const cardName = new Map(cards.map((c) => [c.id, c.name]));
   debts.sort((a, b) => a.installmentNumber - b.installmentNumber);
   // Recebimentos por parcela (dívida ou compra no cartão); cada um é contado uma única vez.
   const { byDebt: receivedBy, byPurchase: receivedByPurchase } = receivedByInstallment(payments, statement.reversals ?? []);
+  // Estornos ilegíveis (Rules antigas): recebido/situação por parcela dependem deles e seriam INCORRETOS se estornos existirem.
+  // Modo LIMITADO: esses valores e as ações de recebimento ficam ocultos; só "Nova dívida" (não depende deles) segue disponível.
+  const limited = statement.reversalsUnavailable === true;
   const isOpen = debtor.status === 'open';
   // Quitado também aceita nova dívida (reabre o devedor); cancelado só consulta até ser reaberto.
   const canAddDebt = isOpen || debtor.status === 'paid';
@@ -189,6 +201,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
     return raw ? displayDebtStatus(raw) : i.status;
   };
   const statusBadge = (i) => {
+    if (limited) return el('span', { class: 'badge badge--neutral', 'data-status': 'unknown', text: 'Indisponível' });
     const status = statusOf(i);
     const mark = status === 'paid' ? '✓ ' : '';
     const extra = status === 'partial' ? ` · recebido ${formatCents(i.receivedCents)} de ${formatCents(i.amountCents)}`
@@ -205,11 +218,12 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
         { key: 'referenceMonth', label: 'Mês', render: (v) => formatMonth(v) },
         { key: 'dueDate', label: 'Vencimento', render: (v, i) => (v ? formatDate(v) : (i.source === 'card' ? '—' : '—')) },
         { key: 'amountCents', label: 'Valor', numeric: true, render: (v) => formatCents(v) },
-        { key: 'receivedCents', label: 'Recebido', numeric: true, render: (v) => formatCents(v) },
+        { key: 'receivedCents', label: 'Recebido', numeric: true, render: (v) => (limited ? '—' : formatCents(v)) },
         { key: 'status', label: 'Situação', render: (_, i) => statusBadge(i) },
       ],
       rows: visible,
       actions: (item) => {
+        if (limited) return [];
         if (!isOpen || item.status !== 'pending' || item.remainingCents <= 0) return [];
         const label = `parcela ${item.installmentNumber} de ${item.description}`;
         const acts = [iconButton(`Quitar ${label}`, 'check', () => openSettleInstallment(item), 'btn--success')];
@@ -236,7 +250,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   // o original permanece na lista, marcado como estornado.
   const reversedPayments = new Set((statement.reversals ?? []).filter((r) => r.targetCollection === 'debtPayments').map((r) => r.targetId));
   const sortedPayments = [...payments].sort((a, b) => (String(a.date) < String(b.date) ? 1 : -1));
-  const paymentsTable = sortedPayments.length
+  const paymentsTable = sortedPayments.length && !limited
     ? dataTable({
       columns: [
         { key: 'date', label: 'Data', render: (v) => formatDate(v) },
@@ -257,7 +271,9 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   const monthPending = listAll ? null : previewMonthSettlement({ debtor, ledger, month });
   const monthPaid = listAll ? 0 : obligations.items.filter((i) => i.referenceMonth === month && i.status === 'paid').length;
   const monthPartial = listAll ? 0 : monthPending.items.filter((i) => i.paymentState === 'partial').length;
-  const monthPanel = listAll
+  const monthPanel = limited
+    ? el('p', { class: 'card__hint', text: 'Parcelas do mês indisponíveis: os estornos não puderam ser lidos.' })
+    : listAll
     ? el('p', { class: 'card__hint', text: 'Escolha um mês de referência para quitar todas as parcelas pendentes dele de uma vez.' })
     : el('div', { class: 'card', id: 'month-settlement' }, [
       el('p', { class: 'card__label', text: `Parcelas de ${formatMonth(month)}` }),
@@ -269,12 +285,12 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
     ]);
   const closing = el('div', { class: 'card' }, [
     el('p', { class: 'card__label', text: `Total a receber em ${formatMonth(closingMonth)}` }),
-    el('p', { class: 'card__value', text: isOpen ? formatCents(statement.totalCents) : '—' }),
+    el('p', { class: 'card__value', text: isOpen && !limited ? formatCents(statement.totalCents) : '—' }),
     el('p', { class: 'card__hint', text: `Cartão ${formatCents(statement.cardCents)} + dívidas ${formatCents(statement.loanCents)}${statement.capped ? ` — limitado ao total em aberto (${formatCents(obligations.openCents)})` : ''}.` }),
   ]);
   const totals = el('div', { class: 'card' }, [
     el('p', { class: 'card__label', text: 'Total em aberto' }),
-    el('p', { class: 'card__value', text: formatCents(obligations.openCents) }),
+    el('p', { class: 'card__value', text: limited ? '—' : formatCents(obligations.openCents) }),
     el('p', { class: 'card__hint', text: `Emprestado ${formatCents(debtor.lentCents)} − recebido ${formatCents(debtor.receivedCents ?? 0)}. Detalhado: ${formatCents(obligations.listedCents)}${obligations.unlistedCents > 0 ? ` · sem parcelas cadastradas ${formatCents(obligations.unlistedCents)}` : ''}.` }),
   ]);
 
@@ -282,12 +298,13 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
     title: `Dívidas — ${debtor.name}`,
     body: el('div', {}, [
       el('div', { class: 'grid grid--cards' }, [totals, closing]),
+      limited ? el('p', { class: 'notice', role: 'alert', id: 'reversals-unavailable', text: 'Limitação: não foi possível ler os estornos (as regras de acesso publicadas ainda não incluem essa coleção). Recebido, situação das parcelas e totais estão ocultos por não serem confiáveis; recebimentos estão desativados. Cadastrar nova dívida continua disponível.' }) : null,
       debtor.status === 'paid' ? el('p', { class: 'card__hint', text: 'Devedor quitado: uma nova dívida (ou compra no cartão vinculada) o reabre.' }) : null,
       debtor.status === 'cancelled' ? el('p', { class: 'card__hint', text: 'Devedor cancelado: somente consulta. Reabra-o na lista para lançar dívidas.' }) : null,
       el('div', { class: 'form__field' }, [el('label', { for: 'statement-month', text: 'Mês de referência' }), monthSelect]),
       monthPanel,
       canAddDebt ? el('button', { type: 'button', class: 'btn btn--primary', onClick: openCreate, text: 'Nova dívida' }) : null,
-      isOpen && debts.some((d) => ['pending', 'late'].includes(d.status))
+      !limited && isOpen && debts.some((d) => ['pending', 'late'].includes(d.status))
         ? el('button', { type: 'button', class: 'btn btn--secondary', onClick: () => openSettle(null, `todas as dívidas de ${debtor.name}`), text: 'Quitar todas as dívidas' }) : null,
       table,
       paymentsTable ? el('h3', { text: 'Recebimentos' }) : null,
