@@ -1,0 +1,570 @@
+rules_version = '2';
+
+/**
+ * Personal Finance — Security Rules (Fase 2)
+ *
+ * Princípios:
+ *  - Negação padrão: nada é acessível sem regra explícita.
+ *  - Isolamento total por usuário: todo caminho exige request.auth.uid == userId.
+ *  - Campos fechados: cada coleção lista os campos permitidos e os obrigatórios.
+ *  - Dinheiro em centavos inteiros (is int, >= 0; movimentações > 0).
+ *  - Datas como timestamp; createdAt/updatedAt só pelo servidor.
+ *  - auditLog: create-only (sem update/delete) — nem o administrador altera ou apaga auditoria.
+ *  - Administrador (VF-2-03w): custom claim `admin == true` (definido SÓ pelo Admin SDK/Console — o cliente não
+ *    consegue se auto-promover). Poderes MÍNIMOS: LER e APAGAR documentos das coleções de DOMÍNIO de qualquer uid
+ *    (para limpeza administrativa sem entrar na conta do usuário). Não cria, não edita, não toca perfil,
+ *    configurações nem auditLog. Usuário comum continua restrito ao próprio uid.
+ *  - Referências: IDs de documentos da própria árvore do usuário, validados com exists().
+ */
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers globais ----------
+    function signedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    // Administrador: claim de token definida pelo Admin SDK (`setCustomUserClaims(uid, { admin: true })`).
+    function isAdmin() {
+      return signedIn() && request.auth.token.admin == true;
+    }
+
+    function data() {
+      return request.resource.data;
+    }
+
+    function keysOk(allowed) {
+      return data().keys().hasOnly(allowed);
+    }
+
+    function requiredOk(required) {
+      return data().keys().hasAll(required);
+    }
+
+    function cents(value) {
+      return value is int && value >= 0;
+    }
+
+    function positiveCents(value) {
+      return value is int && value > 0;
+    }
+
+    function stamp(value) {
+      return value is timestamp;
+    }
+
+    function optionalStamp(field) {
+      return !(field in data()) || data()[field] is timestamp;
+    }
+
+    function optionalString(field, maxLen) {
+      return !(field in data()) || (data()[field] is string && data()[field].size() <= maxLen);
+    }
+
+    function optionalBool(field) {
+      return !(field in data()) || data()[field] is bool;
+    }
+
+    function text(field, maxLen) {
+      return data()[field] is string
+        && data()[field].size() > 0
+        && data()[field].size() <= maxLen;
+    }
+
+    function oneOf(field, allowed) {
+      return data()[field] is string && data()[field] in allowed;
+    }
+
+    function timestampsOk() {
+      return data().createdAt == request.time && data().updatedAt == request.time;
+    }
+
+    function immutable(name) {
+      return data()[name] == resource.data[name];
+    }
+
+    // Referência a documento da própria árvore: string ID + existência real.
+    function ref(userId, collectionName, field) {
+      return data()[field] is string
+        && data()[field].size() > 0
+        && data()[field].size() <= 128
+        && exists(/databases/$(database)/documents/users/$(userId)/$(collectionName)/$(data()[field]));
+    }
+
+    function optionalRef(userId, collectionName, field) {
+      return !(field in data()) || ref(userId, collectionName, field);
+    }
+
+    // Caminho de um documento da árvore do usuário (para get/getAfter/exists).
+    function docPath(userId, collectionName, id) {
+      return /databases/$(database)/documents/users/$(userId)/$(collectionName)/$(id);
+    }
+
+    // ---------- raiz do usuário ----------
+    match /users/{userId} {
+      allow read, write: if false;
+    }
+
+    // ---------- perfil (documento único) ----------
+    match /users/{userId}/profile/{docId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId)
+        && docId == 'main'
+        && keysOk(['name', 'email', 'currency', 'locale', 'createdAt', 'updatedAt'])
+        && requiredOk(['name', 'email', 'currency', 'locale', 'createdAt', 'updatedAt'])
+        && text('name', 80)
+        && text('email', 160)
+        && data().currency == 'BRL'
+        && data().locale == 'pt-BR'
+        && timestampsOk();
+      allow update: if isOwner(userId)
+        && docId == 'main'
+        && keysOk(['name', 'email', 'currency', 'locale', 'createdAt', 'updatedAt'])
+        && requiredOk(['name', 'email', 'currency', 'locale', 'createdAt', 'updatedAt'])
+        && text('name', 80)
+        && text('email', 160)
+        && data().currency == 'BRL'
+        && data().locale == 'pt-BR'
+        && immutable('createdAt')
+        && data().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // ---------- configurações (documento único) ----------
+    match /users/{userId}/settings/{docId} {
+      allow read: if isOwner(userId);
+      allow create, update: if isOwner(userId)
+        && docId == 'main'
+        && keysOk(['theme', 'hideValues', 'firstWeekday', 'createdAt', 'updatedAt'])
+        && requiredOk(['theme', 'createdAt', 'updatedAt'])
+        && oneOf('theme', ['light', 'dark', 'system'])
+        && optionalBool('hideValues')
+        && (!('firstWeekday' in data()) || (data().firstWeekday is int && data().firstWeekday >= 0 && data().firstWeekday <= 6))
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if false;
+    }
+
+    // ---------- contas ----------
+    match /users/{userId}/accounts/{accountId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['institution', 'name', 'type', 'initialBalanceCents', 'openingDate', 'color', 'status', 'createdAt', 'updatedAt'])
+        && requiredOk(['institution', 'type', 'initialBalanceCents', 'color', 'status', 'createdAt', 'updatedAt'])
+        && text('institution', 80)
+        && (!('name' in data()) || text('name', 80))
+        && optionalStamp('openingDate')
+        && oneOf('type', ['checking', 'salary', 'savings', 'digital', 'investment', 'benefit', 'other'])
+        && cents(data().initialBalanceCents)
+        && text('color', 32)
+        && oneOf('status', ['active', 'inactive', 'archived'])
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- categorias ----------
+    match /users/{userId}/categories/{categoryId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['name', 'kind', 'color', 'createdAt', 'updatedAt'])
+        && requiredOk(['name', 'kind', 'color', 'createdAt', 'updatedAt'])
+        && text('name', 60)
+        && oneOf('kind', ['income', 'expense', 'both'])
+        && text('color', 32)
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- receitas ----------
+    match /users/{userId}/incomes/{incomeId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['description', 'categoryId', 'amountCents', 'expectedDate', 'receivedDate',
+                   'accountId', 'status', 'recurrence', 'notes', 'createdAt', 'updatedAt'])
+        && requiredOk(['description', 'categoryId', 'amountCents', 'expectedDate',
+                       'accountId', 'status', 'recurrence', 'createdAt', 'updatedAt'])
+        && text('description', 120)
+        && positiveCents(data().amountCents)
+        && stamp(data().expectedDate)
+        && optionalStamp('receivedDate')
+        && ref(userId, 'categories', 'categoryId')
+        && ref(userId, 'accounts', 'accountId')
+        && oneOf('status', ['pending', 'received', 'cancelled'])
+        && oneOf('recurrence', ['none', 'monthly', 'weekly', 'yearly'])
+        && optionalString('notes', 500)
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- despesas ----------
+    match /users/{userId}/expenses/{expenseId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['description', 'categoryId', 'amountCents', 'accountId', 'purchaseDate',
+                   'dueDate', 'paidDate', 'status', 'recurrence', 'notes',
+                   'installmentGroupId', 'createdAt', 'updatedAt'])
+        && requiredOk(['description', 'categoryId', 'amountCents', 'accountId',
+                       'purchaseDate', 'dueDate', 'status', 'recurrence', 'createdAt', 'updatedAt'])
+        && text('description', 120)
+        && positiveCents(data().amountCents)
+        && stamp(data().purchaseDate)
+        && stamp(data().dueDate)
+        && optionalStamp('paidDate')
+        && ref(userId, 'categories', 'categoryId')
+        && ref(userId, 'accounts', 'accountId')
+        && oneOf('status', ['pending', 'paid', 'cancelled'])
+        && oneOf('recurrence', ['none', 'monthly', 'weekly', 'yearly'])
+        && optionalString('notes', 500)
+        && optionalString('installmentGroupId', 128)
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- transferências ----------
+    match /users/{userId}/transfers/{transferId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['fromAccountId', 'toAccountId', 'amountCents', 'date', 'reason',
+                   'notes', 'status', 'createdAt', 'updatedAt'])
+        && requiredOk(['fromAccountId', 'toAccountId', 'amountCents', 'date',
+                       'reason', 'status', 'createdAt', 'updatedAt'])
+        && data().fromAccountId != data().toAccountId
+        && ref(userId, 'accounts', 'fromAccountId')
+        && ref(userId, 'accounts', 'toAccountId')
+        && positiveCents(data().amountCents)
+        && stamp(data().date)
+        && text('reason', 120)
+        && optionalString('notes', 500)
+        && oneOf('status', ['pending', 'confirmed', 'cancelled'])
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- assinaturas ----------
+    match /users/{userId}/subscriptions/{subscriptionId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['name', 'amountCents', 'periodicity', 'nextChargeDate', 'accountId',
+                   'cardId', 'categoryId', 'status', 'notes', 'createdAt', 'updatedAt'])
+        && requiredOk(['name', 'amountCents', 'periodicity', 'nextChargeDate',
+                       'accountId', 'categoryId', 'status', 'createdAt', 'updatedAt'])
+        && text('name', 80)
+        && positiveCents(data().amountCents)
+        && oneOf('periodicity', ['monthly', 'weekly', 'yearly'])
+        && stamp(data().nextChargeDate)
+        && ref(userId, 'accounts', 'accountId')
+        && optionalRef(userId, 'creditCards', 'cardId')
+        && ref(userId, 'categories', 'categoryId')
+        && oneOf('status', ['active', 'paused', 'cancelled'])
+        && optionalString('notes', 500)
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- devedores ----------
+    match /users/{userId}/debtors/{debtorId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['name', 'loanDate', 'lentCents', 'receivedCents', 'status', 'notes',
+                   'createdAt', 'updatedAt'])
+        && requiredOk(['name', 'loanDate', 'lentCents', 'receivedCents', 'status',
+                       'createdAt', 'updatedAt'])
+        && text('name', 80)
+        && stamp(data().loanDate)
+        && cents(data().lentCents)
+        && cents(data().receivedCents)
+        && data().receivedCents <= data().lentCents
+        && (resource == null || data().receivedCents >= resource.data.receivedCents)
+        && oneOf('status', ['open', 'paid', 'cancelled'])
+        && optionalString('notes', 500)
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- dívidas (parcelas) ----------
+    match /users/{userId}/debts/{debtId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['debtorId', 'description', 'principalCents', 'dueDate',
+                   'installmentNumber', 'installmentsTotal', 'debtGroupId', 'status',
+                   'createdAt', 'updatedAt'])
+        && requiredOk(['debtorId', 'description', 'principalCents', 'dueDate',
+                       'installmentNumber', 'status', 'createdAt', 'updatedAt'])
+        && ref(userId, 'debtors', 'debtorId')
+        && text('description', 120)
+        && positiveCents(data().principalCents)
+        && stamp(data().dueDate)
+        && data().installmentNumber is int
+        && data().installmentNumber > 0
+        && data().installmentNumber <= 360
+        && (!('installmentsTotal' in data())
+            || (data().installmentsTotal is int
+                && data().installmentsTotal >= data().installmentNumber
+                && data().installmentsTotal <= 360))
+        && optionalString('debtGroupId', 128)
+        && oneOf('status', ['pending', 'paid', 'late', 'cancelled'])
+        && data().updatedAt == request.time
+        && (resource == null
+            || (immutable('createdAt') && immutable('debtorId') && immutable('principalCents') && immutable('dueDate')
+                && immutable('installmentNumber') && immutable('description')
+                && data().get('installmentsTotal', null) == resource.data.get('installmentsTotal', null)
+                && data().get('debtGroupId', null) == resource.data.get('debtGroupId', null)));
+      // Parcela PAGA (tem recebimentos) só some com administrador ou depois que o devedor foi removido.
+      allow delete: if isAdmin()
+        || (isOwner(userId)
+            && (resource.data.status != 'paid' || !exists(docPath(userId, 'debtors', resource.data.debtorId))));
+    }
+
+    // ---------- recebimentos de dívidas ----------
+    match /users/{userId}/debtPayments/{paymentId} {
+      allow read: if isOwner(userId) || isAdmin();
+      // HISTÓRICO IMUTÁVEL: recebimento só é criado (nunca editado). Sem `update`, regravar um ID existente também é negado
+      // — base da idempotência dos IDs sequenciais `pay-<parcela>-<n>` (VF-2-03al).
+      allow create: if isOwner(userId)
+        && keysOk(['debtId', 'purchaseId', 'debtorId', 'amountCents', 'date', 'accountId', 'operationId', 'notes',
+                   'createdAt', 'updatedAt'])
+        && requiredOk(['debtorId', 'amountCents', 'date', 'accountId',
+                       'createdAt', 'updatedAt'])
+        // Recebimento de UMA parcela: da dívida (debtId) OU da parcela de cartão do devedor (purchaseId), nunca ambas/nenhuma.
+        && (('debtId' in data()) != ('purchaseId' in data()))
+        // (a existência da parcela é garantida pelo `get` abaixo: documento inexistente nega a regra; sem `exists`
+        // duplicado — o limite do Firestore é de ~20 acessos a documentos por lote)
+        && ref(userId, 'debtors', 'debtorId')
+        && positiveCents(data().amountCents)
+        && stamp(data().date)
+        && ref(userId, 'accounts', 'accountId')
+        // Vínculo com a parcela: mesmo devedor e valor nunca acima do valor da parcela (o acumulado da parcela é
+        // controlado pelo ID sequencial `pay-<parcela>-<n>`: a 2ª gravação sobre a mesma leitura cai em `update`, negado).
+        && ((('debtId' in data())
+              && get(docPath(userId, 'debts', data().debtId)).data.debtorId == data().debtorId
+              && data().amountCents <= get(docPath(userId, 'debts', data().debtId)).data.principalCents)
+            || (('purchaseId' in data())
+              && get(docPath(userId, 'cardPurchases', data().purchaseId)).data.debtorId == data().debtorId
+              && data().amountCents <= get(docPath(userId, 'cardPurchases', data().purchaseId)).data.amountCents))
+        // Recebimento e total do devedor andam JUNTOS: o `receivedCents` do devedor, ao fim do lote, sobe pelo menos o
+        // valor deste recebimento (impede registrar dinheiro sem atualizar o devedor; o teto `<= lentCents` está em debtors).
+        && getAfter(docPath(userId, 'debtors', data().debtorId)).data.receivedCents
+             - get(docPath(userId, 'debtors', data().debtorId)).data.receivedCents >= data().amountCents
+        && optionalString('operationId', 64)
+        && optionalString('notes', 500)
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      // Sem `update` acima = recebimentos IMUTÁVEIS. Exclusão: só administrador, ou (limpeza de dados do dono) quando o
+      // devedor ou a conta do recebimento já não existe — nunca com a cadeia devedor/conta/recebimento íntegra.
+      allow delete: if isAdmin()
+        || (isOwner(userId)
+            && (!exists(docPath(userId, 'debtors', resource.data.debtorId))
+                || !exists(docPath(userId, 'accounts', resource.data.accountId))));
+    }
+
+    // ---------- metas ----------
+    match /users/{userId}/goals/{goalId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['name', 'description', 'targetCents', 'deadline', 'accountId',
+                   'status', 'createdAt', 'updatedAt'])
+        && requiredOk(['name', 'targetCents', 'status', 'createdAt', 'updatedAt'])
+        && text('name', 80)
+        && optionalString('description', 300)
+        && positiveCents(data().targetCents)
+        && optionalStamp('deadline')
+        && optionalRef(userId, 'accounts', 'accountId')
+        && oneOf('status', ['active', 'completed', 'cancelled'])
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- movimentações de metas ----------
+    match /users/{userId}/goalTransactions/{transactionId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['goalId', 'type', 'amountCents', 'date', 'accountId', 'notes',
+                   'createdAt', 'updatedAt'])
+        && requiredOk(['goalId', 'type', 'amountCents', 'date', 'accountId',
+                       'createdAt', 'updatedAt'])
+        && ref(userId, 'goals', 'goalId')
+        && oneOf('type', ['deposit', 'withdraw'])
+        && positiveCents(data().amountCents)
+        && stamp(data().date)
+        && ref(userId, 'accounts', 'accountId')
+        && optionalString('notes', 300)
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- cartões ----------
+    match /users/{userId}/creditCards/{cardId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['name', 'brand', 'limitCents', 'closingDay', 'dueDay', 'accountId',
+                   'color', 'status', 'createdAt', 'updatedAt'])
+        && requiredOk(['name', 'brand', 'limitCents', 'closingDay', 'dueDay',
+                       'status', 'createdAt', 'updatedAt'])
+        && text('name', 80)
+        && text('brand', 40)
+        && positiveCents(data().limitCents)
+        && data().closingDay is int && data().closingDay >= 1 && data().closingDay <= 31
+        && data().dueDay is int && data().dueDay >= 1 && data().dueDay <= 31
+        && optionalRef(userId, 'accounts', 'accountId')
+        && optionalString('color', 32)
+        && oneOf('status', ['active', 'blocked', 'cancelled'])
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- compras no cartão ----------
+    match /users/{userId}/cardPurchases/{purchaseId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId)
+        && keysOk(['cardId', 'description', 'amountCents', 'purchaseDate', 'installmentsTotal',
+                   'installmentNumber', 'categoryId', 'invoiceId', 'debtorId', 'notes',
+                   'createdAt', 'updatedAt'])
+        && requiredOk(['cardId', 'description', 'amountCents', 'purchaseDate',
+                       'installmentsTotal', 'installmentNumber', 'createdAt', 'updatedAt'])
+        && ref(userId, 'creditCards', 'cardId')
+        && text('description', 120)
+        && positiveCents(data().amountCents)
+        && stamp(data().purchaseDate)
+        && data().installmentsTotal is int
+        && data().installmentsTotal >= 1 && data().installmentsTotal <= 48
+        && data().installmentNumber is int
+        && data().installmentNumber >= 1
+        && data().installmentNumber <= data().installmentsTotal
+        && optionalRef(userId, 'categories', 'categoryId')
+        && optionalRef(userId, 'invoices', 'invoiceId')
+        && optionalRef(userId, 'debtors', 'debtorId')
+        && optionalString('notes', 300)
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      // Compra lançada é imutável (valor/devedor/fatura não mudam depois). Compra de DEVEDOR só é excluída por
+      // administrador ou depois que o devedor foi removido (preserva o que ele deve e os recebimentos dela).
+      allow delete: if isAdmin()
+        || (isOwner(userId)
+            && (!('debtorId' in resource.data) || !exists(docPath(userId, 'debtors', resource.data.debtorId))));
+    }
+
+    // ---------- faturas ----------
+    match /users/{userId}/invoices/{invoiceId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['cardId', 'referenceMonth', 'closingDate', 'dueDate', 'totalCents',
+                   'paidCents', 'accountId', 'paidAt', 'status', 'createdAt', 'updatedAt'])
+        && requiredOk(['cardId', 'referenceMonth', 'dueDate', 'status', 'createdAt', 'updatedAt'])
+        && ref(userId, 'creditCards', 'cardId')
+        && data().referenceMonth is string
+        && data().referenceMonth.matches('^[0-9]{4}-(0[1-9]|1[0-2])$')
+        && optionalStamp('closingDate')
+        && stamp(data().dueDate)
+        && (!('totalCents' in data()) || cents(data().totalCents))
+        && (!('paidCents' in data()) || cents(data().paidCents))
+        && optionalRef(userId, 'accounts', 'accountId')
+        && optionalStamp('paidAt')
+        && oneOf('status', ['open', 'closed', 'paid', 'cancelled'])
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'))
+        // Fatura PAGA é pagamento confirmado: valor, conta e data não mudam (nem a fatura volta de `paid`).
+        && (resource == null || resource.data.status != 'paid');
+      allow delete: if isAdmin()
+        || (isOwner(userId)
+            && (resource.data.status != 'paid' || !exists(docPath(userId, 'creditCards', resource.data.cardId))));
+    }
+
+    // ---------- orçamentos ----------
+    match /users/{userId}/budgets/{budgetId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isOwner(userId)
+        && keysOk(['categoryId', 'month', 'limitCents', 'createdAt', 'updatedAt'])
+        && requiredOk(['categoryId', 'month', 'limitCents', 'createdAt', 'updatedAt'])
+        && ref(userId, 'categories', 'categoryId')
+        && data().month is string
+        && data().month.matches('^[0-9]{4}-(0[1-9]|1[0-2])$')
+        && positiveCents(data().limitCents)
+        && data().updatedAt == request.time
+        && (resource == null || immutable('createdAt'));
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- auditoria (imutável) ----------
+    match /users/{userId}/auditLog/{entryId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId)
+        && keysOk(['action', 'entity', 'entityId', 'before', 'after', 'actorUid', 'createdAt'])
+        && requiredOk(['action', 'entity', 'entityId', 'actorUid', 'createdAt'])
+        && text('action', 60)
+        && text('entity', 60)
+        && text('entityId', 128)
+        && (!('before' in data()) || data().before is map)
+        && (!('after' in data()) || data().after is map)
+        && data().actorUid == request.auth.uid
+        && data().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // ---------- consulta de grupo de coleções (SOMENTE administrador, só leitura) ----------
+    // Permite à limpeza global descobrir documentos de todos os usuários sem enumerar uids.
+    match /{path=**}/accounts/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/categories/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/incomes/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/expenses/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/transfers/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/subscriptions/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/debtors/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/debts/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/debtPayments/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/goals/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/goalTransactions/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/creditCards/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/cardPurchases/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/invoices/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/budgets/{docId} {
+      allow read: if isAdmin();
+    }
+
+    // ---------- negação padrão ----------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

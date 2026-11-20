@@ -16,6 +16,7 @@ import {
   removeAudited,
 } from './firestore.js';
 import { financeResult } from './financeApi.js';
+import { reversalsOrNone } from '../utils/reversalsAccess.js';
 import {
   buildEntity,
   isAccountLinkedGoal,
@@ -47,7 +48,7 @@ export async function getGoal(uid, goalId) {
 async function loadGoalLedger(uid, goalId, io = {}) {
   const listFn = io.list ?? list;
   const where = { where: [['goalId', '==', goalId]] };
-  const [transactions, reversals] = await Promise.all([listFn(uid, TXS, where), listFn(uid, COLLECTIONS.reversals, where)]);
+  const [transactions, reversals] = await Promise.all([listFn(uid, TXS, where), reversalsOrNone(listFn(uid, COLLECTIONS.reversals, where))]);
   return { transactions: transactions ?? [], reversals: reversals ?? [] };
 }
 

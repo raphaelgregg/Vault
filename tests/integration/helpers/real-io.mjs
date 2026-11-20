@@ -23,10 +23,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 export const PROJECT_ID = 'demo-vault-finance';
 export const ALICE = 'alice-uid';
 
-export async function startEnv() {
+export async function startEnv(rulesFile = 'firestore.rules') {
   return initializeTestEnvironment({
     projectId: PROJECT_ID,
-    firestore: { rules: readFileSync(join(root, 'firestore.rules'), 'utf8'), host: '127.0.0.1', port: 8080 },
+    firestore: { rules: readFileSync(join(root, rulesFile), 'utf8'), host: '127.0.0.1', port: 8080 },
   });
 }
 

@@ -13,6 +13,7 @@ import {
   updateAudited,
 } from './firestore.js';
 import { financeResult } from './financeApi.js';
+import { reversalsOrNone } from '../utils/reversalsAccess.js';
 import {
   buildEntity,
   centsToMoneyString,
@@ -190,7 +191,7 @@ export async function loadDebtorStatements(uid, debtors, month, io = {}) {
     byIn(COLLECTIONS.cardPurchases, 'debtorId', ids),
     byIn(COLLECTIONS.debts, 'debtorId', ids),
     byIn(COLLECTIONS.debtPayments, 'debtorId', ids),
-    byIn(COLLECTIONS.reversals, 'debtorId', ids), // estornos de recebimento: o recebido da parcela os desconta
+    reversalsOrNone(byIn(COLLECTIONS.reversals, 'debtorId', ids)), // estornos de recebimento: o recebido da parcela os desconta (negado pelas Rules antigas = nenhum)
   ]);
   const cardIds = [...new Set(purchases.map((p) => p.cardId).filter(Boolean))];
   const invoices = cardIds.length ? await byIn(COLLECTIONS.invoices, 'cardId', cardIds) : [];
