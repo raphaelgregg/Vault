@@ -29,6 +29,16 @@ async function fetchCategory(uid, categoryId) {
   return getById(uid, CATEGORY_COLLECTION, categoryId);
 }
 
+/**
+ * Coerência status × data de recebimento. `received` sempre tem `receivedDate` (padrão: hoje em America/Sao_Paulo);
+ * outro status NÃO guarda `receivedDate` (na atualização o campo é removido: `null` → deleteField; na criação é omitido).
+ */
+export function settleDates(data, forUpdate) {
+  if (data.status === 'received') return { ...data, receivedDate: data.receivedDate ?? todayInAppZone() };
+  const { receivedDate: _discarded, ...rest } = data;
+  return forUpdate ? { ...rest, receivedDate: null } : rest;
+}
+
 /** Lista receitas com filtros opcionais. */
 export async function listIncomes(uid, options = {}) {
   const constraints = { orderBy: ['expectedDate', 'desc'] };
@@ -52,8 +62,9 @@ export async function getIncome(uid, incomeId) {
  * Retorna { ok, id, errors }.
  */
 export async function createIncome(uid, rawData, deps = {}) {
-  const { ok, data, errors } = buildEntity('incomes', rawData);
-  if (!ok) return { ok: false, errors };
+  const built = buildEntity('incomes', rawData);
+  if (!built.ok) return { ok: false, errors: built.errors };
+  const data = settleDates(built.data, false);
 
   const lookupCategory = deps.lookupCategory ?? fetchCategory;
   const category = await lookupCategory(uid, data.categoryId);
@@ -70,8 +81,9 @@ export async function createIncome(uid, rawData, deps = {}) {
  * Retorna { ok, errors }.
  */
 export async function updateIncome(uid, incomeId, rawData, deps = {}) {
-  const { ok, data, errors } = buildEntity('incomes', rawData);
-  if (!ok) return { ok: false, errors };
+  const built = buildEntity('incomes', rawData);
+  if (!built.ok) return { ok: false, errors: built.errors };
+  const data = settleDates(built.data, true);
 
   const lookupCategory = deps.lookupCategory ?? fetchCategory;
   const category = await lookupCategory(uid, data.categoryId);
@@ -96,6 +108,9 @@ export async function deleteIncome(uid, incomeId, io = {}) {
 
 /** Marca receita como recebida (status -> received + receivedDate = hoje). */
 export async function markIncomeReceived(uid, incomeId, receivedDate = null, io = {}) {
+  const current = await (io.getById ?? getById)(uid, COLLECTION, incomeId);
+  if (!current) return { ok: false, errors: { _form: 'Receita não encontrada.' } };
+  if (current.status !== 'pending') return { ok: false, errors: { _form: 'Só é possível marcar como recebida uma receita prevista.' } };
   const date = receivedDate ?? todayInAppZone();
   await updateAudited(uid, COLLECTION, incomeId, { status: 'received', receivedDate: date }, io, 'mark_received');
   return { ok: true };
@@ -103,6 +118,9 @@ export async function markIncomeReceived(uid, incomeId, receivedDate = null, io 
 
 /** Marca receita como cancelada. */
 export async function cancelIncome(uid, incomeId, io = {}) {
+  const current = await (io.getById ?? getById)(uid, COLLECTION, incomeId);
+  if (!current) return { ok: false, errors: { _form: 'Receita não encontrada.' } };
+  if (current.status !== 'pending') return { ok: false, errors: { _form: 'Só é possível cancelar uma receita prevista (recebida: edite ou exclua).' } };
   await updateAudited(uid, COLLECTION, incomeId, { status: 'cancelled' }, io, 'cancel');
   return { ok: true };
 }

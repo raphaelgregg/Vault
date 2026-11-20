@@ -276,7 +276,7 @@ async function openInvoicesModal(card, { showCancelled = false } = {}) {
   const toggleCancelled = (hiddenCount > 0 || showCancelled) && invoices.some((i) => i.status === 'cancelled')
     ? el('button', {
       type: 'button', class: 'btn btn--secondary',
-      onClick: () => { closeModal(); openInvoicesModal(card, { showCancelled: !showCancelled }); },
+      onClick: () => { closeModal(); openInvoicesModal(card, { showCancelled: !showCancelled }).catch((error) => toast(describeError(error), 6000)); },
       text: showCancelled ? 'Ocultar faturas canceladas' : `Mostrar faturas canceladas (${hiddenCount})`,
     })
     : null;

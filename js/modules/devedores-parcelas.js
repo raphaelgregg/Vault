@@ -17,6 +17,7 @@ import { debtorPendingCents, debtorObligations, receivedByInstallment, accountLa
 import { getDebtor, getDebtorStatement } from '../services/debtors.js';
 import { listCards } from '../services/creditCards.js';
 import { listAccounts } from '../services/accounts.js';
+import { describeError } from '../utils/errors.js';
 
 const STATUS_LABELS = { pending: 'Pendente', partial: 'Parcial', paid: 'Paga', late: 'Atrasada', cancelled: 'Cancelada' };
 
@@ -51,7 +52,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
     await openDebtorInstallments({ user, debtor: fresh ?? debtor, onChange, month });
   };
 
-  const reopen = () => { closeModal(); openDebtorInstallments({ user, debtor, onChange, month }); };
+  const reopen = () => { closeModal(); openDebtorInstallments({ user, debtor, onChange, month }).catch((error) => toast(describeError(error), 6000)); };
 
   // Quitar dívida (VF-2-03n): baixa do restante de todas as parcelas pendentes de uma dívida (ou de todas), em lote.
   const openSettle = (groupId, label) => {
@@ -164,7 +165,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
     debtor, debts, receivedByDebt: receivedBy, receivedByPurchase, purchases: statement.purchases,
     invoicesById: statement.invoicesById, cardsById: cardName,
   });
-  const reopenMonth = (m) => { closeModal(); openDebtorInstallments({ user, debtor, onChange, month: m }); };
+  const reopenMonth = (m) => { closeModal(); openDebtorInstallments({ user, debtor, onChange, month: m }).catch((error) => toast(describeError(error), 6000)); };
   const listAll = month === 'all';
   const closingMonth = statement.month;
   const monthValues = [...new Set([...obligations.items.map((i) => i.referenceMonth).filter(Boolean), closingMonth])].sort();

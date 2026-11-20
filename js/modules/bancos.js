@@ -23,13 +23,11 @@ import {
   formatCents,
   parseMoneyToCents,
 } from '../services/accounts.js';
-import { listCategories } from '../services/categories.js';
 
 export const meta = { title: 'Bancos', icon: 'landmark' };
 
 let currentUser = null;
 let accountsCache = [];
-let categoriesCache = [];
 /** Teto de contas listadas (VF-4-03); ao atingir, a página avisa. */
 const ACCOUNT_LIST_LIMIT = 200;
 /** Saldos derivados, calculados SOB DEMANDA (lê movimentos; poupa a cota de leituras): null = não calculado. */
@@ -44,10 +42,7 @@ export async function render(container, { user }) {
 
 /** Carrega dados iniciais. */
 async function loadData() {
-  [accountsCache, categoriesCache] = await Promise.all([
-    listAccounts(currentUser.uid, { limit: ACCOUNT_LIST_LIMIT }),
-    listCategories(currentUser.uid),
-  ]);
+  accountsCache = await listAccounts(currentUser.uid, { limit: ACCOUNT_LIST_LIMIT });
   derived = null; // dados mudaram: o saldo derivado anterior ficou obsoleto
   await calculateBalances({ silent: true }); // saldo atual calculado ao abrir (e a cada recarga), não só sob demanda
 }
@@ -171,22 +166,6 @@ function createAccountsTable() {
     { key: 'status', label: 'Status', render: (v) => getStatusLabel(v) },
   ];
 
-  const head = el('tr', {}, columns.map((c) =>
-    el('th', { class: c.numeric ? 'num' : '', text: c.label })
-  ));
-
-  const body = accountsCache.map((account) =>
-    el('tr', {}, columns.map((column) => {
-      const value = account[column.key];
-      const display = column.render ? column.render(value) : (value ?? '—');
-      return el('td', {
-        class: column.numeric ? 'num' : '',
-        text: display,
-      });
-    }))
-  );
-
-  // Adiciona coluna de ações
   const headWithActions = el('tr', {}, [
     ...columns.map((c) => el('th', { class: c.numeric ? 'num' : '', text: c.label })),
     el('th', { text: 'Ações' }),

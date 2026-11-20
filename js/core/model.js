@@ -48,7 +48,9 @@ export function parseMoneyToCents(input) {
     raw = raw.replace(/\./g, '').replace(',', '.');
   } else if (raw.includes(',') && !raw.includes('.')) {
     raw = raw.replace(',', '.');
-  } else if ((raw.match(/\./g) ?? []).length > 1) {
+  } else if (/^[1-9]\d{0,2}(\.\d{3})+$/.test(raw) || (raw.match(/\./g) ?? []).length > 1) {
+    // Só grupos de milhar ("1.234", "12.345", "1.234.567"): o ponto separa milhares, não é decimal — antes
+    // "1.234" virava R$ 1,23 e "999.999" virava R$ 1.000,00. ("1.5" e "1234.56" seguem decimais.)
     raw = raw.replace(/\./g, '');
   }
   if (!/^\d+(\.\d+)?$/.test(raw)) return null;

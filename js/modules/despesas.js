@@ -559,7 +559,7 @@ async function confirmMarkPaid(expense) {
     await loadData();
     renderPage($('.content') || document.getElementById('page-content'));
   } else {
-    toast('Erro ao marcar como paga.', 5000);
+    toast(result.errors?._form ?? 'Erro ao marcar como paga.', 5000);
   }
 }
 
@@ -571,7 +571,7 @@ async function confirmCancelExpense(expense) {
     await loadData();
     renderPage($('.content') || document.getElementById('page-content'));
   } else {
-    toast('Erro ao cancelar.', 5000);
+    toast(result.errors?._form ?? 'Erro ao cancelar.', 5000);
   }
 }
 

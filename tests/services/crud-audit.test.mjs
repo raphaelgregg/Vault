@@ -155,7 +155,7 @@ describe('services delegam aos helpers (criar/atualizar/excluir/status)', () => 
   }
 
   it('markIncomeReceived / cancelIncome auditam com action própria', async () => {
-    const { io, calls } = makeIo();
+    const { io, calls } = makeIo({ getById: async () => ({ id: 'i1', status: 'pending' }) });
     await markIncomeReceived(uid, 'i1', '2026-11-18', io);
     await cancelIncome(uid, 'i1', io);
     assert.deepEqual(calls.update[0].data, { status: 'received', receivedDate: '2026-11-18' });
@@ -164,7 +164,7 @@ describe('services delegam aos helpers (criar/atualizar/excluir/status)', () => 
   });
 
   it('markExpensePaid / cancelExpense auditam com action própria', async () => {
-    const { io, calls } = makeIo();
+    const { io, calls } = makeIo({ getById: async () => ({ id: 'e1', status: 'pending' }) });
     await markExpensePaid(uid, 'e1', '2026-11-18', io);
     await cancelExpense(uid, 'e1', io);
     assert.deepEqual(calls.update[0].data, { status: 'paid', paidDate: '2026-11-18' });

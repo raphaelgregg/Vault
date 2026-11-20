@@ -535,7 +535,7 @@ async function confirmMarkReceived(income) {
     await loadData();
     renderPage($('.content') || document.getElementById('page-content'));
   } else {
-    toast('Erro ao marcar como recebida.', 5000);
+    toast(result.errors?._form ?? 'Erro ao marcar como recebida.', 5000);
   }
 }
 
@@ -547,7 +547,7 @@ async function confirmCancelIncome(income) {
     await loadData();
     renderPage($('.content') || document.getElementById('page-content'));
   } else {
-    toast('Erro ao cancelar.', 5000);
+    toast(result.errors?._form ?? 'Erro ao cancelar.', 5000);
   }
 }
 

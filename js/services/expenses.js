@@ -29,6 +29,18 @@ async function fetchCategory(uid, categoryId) {
   return getById(uid, CATEGORY_COLLECTION, categoryId);
 }
 
+/**
+ * Coerência status × data de pagamento. `paid` sempre tem `paidDate` (padrão: hoje em America/Sao_Paulo — sem ela a
+ * despesa paga contava no saldo mas sumia do resultado do mês); qualquer outro status NÃO guarda `paidDate`
+ * (antes, editar paga → pendente/cancelada deixava uma data de pagamento órfã). Na atualização o campo é removido
+ * (`null` → deleteField); na criação é simplesmente omitido. Puro (exceto o "hoje" padrão).
+ */
+export function settleDates(data, forUpdate) {
+  if (data.status === 'paid') return { ...data, paidDate: data.paidDate ?? todayInAppZone() };
+  const { paidDate: _discarded, ...rest } = data;
+  return forUpdate ? { ...rest, paidDate: null } : rest;
+}
+
 /** Lista despesas com filtros opcionais. */
 export async function listExpenses(uid, options = {}) {
   const constraints = { orderBy: ['dueDate', 'asc'] };
@@ -52,8 +64,9 @@ export async function getExpense(uid, expenseId) {
  * Retorna { ok, id, errors }.
  */
 export async function createExpense(uid, rawData, deps = {}) {
-  const { ok, data, errors } = buildEntity('expenses', rawData);
-  if (!ok) return { ok: false, errors };
+  const built = buildEntity('expenses', rawData);
+  if (!built.ok) return { ok: false, errors: built.errors };
+  const data = settleDates(built.data, false);
 
   const lookupCategory = deps.lookupCategory ?? fetchCategory;
   const category = await lookupCategory(uid, data.categoryId);
@@ -70,8 +83,9 @@ export async function createExpense(uid, rawData, deps = {}) {
  * Retorna { ok, errors }.
  */
 export async function updateExpense(uid, expenseId, rawData, deps = {}) {
-  const { ok, data, errors } = buildEntity('expenses', rawData);
-  if (!ok) return { ok: false, errors };
+  const built = buildEntity('expenses', rawData);
+  if (!built.ok) return { ok: false, errors: built.errors };
+  const data = settleDates(built.data, true);
 
   const lookupCategory = deps.lookupCategory ?? fetchCategory;
   const category = await lookupCategory(uid, data.categoryId);
@@ -96,6 +110,9 @@ export async function deleteExpense(uid, expenseId, io = {}) {
 
 /** Marca despesa como paga (status -> paid + paidDate = hoje). */
 export async function markExpensePaid(uid, expenseId, paidDate = null, io = {}) {
+  const current = await (io.getById ?? getById)(uid, COLLECTION, expenseId);
+  if (!current) return { ok: false, errors: { _form: 'Despesa não encontrada.' } };
+  if (current.status !== 'pending') return { ok: false, errors: { _form: 'Só é possível marcar como paga uma despesa pendente.' } };
   const date = paidDate ?? todayInAppZone();
   await updateAudited(uid, COLLECTION, expenseId, { status: 'paid', paidDate: date }, io, 'mark_paid');
   return { ok: true };
@@ -103,6 +120,9 @@ export async function markExpensePaid(uid, expenseId, paidDate = null, io = {}) 
 
 /** Marca despesa como cancelada. */
 export async function cancelExpense(uid, expenseId, io = {}) {
+  const current = await (io.getById ?? getById)(uid, COLLECTION, expenseId);
+  if (!current) return { ok: false, errors: { _form: 'Despesa não encontrada.' } };
+  if (current.status !== 'pending') return { ok: false, errors: { _form: 'Só é possível cancelar uma despesa pendente (despesa paga: edite ou exclua).' } };
   await updateAudited(uid, COLLECTION, expenseId, { status: 'cancelled' }, io, 'cancel');
   return { ok: true };
 }

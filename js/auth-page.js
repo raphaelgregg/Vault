@@ -103,4 +103,5 @@ const reason = new URLSearchParams(location.search).get('reason');
 if (reason === 'auth') toast('Faça login para continuar.');
 if (reason === 'config') toast('Configuração do Firebase ausente: veja o README.', 6000);
 
-redirectIfAuthenticated();
+// Falha ao ler a sessão não pode virar erro não tratado: a página de login segue utilizável.
+redirectIfAuthenticated().catch((error) => console.error('[auth] sessão indisponível', error));
