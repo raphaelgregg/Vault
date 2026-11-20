@@ -1,6 +1,6 @@
 /**
  * E2E do painel de manutenção (VF-2-03u): massa de testes completa pelos services, saldos derivados esperados,
- * limpeza (própria; auditLog negado e destacado), reset + gerar, importação CSV em 2 etapas e separação de
+ * limpeza (própria, pelo servidor; auditLog preservado), reset + gerar, importação CSV em 2 etapas e separação de
  * privilégios (VF-2-03w): usuário comum sem escopos administrativos; admin (claim) limpa um uid alvo e todos os usuários.
  * Rodar com `npm run test:e2e`. Sem `playwright`, sai com aviso (código 0).
  */
@@ -87,7 +87,7 @@ try {
   assert.equal(state.linkedPurchases, 3);
   assert.equal(state.consolidated, 1);
 
-  log('limpeza: confirmação errada não apaga; usuário apaga tudo e destaca auditLog negado');
+  log('limpeza: confirmação errada não apaga; usuário apaga tudo pelo servidor (auditLog preservado)');
   const before = await counts();
   assert.ok(before.accounts === 3 && before.invoices >= 4);
   await page.fill('#clean-phrase', 'errado');
@@ -101,8 +101,9 @@ try {
   assert.ok(Object.values(after).every((n) => n === 0), JSON.stringify(after));
   const cleanText = await logText('clean-log');
   assert.match(cleanText, /accounts: 3 apagado/);
-  assert.match(cleanText, /PERMISSION-DENIED[^\n]*auditLog/i); // auditoria é create-only: negado e destacado
-  assert.ok(await page.locator('#clean-log .maint-log__line--denied').count() >= 1);
+  // VF-ARQ-02: a limpeza do próprio usuário roda NO SERVIDOR (data.clearOwn): sem falhas de permissão e o auditLog (create-only) é preservado
+  assert.doesNotMatch(cleanText, /PERMISSION-DENIED/i);
+  assert.match(cleanText, /0 coleção\(ões\) com falha/);
 
   log('usuário comum: escopos administrativos indisponíveis (sem claim admin) e log traz executor/escopo');
   assert.equal(await page.locator('#mode-target, #mode-all').count(), 0);
