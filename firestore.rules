@@ -153,7 +153,7 @@ service cloud.firestore {
     match /users/{userId}/accounts/{accountId} {
       allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
-        && keysOk(['institution', 'name', 'type', 'initialBalanceCents', 'openingDate', 'color', 'status', 'createdAt', 'updatedAt'])
+        && keysOk(['institution', 'name', 'type', 'initialBalanceCents', 'openingDate', 'color', 'status', 'ledgerSeq', 'createdAt', 'updatedAt'])
         && requiredOk(['institution', 'type', 'initialBalanceCents', 'color', 'status', 'createdAt', 'updatedAt'])
         && text('institution', 80)
         && (!('name' in data()) || text('name', 80))
@@ -163,8 +163,15 @@ service cloud.firestore {
         && text('color', 32)
         && oneOf('status', ['active', 'inactive', 'archived'])
         && data().updatedAt == request.time
-        && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId) || isAdmin();
+        && (resource == null || immutable('createdAt'))
+        // Saldo de abertura, data de abertura e `ledgerSeq` só mudam pela camada confiável (op account.adjustOpening);
+        // `ledgerSeq` não nasce do cliente.
+        && (resource == null || (data().initialBalanceCents == resource.data.initialBalanceCents
+              && data().get('openingDate', null) == resource.data.get('openingDate', null)
+              && data().get('ledgerSeq', 0) == resource.data.get('ledgerSeq', 0)))
+        && (resource != null || !('ledgerSeq' in data()));
+      // Conta não é apagada pelo cliente (histórico): arquive/apague pelo servidor (op account.delete/archive).
+      allow delete: if isAdmin();
     }
 
     // ---------- categorias ----------
@@ -186,7 +193,7 @@ service cloud.firestore {
       allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['description', 'categoryId', 'amountCents', 'expectedDate', 'receivedDate',
-                   'accountId', 'status', 'recurrence', 'notes', 'createdAt', 'updatedAt'])
+                   'accountId', 'status', 'recurrence', 'notes', 'operationId', 'createdAt', 'updatedAt'])
         && requiredOk(['description', 'categoryId', 'amountCents', 'expectedDate',
                        'accountId', 'status', 'recurrence', 'createdAt', 'updatedAt'])
         && text('description', 120)
@@ -199,8 +206,11 @@ service cloud.firestore {
         && oneOf('recurrence', ['none', 'monthly', 'weekly', 'yearly'])
         && optionalString('notes', 500)
         && data().updatedAt == request.time
-        && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId) || isAdmin();
+        && (resource == null || immutable('createdAt'))
+        // VF-ARQ-02: movimentos que alteram saldo só são gravados pela camada confiável (Admin SDK ignora estas Rules).
+        && data().status != 'received'
+        && (resource == null || resource.data.status != 'received');
+      allow delete: if isAdmin() || (isOwner(userId) && resource.data.status != 'received');
     }
 
     // ---------- despesas ----------
@@ -209,7 +219,7 @@ service cloud.firestore {
       allow create, update: if isOwner(userId)
         && keysOk(['description', 'categoryId', 'amountCents', 'accountId', 'purchaseDate',
                    'dueDate', 'paidDate', 'status', 'recurrence', 'notes',
-                   'installmentGroupId', 'createdAt', 'updatedAt'])
+                   'installmentGroupId', 'operationId', 'createdAt', 'updatedAt'])
         && requiredOk(['description', 'categoryId', 'amountCents', 'accountId',
                        'purchaseDate', 'dueDate', 'status', 'recurrence', 'createdAt', 'updatedAt'])
         && text('description', 120)
@@ -224,8 +234,11 @@ service cloud.firestore {
         && optionalString('notes', 500)
         && optionalString('installmentGroupId', 128)
         && data().updatedAt == request.time
-        && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId) || isAdmin();
+        && (resource == null || immutable('createdAt'))
+        // VF-ARQ-02: movimentos que alteram saldo só são gravados pela camada confiável (Admin SDK ignora estas Rules).
+        && data().status != 'paid'
+        && (resource == null || resource.data.status != 'paid');
+      allow delete: if isAdmin() || (isOwner(userId) && resource.data.status != 'paid');
     }
 
     // ---------- transferências ----------
@@ -233,7 +246,7 @@ service cloud.firestore {
       allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
         && keysOk(['fromAccountId', 'toAccountId', 'amountCents', 'date', 'reason',
-                   'notes', 'status', 'createdAt', 'updatedAt'])
+                   'notes', 'status', 'operationId', 'createdAt', 'updatedAt'])
         && requiredOk(['fromAccountId', 'toAccountId', 'amountCents', 'date',
                        'reason', 'status', 'createdAt', 'updatedAt'])
         && data().fromAccountId != data().toAccountId
@@ -245,8 +258,11 @@ service cloud.firestore {
         && optionalString('notes', 500)
         && oneOf('status', ['pending', 'confirmed', 'cancelled'])
         && data().updatedAt == request.time
-        && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId) || isAdmin();
+        && (resource == null || immutable('createdAt'))
+        // VF-ARQ-02: movimentos que alteram saldo só são gravados pela camada confiável (Admin SDK ignora estas Rules).
+        && data().status != 'confirmed'
+        && (resource == null || resource.data.status != 'confirmed');
+      allow delete: if isAdmin() || (isOwner(userId) && resource.data.status != 'confirmed');
     }
 
     // ---------- assinaturas ----------
@@ -275,7 +291,7 @@ service cloud.firestore {
     match /users/{userId}/debtors/{debtorId} {
       allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
-        && keysOk(['name', 'loanDate', 'lentCents', 'receivedCents', 'status', 'notes',
+        && keysOk(['name', 'loanDate', 'lentCents', 'receivedCents', 'status', 'notes', 'archived',
                    'createdAt', 'updatedAt'])
         && requiredOk(['name', 'loanDate', 'lentCents', 'receivedCents', 'status',
                        'createdAt', 'updatedAt'])
@@ -288,14 +304,21 @@ service cloud.firestore {
         && oneOf('status', ['open', 'paid', 'cancelled'])
         && optionalString('notes', 500)
         && data().updatedAt == request.time
-        && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId) || isAdmin();
+        && (resource == null || immutable('createdAt'))
+        // VF-ARQ-02: o total recebido, o status `paid` e o arquivamento só mudam pela camada confiável.
+        && (resource == null ? data().receivedCents == 0 : data().receivedCents == resource.data.receivedCents)
+        && (data().status != 'paid' || (resource != null && resource.data.status == 'paid'))
+        && (resource == null ? !('archived' in data()) : data().get('archived', false) == resource.data.get('archived', false));
+      // Devedor não é apagado pelo cliente (histórico de dívidas/recebimentos): op debtor.archive / debtor.delete.
+      allow delete: if isAdmin();
     }
 
     // ---------- dívidas (parcelas) ----------
     match /users/{userId}/debts/{debtId} {
       allow read: if isOwner(userId) || isAdmin();
-      allow create, update: if isOwner(userId)
+      // VF-ARQ-02: o cliente cria parcelas (plano de dívida) sempre `pending`; pagar/cancelar é do servidor.
+      allow create: if isOwner(userId)
+        && data().status == 'pending'
         && keysOk(['debtorId', 'description', 'principalCents', 'dueDate',
                    'installmentNumber', 'installmentsTotal', 'debtGroupId', 'status',
                    'createdAt', 'updatedAt'])
@@ -315,57 +338,19 @@ service cloud.firestore {
         && optionalString('debtGroupId', 128)
         && oneOf('status', ['pending', 'paid', 'late', 'cancelled'])
         && data().updatedAt == request.time
-        && (resource == null
-            || (immutable('createdAt') && immutable('debtorId') && immutable('principalCents') && immutable('dueDate')
-                && immutable('installmentNumber') && immutable('description')
-                && data().get('installmentsTotal', null) == resource.data.get('installmentsTotal', null)
-                && data().get('debtGroupId', null) == resource.data.get('debtGroupId', null)));
-      // Parcela PAGA (tem recebimentos) só some com administrador ou depois que o devedor foi removido.
-      allow delete: if isAdmin()
-        || (isOwner(userId)
-            && (resource.data.status != 'paid' || !exists(docPath(userId, 'debtors', resource.data.debtorId))));
+        && (resource == null || immutable('createdAt'));
+      allow update: if false;
+      allow delete: if isAdmin();
     }
 
     // ---------- recebimentos de dívidas ----------
     match /users/{userId}/debtPayments/{paymentId} {
       allow read: if isOwner(userId) || isAdmin();
-      // HISTÓRICO IMUTÁVEL: recebimento só é criado (nunca editado). Sem `update`, regravar um ID existente também é negado
-      // — base da idempotência dos IDs sequenciais `pay-<parcela>-<n>` (VF-2-03al).
-      allow create: if isOwner(userId)
-        && keysOk(['debtId', 'purchaseId', 'debtorId', 'amountCents', 'date', 'accountId', 'operationId', 'notes',
-                   'createdAt', 'updatedAt'])
-        && requiredOk(['debtorId', 'amountCents', 'date', 'accountId',
-                       'createdAt', 'updatedAt'])
-        // Recebimento de UMA parcela: da dívida (debtId) OU da parcela de cartão do devedor (purchaseId), nunca ambas/nenhuma.
-        && (('debtId' in data()) != ('purchaseId' in data()))
-        // (a existência da parcela é garantida pelo `get` abaixo: documento inexistente nega a regra; sem `exists`
-        // duplicado — o limite do Firestore é de ~20 acessos a documentos por lote)
-        && ref(userId, 'debtors', 'debtorId')
-        && positiveCents(data().amountCents)
-        && stamp(data().date)
-        && ref(userId, 'accounts', 'accountId')
-        // Vínculo com a parcela: mesmo devedor e valor nunca acima do valor da parcela (o acumulado da parcela é
-        // controlado pelo ID sequencial `pay-<parcela>-<n>`: a 2ª gravação sobre a mesma leitura cai em `update`, negado).
-        && ((('debtId' in data())
-              && get(docPath(userId, 'debts', data().debtId)).data.debtorId == data().debtorId
-              && data().amountCents <= get(docPath(userId, 'debts', data().debtId)).data.principalCents)
-            || (('purchaseId' in data())
-              && get(docPath(userId, 'cardPurchases', data().purchaseId)).data.debtorId == data().debtorId
-              && data().amountCents <= get(docPath(userId, 'cardPurchases', data().purchaseId)).data.amountCents))
-        // Recebimento e total do devedor andam JUNTOS: o `receivedCents` do devedor, ao fim do lote, sobe pelo menos o
-        // valor deste recebimento (impede registrar dinheiro sem atualizar o devedor; o teto `<= lentCents` está em debtors).
-        && getAfter(docPath(userId, 'debtors', data().debtorId)).data.receivedCents
-             - get(docPath(userId, 'debtors', data().debtorId)).data.receivedCents >= data().amountCents
-        && optionalString('operationId', 64)
-        && optionalString('notes', 500)
-        && data().updatedAt == request.time
-        && (resource == null || immutable('createdAt'));
-      // Sem `update` acima = recebimentos IMUTÁVEIS. Exclusão: só administrador, ou (limpeza de dados do dono) quando o
-      // devedor ou a conta do recebimento já não existe — nunca com a cadeia devedor/conta/recebimento íntegra.
-      allow delete: if isAdmin()
-        || (isOwner(userId)
-            && (!exists(docPath(userId, 'debtors', resource.data.debtorId))
-                || !exists(docPath(userId, 'accounts', resource.data.accountId))));
+      // VF-ARQ-02: recebimentos só são gravados pela camada confiável (op debt.receive / debt.settleBatch), que valida o
+      // valor máximo por parcela e por devedor dentro de uma transação. O cliente só lê. Histórico imutável: correção =
+      // estorno (op reversal.create). Exclusão só do administrador.
+      allow create, update: if false;
+      allow delete: if isAdmin();
     }
 
     // ---------- metas ----------
@@ -389,20 +374,10 @@ service cloud.firestore {
     // ---------- movimentações de metas ----------
     match /users/{userId}/goalTransactions/{transactionId} {
       allow read: if isOwner(userId) || isAdmin();
-      allow create, update: if isOwner(userId)
-        && keysOk(['goalId', 'type', 'amountCents', 'date', 'accountId', 'notes',
-                   'createdAt', 'updatedAt'])
-        && requiredOk(['goalId', 'type', 'amountCents', 'date', 'accountId',
-                       'createdAt', 'updatedAt'])
-        && ref(userId, 'goals', 'goalId')
-        && oneOf('type', ['deposit', 'withdraw'])
-        && positiveCents(data().amountCents)
-        && stamp(data().date)
-        && ref(userId, 'accounts', 'accountId')
-        && optionalString('notes', 300)
-        && data().updatedAt == request.time
-        && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId) || isAdmin();
+      // VF-ARQ-02: aportes/resgates só são gravados pela camada confiável (op goal.deposit/withdraw); o cliente só lê.
+      // O histórico é imutável: correção = estorno (op reversal.create). Exclusão só do administrador.
+      allow create, update: if false;
+      allow delete: if isAdmin();
     }
 
     // ---------- cartões ----------
@@ -446,6 +421,8 @@ service cloud.firestore {
         && data().installmentNumber <= data().installmentsTotal
         && optionalRef(userId, 'categories', 'categoryId')
         && optionalRef(userId, 'invoices', 'invoiceId')
+        // compra nunca entra em fatura já paga/fechada (o pagamento é do servidor): a fatura (depois do lote) deve estar aberta
+        && (!('invoiceId' in data()) || getAfter(docPath(userId, 'invoices', data().invoiceId)).data.status == 'open')
         && optionalRef(userId, 'debtors', 'debtorId')
         && optionalString('notes', 300)
         && data().updatedAt == request.time
@@ -477,7 +454,10 @@ service cloud.firestore {
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'))
         // Fatura PAGA é pagamento confirmado: valor, conta e data não mudam (nem a fatura volta de `paid`).
-        && (resource == null || resource.data.status != 'paid');
+        && (resource == null || resource.data.status != 'paid')
+        // VF-ARQ-02: o pagamento da fatura (status paid, paidCents, accountId, paidAt) é gravado só pela camada confiável.
+        && data().status != 'paid'
+        && !('paidCents' in data()) && !('accountId' in data()) && !('paidAt' in data());
       allow delete: if isAdmin()
         || (isOwner(userId)
             && (resource.data.status != 'paid' || !exists(docPath(userId, 'creditCards', resource.data.cardId))));
@@ -496,6 +476,23 @@ service cloud.firestore {
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
       allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- VF-ARQ-02: coleções gravadas SÓ pela camada confiável (o cliente apenas lê as próprias) ----------
+    match /users/{userId}/reversals/{reversalId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if false;
+      allow delete: if isAdmin();
+    }
+    match /users/{userId}/operations/{operationId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if false;
+      allow delete: if isAdmin();
+    }
+    match /users/{userId}/batches/{batchId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if false;
+      allow delete: if isAdmin();
     }
 
     // ---------- auditoria (imutável) ----------
@@ -556,6 +553,15 @@ service cloud.firestore {
       allow read: if isAdmin();
     }
     match /{path=**}/invoices/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/reversals/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/batches/{docId} {
+      allow read: if isAdmin();
+    }
+    match /{path=**}/operations/{docId} {
       allow read: if isAdmin();
     }
     match /{path=**}/budgets/{docId} {

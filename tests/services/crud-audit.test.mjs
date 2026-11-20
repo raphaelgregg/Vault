@@ -88,15 +88,19 @@ describe('services delegam aos helpers (criar/atualizar/excluir/status)', () => 
   };
   const okCategory = { lookupCategory: async () => ({ id: 'c1', kind: 'both', archived: false }) };
 
-  const cases = [
-    ['accounts', createAccount, updateAccount, account, {}],
-    ['categories', createCategory, updateCategory, category, {}],
-    ['transfers', createTransfer, updateTransfer, transfer, {}],
-    ['incomes', createIncome, updateIncome, income, okCategory],
-    ['expenses', createExpense, updateExpense, expense, okCategory],
-  ];
+  // VF-ARQ-02: contas e categorias seguem CRUD direto + auditoria; transferências/receitas/despesas NASCEM no servidor
+  // (criação) e só os não liquidados são editados direto. `finance` falso registra a intenção.
+  const server = () => {
+    const ops = [];
+    return { ops, finance: async (op, params) => { ops.push(op); return { ok: true, id: 'new1', transferId: 'new1', ...params }; } };
+  };
+  const pendingDoc = { getById: async (_u, _c, id) => ({ id, status: 'pending', initialBalanceCents: 1000 }) };
 
-  for (const [name, createFn, updateFn, raw, extra] of cases) {
+  const direct = [
+    ['accounts', createAccount, updateAccount, account, pendingDoc],
+    ['categories', createCategory, updateCategory, category, {}],
+  ];
+  for (const [name, createFn, updateFn, raw, extra] of direct) {
     it(`${name}: create e update gravam e auditam`, async () => {
       const { io, calls } = makeIo(extra);
       const created = await createFn(uid, raw, io);
@@ -110,17 +114,40 @@ describe('services delegam aos helpers (criar/atualizar/excluir/status)', () => 
       assert.equal(calls.update[0].id, 'x1');
       assert.equal(calls.audit[1].entry.action, 'update');
     });
+  }
 
+  const viaServer = [
+    ['transfers', createTransfer, updateTransfer, transfer, {}, 'transfer.create'],
+    ['incomes', createIncome, updateIncome, income, okCategory, 'income.create'],
+    ['expenses', createExpense, updateExpense, expense, okCategory, 'expense.create'],
+  ];
+  for (const [name, createFn, updateFn, raw, extra, opName] of viaServer) {
+    it(`${name}: create vai ao SERVIDOR (sem gravação direta); update de item não liquidado grava e audita`, async () => {
+      const api = server();
+      const { io, calls } = makeIo({ ...extra, ...pendingDoc, finance: api.finance });
+      const created = await createFn(uid, raw, io);
+      assert.deepEqual([created.ok, created.id], [true, 'new1']);
+      assert.deepEqual(api.ops, [opName]);
+      assert.equal(calls.create.length, 0);
+
+      const updated = await updateFn(uid, 'x1', raw, io);
+      assert.equal(updated.ok, true);
+      assert.equal(calls.update[0].id, 'x1');
+      assert.equal(calls.audit[0].entry.action, 'update');
+    });
+  }
+
+  for (const [name, createFn, , , extra] of [...direct, ...viaServer]) {
     it(`${name}: dados inválidos não gravam nem auditam`, async () => {
-      const { io, calls } = makeIo(extra);
+      const api = server();
+      const { io, calls } = makeIo({ ...extra, finance: api.finance });
       const result = await createFn(uid, {}, io);
       assert.equal(result.ok, false);
-      assert.equal(calls.create.length + calls.audit.length, 0);
+      assert.equal(calls.create.length + calls.audit.length + api.ops.length, 0);
     });
   }
 
   const deletes = [
-    ['accounts', deleteAccount, { count: async () => 0 }],
     ['categories', deleteCategory, { count: async () => 0 }],
     ['transfers', deleteTransfer, {}],
   ];
@@ -143,52 +170,56 @@ describe('services delegam aos helpers (criar/atualizar/excluir/status)', () => 
     });
   }
 
-  for (const [name, deleteFn] of [['accounts', deleteAccount], ['categories', deleteCategory]]) {
-    it(`${name}: em uso ou falha de contagem bloqueia sem remover/auditar`, async () => {
-      for (const count of [async () => 2, async () => { throw new Error('offline'); }]) {
-        const { io, calls } = makeIo({ count, getById: async () => ({ id: 'd1' }) });
-        const result = await deleteFn(uid, 'd1', io);
-        assert.equal(result.ok, false);
-        assert.equal(calls.remove.length + calls.audit.length, 0);
-      }
-    });
-  }
-
-  it('markIncomeReceived / cancelIncome auditam com action própria', async () => {
-    const { io, calls } = makeIo({ getById: async () => ({ id: 'i1', status: 'pending' }) });
-    await markIncomeReceived(uid, 'i1', '2026-11-18', io);
-    await cancelIncome(uid, 'i1', io);
-    assert.deepEqual(calls.update[0].data, { status: 'received', receivedDate: '2026-11-18' });
-    assert.deepEqual(calls.audit.map((a) => a.entry.action), ['mark_received', 'cancel']);
-    assert.deepEqual(calls.audit[1].entry.after, { status: 'cancelled' });
+  it('accounts: exclusão e arquivamento são do SERVIDOR (sem remoção/auditoria direta no cliente)', async () => {
+    const api = server();
+    const { io, calls } = makeIo({ finance: api.finance, getById: async () => ({ id: 'd1' }) });
+    assert.equal((await deleteAccount(uid, 'd1', io)).ok, true);
+    assert.deepEqual(api.ops, ['account.delete']);
+    assert.equal(calls.remove.length + calls.audit.length, 0);
   });
 
-  it('markExpensePaid / cancelExpense auditam com action própria', async () => {
-    const { io, calls } = makeIo({ getById: async () => ({ id: 'e1', status: 'pending' }) });
+  it('categories: em uso ou falha de contagem bloqueia sem remover/auditar', async () => {
+    for (const count of [async () => 2, async () => { throw new Error('offline'); }]) {
+      const { io, calls } = makeIo({ count, getById: async () => ({ id: 'd1' }) });
+      const result = await deleteCategory(uid, 'd1', io);
+      assert.equal(result.ok, false);
+      assert.equal(calls.remove.length + calls.audit.length, 0);
+    }
+  });
+
+  it('markIncomeReceived / markExpensePaid vão ao SERVIDOR; cancelIncome / cancelExpense auditam com action própria', async () => {
+    const api = server();
+    const { io, calls } = makeIo({ getById: async (_u, c, id) => ({ id, status: 'pending' }), finance: api.finance });
+    await markIncomeReceived(uid, 'i1', '2026-11-18', io);
     await markExpensePaid(uid, 'e1', '2026-11-18', io);
+    assert.deepEqual(api.ops, ['income.receive', 'expense.pay']);
+    assert.equal(calls.update.length, 0);
+    await cancelIncome(uid, 'i1', io);
     await cancelExpense(uid, 'e1', io);
-    assert.deepEqual(calls.update[0].data, { status: 'paid', paidDate: '2026-11-18' });
-    assert.deepEqual(calls.audit.map((a) => a.entry.action), ['mark_paid', 'cancel']);
+    assert.deepEqual(calls.audit.map((a) => a.entry.action), ['cancel', 'cancel']);
+    assert.deepEqual(calls.audit[0].entry.after, { status: 'cancelled' });
   });
 });
 
-describe('exclusão atômica de despesas e receitas (VF-2-03o)', () => {
+describe('exclusão de despesas e receitas (VF-2-03o / VF-ARQ-02)', () => {
   for (const [name, deleteFn, paidStatus] of [['expenses', deleteExpense, 'paid'], ['incomes', deleteIncome, 'received']]) {
-    it(`${name}: um lote com delete + auditoria e estorno informado (pago/recebido com conta)`, async () => {
+    it(`${name}: item ${paidStatus} NÃO é excluído (histórico): orienta estornar; nada é gravado`, async () => {
       const doc = { id: 'x1', status: paidStatus, accountId: 'a1', amountCents: 12345 };
       const batches = [];
       const r = await deleteFn(uid, 'x1', { getById: async () => doc, commitAtomic: async (u, ops) => { batches.push(ops); return ['x1']; } });
-      assert.deepEqual(r, { ok: true, reversedCents: 12345, accountId: 'a1' });
-      assert.deepEqual(batches, [[{ type: 'delete', collection: name, docId: 'x1', before: doc }]]);
-    });
-    it(`${name}: pendente/sem conta não informa estorno; inexistente não grava`, async () => {
-      for (const doc of [{ id: 'x1', status: 'pending', accountId: 'a1', amountCents: 500 }, { id: 'x1', status: paidStatus, amountCents: 500 }]) {
-        const r = await deleteFn(uid, 'x1', { getById: async () => doc, commitAtomic: async () => ['x1'] });
-        assert.deepEqual([r.ok, r.reversedCents, r.accountId], [true, 0, null]);
-      }
-      let called = false;
-      const r = await deleteFn(uid, 'x1', { getById: async () => null, commitAtomic: async () => { called = true; } });
       assert.equal(r.ok, false);
+      assert.match(r.errors._form, /estorn/i);
+      assert.deepEqual(batches, []);
+    });
+    it(`${name}: pendente é excluído em um lote (delete + auditoria) sem estorno; inexistente não grava`, async () => {
+      const doc = { id: 'x1', status: 'pending', accountId: 'a1', amountCents: 500 };
+      const batches = [];
+      const r = await deleteFn(uid, 'x1', { getById: async () => doc, commitAtomic: async (u, ops) => { batches.push(ops); return ['x1']; } });
+      assert.deepEqual([r.ok, r.reversedCents, r.accountId], [true, 0, null]);
+      assert.deepEqual(batches, [[{ type: 'delete', collection: name, docId: 'x1', before: doc }]]);
+      let called = false;
+      const none = await deleteFn(uid, 'x1', { getById: async () => null, commitAtomic: async () => { called = true; } });
+      assert.equal(none.ok, false);
       assert.equal(called, false);
     });
   }
