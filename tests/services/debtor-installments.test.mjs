@@ -173,7 +173,8 @@ describe('quitar TODAS as parcelas pendentes de um mês', () => {
       getById: async (u, c, id) => (c === 'debtors' ? structuredClone(staleDebtor) : s.io.getById(u, c, id)),
       list: async (u, c, o) => (c === 'debtPayments' ? [] : c === 'debts' ? structuredClone(snapshot.debts).map((d) => ({ ...d, status: 'pending' })) : s.io.list(u, c, o)),
     };
-    await assert.rejects(() => settleMonthInstallments(UID, DEBTOR, '2026-12', pay, stale), /permission-denied/);
+    const denied = await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, stale);
+    assert.deepEqual([denied.ok, denied.partial, denied.code], [false, false, 'permission-denied']); // erro identificável
     assert.deepEqual(s.tables, snapshot); // tudo ou nada: o 2º lote não gravou nenhuma parcela
     assert.equal(snapshot.debtPayments.length, 4);
   });
@@ -197,7 +198,9 @@ describe('quitar TODAS as parcelas pendentes de um mês', () => {
     assert.ok(failing);
     const s2 = makeStore();
     const boom = { ...s2.io, commitAtomic: async () => { throw new Error('rede caiu'); } };
-    await assert.rejects(() => settleMonthInstallments(UID, DEBTOR, '2026-12', pay, boom), /rede caiu/);
+    const failed = await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, boom);
+    assert.deepEqual([failed.ok, failed.partial, failed.done], [false, false, 0]);
+    assert.match(failed.errors._form, /nada foi gravado/);
     assert.deepEqual(s2.tables, makeStore().tables);
   });
 

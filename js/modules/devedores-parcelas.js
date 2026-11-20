@@ -11,7 +11,7 @@ import {
 } from '../components/form-kit.js';
 import {
   listDebts, listDebtPayments, createDebtPlan, cancelDebt, settleDebts, settleInstallment, settleMonthInstallments,
-  previewMonthSettlement, formatCents,
+  previewMonthSettlement, newOperationId, formatCents,
 } from '../services/debtPayments.js';
 import { debtorPendingCents, debtorObligations, receivedByInstallment, accountLabel } from '../core/model.js';
 import { getDebtor, getDebtorStatement } from '../services/debtors.js';
@@ -103,6 +103,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
 
   // QUITAR UMA PARCELA (dívida ou compra no cartão): só ela; valor padrão = restante (editável: menor = recebimento parcial).
   const openSettleInstallment = (item) => {
+    const operationId = newOperationId(); // chave de idempotência: duplo clique/retry desta mesma abertura não duplica
     const early = item.dueDate && item.dueDate > todayIso();
     formModal({
       title: `Quitar parcela ${item.installmentNumber}${item.installmentsTotal ? `/${item.installmentsTotal}` : ''} — ${item.description}`,
@@ -117,9 +118,10 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
         field('Observações', 'notes', el('textarea', { id: 'notes', name: 'notes', maxlength: 500, rows: 2 })),
       ],
       submit: (d) => settleInstallment(user.uid, debtor.id, item.source === 'debt' ? { debtId: item.id } : { purchaseId: item.id }, {
-        amountCents: d.get('amountCents'), date: d.get('date'), accountId: d.get('accountId'), notes: d.get('notes').trim() || undefined,
+        amountCents: d.get('amountCents'), date: d.get('date'), accountId: d.get('accountId'), notes: d.get('notes').trim() || undefined, operationId,
       }),
       onDone: async (r) => {
+        if (r.reconcile && !r.reconcile.ok) toast('Recebimento gravado, mas o status do devedor ficou para conciliar (recarregue a tela).', 7000);
         toast(r.debtorPaid ? 'Parcela quitada — devedor quitado!' : r.settled ? (r.anticipated ? 'Parcela antecipada e quitada.' : 'Parcela quitada.') : `Recebimento parcial registrado (restam ${formatCents(r.remainingCents)}).`);
         await refresh();
       },
@@ -129,6 +131,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   // QUITAR TODAS AS PARCELAS PENDENTES DE UM MÊS: confirmação com mês, quantidade e valor total.
   const ledger = { debts, payments, purchases: statement.purchases, invoicesById: statement.invoicesById };
   const openSettleMonth = (m) => {
+    const operationId = newOperationId();
     const preview = previewMonthSettlement({ debtor, ledger, month: m });
     formModal({
       title: `Quitar parcelas de ${formatMonth(m)} — ${debtor.name}`,
@@ -151,9 +154,10 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
         field('Observações', 'notes', el('textarea', { id: 'notes', name: 'notes', maxlength: 500, rows: 2 })),
       ],
       submit: (d) => settleMonthInstallments(user.uid, debtor.id, m, {
-        date: d.get('date'), accountId: d.get('accountId'), notes: d.get('notes').trim() || undefined,
+        date: d.get('date'), accountId: d.get('accountId'), notes: d.get('notes').trim() || undefined, operationId,
       }),
       onDone: async (r) => {
+        if (r.reconcile && !r.reconcile.ok) toast('Recebimentos gravados, mas o status do devedor ficou para conciliar (recarregue a tela).', 7000);
         toast(r.debtorPaid ? `Mês quitado (${r.count} parcela(s), ${formatCents(r.totalCents)}) — devedor quitado!` : `Mês quitado: ${r.count} parcela(s), ${formatCents(r.totalCents)}.`);
         await refresh();
       },

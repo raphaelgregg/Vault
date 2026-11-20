@@ -37,7 +37,7 @@ const DEBTS = COLLECTIONS.debts;
 const PAYMENTS = COLLECTIONS.debtPayments;
 const DEBTORS = COLLECTIONS.debtors;
 const MAX_INSTALLMENT = 360;
-const MAX_SETTLE_INSTALLMENTS = 120; // 4 escritas por parcela (recebimento+auditoria, parcela+auditoria) no lote de 500
+const MAX_SETTLE_INSTALLMENTS = 120; // teto de parcelas por quitação de dívida (gravadas em blocos atômicos, ver RECEIPT_BATCH_SIZE)
 const MAX_PLAN_INSTALLMENTS = 120; // 2 escritas por parcela (+ devedor) no mesmo lote (limite de 500)
 
 export async function listDebts(uid, debtorId) {
@@ -156,9 +156,10 @@ export async function settleDebts(uid, debtorId, scope = {}, rawData = {}, io = 
   if (!account) return { ok: false, errors: { accountId: 'Conta não encontrada.' } };
   if (account.status !== 'active') return { ok: false, errors: { accountId: 'A conta precisa estar ativa.' } };
 
-  const ops = [];
+  const units = [];
   let totalCents = 0;
   for (const { debt, remaining } of targets) {
+    const ops = [];
     if (remaining > 0) {
       const built = buildEntity('debtPayments', { ...rawData, amountCents: centsToMoneyString(remaining), debtId: debt.id, debtorId });
       if (!built.ok) return { ok: false, errors: built.errors };
@@ -166,17 +167,14 @@ export async function settleDebts(uid, debtorId, scope = {}, rawData = {}, io = 
       totalCents += remaining;
     }
     ops.push({ type: 'update', collection: DEBTS, docId: debt.id, data: { status: 'paid' }, action: 'settle' });
+    units.push({ ops, cents: Math.max(0, remaining) });
   }
-  if (totalCents > 0) {
-    const applied = applyPaymentToDebtor(debtor, totalCents);
-    if (!applied.ok) return { ok: false, errors: { _form: applied.error } };
-    ops.push(debtorReceiveOp(debtorId, totalCents, applied));
-    await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
-    await reconcileDebtorStatus(uid, debtorId, io);
-    return { ok: true, count: targets.length, totalCents, debtorPaid: applied.status === 'paid' };
-  }
-  await (io.commitAtomic ?? commitAtomic)(uid, ops, io); // só marca como pagas parcelas já integralmente recebidas
-  return { ok: true, count: targets.length, totalCents, debtorPaid: false };
+  const applied = totalCents > 0 ? applyPaymentToDebtor(debtor, totalCents) : { ok: true, status: 'open' };
+  if (!applied.ok) return { ok: false, errors: { _form: applied.error } };
+  const written = await commitReceiptUnits(uid, debtorId, units, applied, io);
+  const reconcile = await reconcileDebtorStatus(uid, debtorId, io);
+  if (!written.ok) return { ...partialFailure(written, targets.length), reconcile };
+  return { ok: true, count: targets.length, totalCents, debtorPaid: totalCents > 0 && applied.status === 'paid', reconcile };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -198,6 +196,21 @@ export function receiptPaymentId(installmentId, payments = []) {
   return `${prefix}${Math.max(mine, maxSeq) + 1}`;
 }
 
+/** Chave de idempotência de UMA operação do usuário (gerada ao abrir o formulário; retry/duplo clique reutilizam). */
+export const newOperationId = () => globalThis.crypto.randomUUID();
+
+/**
+ * IDEMPOTÊNCIA por `operationId`: se a operação já foi gravada (ex.: o servidor gravou mas a resposta se perdeu e o
+ * usuário repetiu), devolve os recebimentos dela em vez de gravar de novo. Dois envios SIMULTÂNEOS com a mesma chave
+ * ainda passam por esta checagem ao mesmo tempo; o que os impede de duplicar é o ID sequencial do recebimento (as
+ * Rules negam o segundo). Falha de leitura propaga (fail-closed: não grava sem saber se já foi gravado).
+ */
+async function findOperationPayments(uid, debtorId, operationId, io) {
+  if (!operationId) return [];
+  const rows = await (io.list ?? list)(uid, PAYMENTS, { where: [['operationId', '==', operationId]] });
+  return rows.filter((p) => p.debtorId === debtorId);
+}
+
 /**
  * Soma ao devedor o valor recebido de forma ATÔMICA (`increment`, não valor absoluto de uma leitura que pode estar
  * velha) e só grava `status: paid` quando esta operação zera o pendente. Recebimentos simultâneos em parcelas
@@ -209,17 +222,25 @@ const debtorReceiveOp = (debtorId, totalCents, applied) => ({
 });
 
 /**
- * Pós-commit: se, com recebimentos concorrentes, o total recebido alcançou o emprestado mas o status ficou `open`
- * (cada operação via "pendente > 0" na sua leitura), marca `paid`. Idempotente; falha aqui não desfaz o recebimento.
+ * Conciliação do status do devedor: se, com recebimentos concorrentes, o total recebido alcançou o emprestado mas o
+ * status ficou `open` (cada operação via "pendente > 0" na sua leitura), marca `paid`. Corrige SÓ esse estado (nunca
+ * mexe em valores nem em recebimentos), é idempotente e pode ser chamada de novo a qualquer momento para recuperar.
+ * Retorna { ok, changed, error? }: falha NÃO é engolida — os chamadores repassam `reconcile` no resultado e a
+ * auditoria (`auditFinancialIntegrity`) a detecta como DEBTOR_STATUS_OPEN_WITH_ZERO_PENDING.
  */
-async function reconcileDebtorStatus(uid, debtorId, io = {}) {
+export async function reconcileDebtorStatus(uid, debtorId, io = {}) {
   try {
     const fresh = await (io.getById ?? getById)(uid, DEBTORS, debtorId);
-    if (fresh && fresh.status === 'open' && (Number(fresh.lentCents) || 0) > 0 && (Number(fresh.receivedCents) || 0) >= (Number(fresh.lentCents) || 0)) {
+    if (!fresh) return { ok: false, changed: false, error: 'Devedor não encontrado.' };
+    const lent = Number(fresh.lentCents) || 0;
+    if (fresh.status === 'open' && lent > 0 && (Number(fresh.receivedCents) || 0) >= lent) {
       await (io.commitAtomic ?? commitAtomic)(uid, [{ type: 'update', collection: DEBTORS, docId: debtorId, data: { status: 'paid' }, action: 'reconcile' }], io);
+      return { ok: true, changed: true };
     }
+    return { ok: true, changed: false };
   } catch (error) {
-    console.error('[debtPayments] não foi possível conciliar o status do devedor', error);
+    console.error('[debtPayments] falha ao conciliar o status do devedor', error);
+    return { ok: false, changed: false, error: error?.message ?? String(error), code: error?.code };
   }
 }
 
@@ -250,6 +271,40 @@ async function checkReceiptTarget(uid, rawData, probeFields, fetch) {
 }
 
 /**
+ * Grava `units` ({ ops, cents }[]) em blocos atômicos de RECEIPT_BATCH_SIZE, cada bloco com o `increment` do devedor
+ * pelo total do bloco (o `status: paid` só no último e só se a operação inteira quita o devedor). Para no primeiro
+ * bloco que falhar e devolve o que já foi gravado — sem engolir o erro. Retorna
+ * { ok, done (unidades gravadas), ids, error? , code? }.
+ */
+async function commitReceiptUnits(uid, debtorId, units, applied, io) {
+  const ids = [];
+  let done = 0;
+  for (let i = 0; i < units.length; i += RECEIPT_BATCH_SIZE) {
+    const chunk = units.slice(i, i + RECEIPT_BATCH_SIZE);
+    const last = i + RECEIPT_BATCH_SIZE >= units.length;
+    const cents = chunk.reduce((t, u) => t + u.cents, 0);
+    const ops = chunk.flatMap((u) => u.ops);
+    if (cents > 0) ops.push(debtorReceiveOp(debtorId, cents, { status: last ? applied.status : 'open' }));
+    try {
+      ids.push(...await (io.commitAtomic ?? commitAtomic)(uid, ops, io));
+      done += chunk.length;
+    } catch (error) {
+      console.error('[debtPayments] bloco de recebimentos recusado', error);
+      return { ok: false, done, ids, error: error?.message ?? String(error), code: error?.code };
+    }
+  }
+  return { ok: true, done, ids };
+}
+
+/** Resultado de erro de uma quitação em blocos que parou no meio (o que foi gravado permanece consistente). */
+const partialFailure = (r, total) => ({
+  ok: false, partial: r.done > 0, done: r.done, remaining: total - r.done, code: r.code,
+  errors: { _form: r.done > 0
+    ? `Quitação interrompida: ${r.done} de ${total} parcela(s) gravada(s) e consistentes; repita a operação para concluir as ${total - r.done} restante(s).`
+    : 'A quitação foi recusada e nada foi gravado. Tente novamente.' },
+});
+
+/**
  * QUITA UMA parcela do devedor: `target` = { debtId } (parcela de dívida) ou { purchaseId } (parcela de compra no
  * cartão). Grava UM recebimento (`debtPayments`, com `debtId`/`purchaseId`, `date`, `accountId` e o valor
  * efetivamente recebido — padrão: o restante da parcela) e soma ao `receivedCents` do devedor, tudo em UM lote com
@@ -267,10 +322,17 @@ export async function settleInstallment(uid, debtorId, target = {}, rawData = {}
   if (!installmentId || (target.debtId && target.purchaseId)) return { ok: false, errors: { _form: 'Informe a parcela a quitar.' } };
   const debtor = await fetch(uid, DEBTORS, debtorId);
   if (!debtor) return { ok: false, errors: { _form: 'Devedor não encontrado.' } };
-  if (debtor.status !== 'open') return { ok: false, errors: { _form: 'Só é possível quitar parcelas de devedor em aberto.' } };
 
   let ledger;
   try {
+    // Idempotência PRIMEIRO: uma repetição de operação já gravada (que pode ter quitado o devedor) deve devolver o resultado.
+    const done = await findOperationPayments(uid, debtorId, rawData.operationId, io);
+    if (done.length) {
+      const mine = done.find((p) => (p.debtId ?? p.purchaseId) === installmentId);
+      if (!mine) return { ok: false, errors: { _form: 'Esta operação já foi usada em outra parcela; recarregue a tela.' } };
+      return { ok: true, idempotent: true, id: mine.id, amountCents: mine.amountCents };
+    }
+    if (debtor.status !== 'open') return { ok: false, errors: { _form: debtor.status === 'paid' ? 'Devedor já quitado: não há parcelas a receber.' : 'Só é possível quitar parcelas de devedor em aberto.' } };
     ledger = await loadDebtorLedger(uid, debtor, io);
   } catch (error) {
     console.error('[debtPayments] falha ao ler recebimentos', error);
@@ -291,7 +353,7 @@ export async function settleInstallment(uid, debtorId, target = {}, rawData = {}
   const idField = target.debtId ? { debtId: installmentId } : { purchaseId: installmentId };
   const checked = await checkReceiptTarget(uid, rawData, { ...idField, debtorId }, fetch);
   if (!checked.ok) return checked;
-  const built = buildEntity('debtPayments', { date: rawData.date, accountId: rawData.accountId, notes: rawData.notes, amountCents: centsToMoneyString(amountCents), ...idField, debtorId });
+  const built = buildEntity('debtPayments', { date: rawData.date, accountId: rawData.accountId, notes: rawData.notes, operationId: rawData.operationId, amountCents: centsToMoneyString(amountCents), ...idField, debtorId });
   if (!built.ok) return { ok: false, errors: built.errors };
   const applied = applyPaymentToDebtor(debtor, amountCents);
   if (!applied.ok) return { ok: false, errors: { amountCents: applied.error } };
@@ -301,13 +363,22 @@ export async function settleInstallment(uid, debtorId, target = {}, rawData = {}
   if (settled && source === 'debt') ops.push({ type: 'update', collection: DEBTS, docId: installmentId, data: { status: 'paid' }, action: 'pay' });
   ops.push(debtorReceiveOp(debtorId, amountCents, applied));
   const [id] = await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
-  await reconcileDebtorStatus(uid, debtorId, io);
+  const reconcile = await reconcileDebtorStatus(uid, debtorId, io);
   const anticipated = typeof item.dueDate === 'string' && built.data.date < item.dueDate;
-  return { ok: true, id, settled, amountCents, remainingCents: item.remainingCents - amountCents, debtorPaid: applied.status === 'paid', anticipated };
+  return { ok: true, id, settled, amountCents, remainingCents: item.remainingCents - amountCents, debtorPaid: applied.status === 'paid', anticipated, reconcile };
 }
 
 /** Máximo de parcelas por quitação em lote (escritas por parcela cabem no lote de 500 do Firestore). */
-export const MAX_MONTH_SETTLE_ITEMS = 100;
+export const MAX_MONTH_SETTLE_ITEMS = 200;
+
+/**
+ * Parcelas por lote atômico. LIMITE REAL do Firestore: as Security Rules acessam documentos (`get`/`exists`/`getAfter`)
+ * e um lote só pode acessar ~20 documentos; medido no emulador, 17 recebimentos passam e 20 são negados
+ * (`permission-denied`). Blocos de 10 deixam folga. Cada bloco é ATÔMICO (recebimentos + parcelas + devedor juntos);
+ * um mês maior é gravado em blocos e, se um bloco falhar, os anteriores seguem consistentes e repetir a operação
+ * continua de onde parou (parcelas já quitadas são ignoradas).
+ */
+export const RECEIPT_BATCH_SIZE = 10;
 
 /**
  * Parcelas pendentes de um mês de referência (prévia para a confirmação da tela). Puro sobre o razão já lido.
@@ -332,34 +403,41 @@ export async function settleMonthInstallments(uid, debtorId, month, rawData = {}
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month ?? '')) return { ok: false, errors: { _form: 'Mês de referência inválido (use AAAA-MM).' } };
   const debtor = await fetch(uid, DEBTORS, debtorId);
   if (!debtor) return { ok: false, errors: { _form: 'Devedor não encontrado.' } };
-  if (debtor.status !== 'open') return { ok: false, errors: { _form: 'Só é possível quitar parcelas de devedor em aberto.' } };
   let ledger;
+  let done;
   try {
+    done = await findOperationPayments(uid, debtorId, rawData.operationId, io);
     ledger = await loadDebtorLedger(uid, debtor, io);
   } catch (error) {
     console.error('[debtPayments] falha ao ler recebimentos', error);
     return { ok: false, errors: { _form: 'Não foi possível verificar os recebimentos do devedor. A quitação foi cancelada por segurança; tente novamente.' } };
   }
   const { items, totalCents } = previewMonthSettlement({ debtor, ledger, month });
-  if (!items.length) return { ok: false, errors: { _form: 'Não há parcelas pendentes neste mês.' } };
+  if (!items.length) {
+    // Repetição de uma operação já concluída (ex.: resposta perdida): devolve o resultado, não grava nada.
+    if (done.length) return { ok: true, idempotent: true, month, count: done.length, totalCents: done.reduce((t, p) => t + (Number(p.amountCents) || 0), 0), ids: done.map((p) => p.id) };
+    return { ok: false, errors: { _form: debtor.status === 'paid' ? 'Devedor já quitado: não há parcelas a receber.' : 'Não há parcelas pendentes neste mês.' } };
+  }
+  if (debtor.status !== 'open') return { ok: false, errors: { _form: 'Só é possível quitar parcelas de devedor em aberto.' } };
   if (items.length > MAX_MONTH_SETTLE_ITEMS) return { ok: false, errors: { _form: `Quite em partes: máximo de ${MAX_MONTH_SETTLE_ITEMS} parcelas por vez.` } };
   const checked = await checkReceiptTarget(uid, rawData, { debtId: items.find((i) => i.source === 'debt')?.id, purchaseId: items.find((i) => i.source === 'card' && !items.some((x) => x.source === 'debt'))?.id, debtorId }, fetch);
   if (!checked.ok) return checked;
   const applied = applyPaymentToDebtor(debtor, totalCents);
   if (!applied.ok) return { ok: false, errors: { _form: applied.error } };
 
-  const ops = [];
+  const units = [];
   for (const item of items) {
     const idField = item.source === 'debt' ? { debtId: item.id } : { purchaseId: item.id };
-    const built = buildEntity('debtPayments', { date: rawData.date, accountId: rawData.accountId, notes: rawData.notes, amountCents: centsToMoneyString(item.remainingCents), ...idField, debtorId });
+    const built = buildEntity('debtPayments', { date: rawData.date, accountId: rawData.accountId, notes: rawData.notes, operationId: rawData.operationId, amountCents: centsToMoneyString(item.remainingCents), ...idField, debtorId });
     if (!built.ok) return { ok: false, errors: built.errors };
-    ops.push({ type: 'create', collection: PAYMENTS, data: built.data, docId: receiptPaymentId(item.id, ledger.payments), action: 'settle' });
+    const ops = [{ type: 'create', collection: PAYMENTS, data: built.data, docId: receiptPaymentId(item.id, ledger.payments), action: 'settle' }];
     if (item.source === 'debt') ops.push({ type: 'update', collection: DEBTS, docId: item.id, data: { status: 'paid' }, action: 'pay' });
+    units.push({ ops, cents: item.remainingCents });
   }
-  ops.push(debtorReceiveOp(debtorId, totalCents, applied));
-  const ids = await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
-  await reconcileDebtorStatus(uid, debtorId, io);
-  return { ok: true, month, count: items.length, totalCents, debtorPaid: applied.status === 'paid', ids };
+  const written = await commitReceiptUnits(uid, debtorId, units, applied, io);
+  const reconcile = await reconcileDebtorStatus(uid, debtorId, io);
+  if (!written.ok) return { ...partialFailure(written, items.length), reconcile };
+  return { ok: true, month, count: items.length, totalCents, debtorPaid: applied.status === 'paid', ids: written.ids, resumed: done.length > 0, reconcile };
 }
 
 /** Cancela parcela pendente/atrasada sem recebimentos. `paid` só nasce de recebimentos. */
@@ -425,10 +503,10 @@ export async function registerDebtPayment(uid, debtId, rawData, io = {}) {
   ops.push(debtorReceiveOp(debt.debtorId, data.amountCents, applied));
 
   const [id] = await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
-  await reconcileDebtorStatus(uid, debt.debtorId, io);
+  const reconcile = await reconcileDebtorStatus(uid, debt.debtorId, io);
   // Antecipação (VF-2-03n): recebimento (total ou parcial) antes do vencimento da parcela.
   const anticipated = typeof debt.dueDate === 'string' && typeof data.date === 'string' && data.date < debt.dueDate;
-  return { ok: true, id, debtPaid, debtorPaid: applied.status === 'paid', anticipated };
+  return { ok: true, id, debtPaid, debtorPaid: applied.status === 'paid', anticipated, reconcile };
 }
 
 export function getDebtStatusOptions() {

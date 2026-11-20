@@ -108,6 +108,7 @@ Firebase real.
 | `npm run test:unit` | modelo, agregações e services com `io` injetado (sem rede) — 340 testes |
 | `npm run test:rules` | sobe Auth+Firestore no emulador e roda `tests/rules/` — 65 testes |
 | `npm run lint` | sintaxe, espaços, `console.log`, imports não usados, JSON (sem dependências) |
+| `npm run test:integration` | integração com o Firestore Emulator (Rules reais, sem mocks): recebimentos de devedores simultâneos/parciais/repetidos, falhas e recuperação, quitação em blocos, transferências e faturas simultâneas, consistência de saldos/dashboard/previsão contra um oráculo independente — `tests/integration/` |
 | `npm run test:e2e` | Playwright em Chromium contra os emuladores: `flows.mjs` (cadastro, orçamentos, metas, cartões, devedores, dashboard, relatórios, configurações) e `movements.mjs` (bancos, receitas, despesas, transferências: CRUD, filtros, paginação, ordenação, saldo derivado) |
 
 O E2E **não** adiciona dependência ao projeto: usa o `playwright` já instalado no ambiente e, sem

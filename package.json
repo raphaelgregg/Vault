@@ -14,7 +14,8 @@
     "test:rules": "firebase emulators:exec --only firestore,auth --project demo-vault-finance \"node --test tests/rules/*.test.mjs\"",
     "serve": "npx http-server -p 5500 -c-1 .",
     "test:e2e": "firebase emulators:exec --only firestore,auth --project demo-vault-finance \"node tests/e2e/flows.mjs && node tests/e2e/movements.mjs && node tests/e2e/debtors.mjs && node tests/e2e/maintenance.mjs && node tests/e2e/auth.mjs && node tests/e2e/csv.mjs\"",
-    "lint": "node scripts/lint.mjs"
+    "lint": "node scripts/lint.mjs",
+    "test:integration": "firebase emulators:exec --only firestore,auth --project demo-vault-finance \"node --test --test-concurrency=1 tests/integration/*.test.mjs\""
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^3.0.4",

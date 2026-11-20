@@ -99,6 +99,11 @@ service cloud.firestore {
       return !(field in data()) || ref(userId, collectionName, field);
     }
 
+    // Caminho de um documento da árvore do usuário (para get/getAfter/exists).
+    function docPath(userId, collectionName, id) {
+      return /databases/$(database)/documents/users/$(userId)/$(collectionName)/$(id);
+    }
+
     // ---------- raiz do usuário ----------
     match /users/{userId} {
       allow read, write: if false;
@@ -279,6 +284,7 @@ service cloud.firestore {
         && cents(data().lentCents)
         && cents(data().receivedCents)
         && data().receivedCents <= data().lentCents
+        && (resource == null || data().receivedCents >= resource.data.receivedCents)
         && oneOf('status', ['open', 'paid', 'cancelled'])
         && optionalString('notes', 500)
         && data().updatedAt == request.time
@@ -309,8 +315,15 @@ service cloud.firestore {
         && optionalString('debtGroupId', 128)
         && oneOf('status', ['pending', 'paid', 'late', 'cancelled'])
         && data().updatedAt == request.time
-        && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId) || isAdmin();
+        && (resource == null
+            || (immutable('createdAt') && immutable('debtorId') && immutable('principalCents') && immutable('dueDate')
+                && immutable('installmentNumber') && immutable('description')
+                && data().get('installmentsTotal', null) == resource.data.get('installmentsTotal', null)
+                && data().get('debtGroupId', null) == resource.data.get('debtGroupId', null)));
+      // Parcela PAGA (tem recebimentos) só some com administrador ou depois que o devedor foi removido.
+      allow delete: if isAdmin()
+        || (isOwner(userId)
+            && (resource.data.status != 'paid' || !exists(docPath(userId, 'debtors', resource.data.debtorId))));
     }
 
     // ---------- recebimentos de dívidas ----------
@@ -319,22 +332,40 @@ service cloud.firestore {
       // HISTÓRICO IMUTÁVEL: recebimento só é criado (nunca editado). Sem `update`, regravar um ID existente também é negado
       // — base da idempotência dos IDs sequenciais `pay-<parcela>-<n>` (VF-2-03al).
       allow create: if isOwner(userId)
-        && keysOk(['debtId', 'purchaseId', 'debtorId', 'amountCents', 'date', 'accountId', 'notes',
+        && keysOk(['debtId', 'purchaseId', 'debtorId', 'amountCents', 'date', 'accountId', 'operationId', 'notes',
                    'createdAt', 'updatedAt'])
         && requiredOk(['debtorId', 'amountCents', 'date', 'accountId',
                        'createdAt', 'updatedAt'])
         // Recebimento de UMA parcela: da dívida (debtId) OU da parcela de cartão do devedor (purchaseId), nunca ambas/nenhuma.
         && (('debtId' in data()) != ('purchaseId' in data()))
-        && optionalRef(userId, 'debts', 'debtId')
-        && optionalRef(userId, 'cardPurchases', 'purchaseId')
+        // (a existência da parcela é garantida pelo `get` abaixo: documento inexistente nega a regra; sem `exists`
+        // duplicado — o limite do Firestore é de ~20 acessos a documentos por lote)
         && ref(userId, 'debtors', 'debtorId')
         && positiveCents(data().amountCents)
         && stamp(data().date)
         && ref(userId, 'accounts', 'accountId')
+        // Vínculo com a parcela: mesmo devedor e valor nunca acima do valor da parcela (o acumulado da parcela é
+        // controlado pelo ID sequencial `pay-<parcela>-<n>`: a 2ª gravação sobre a mesma leitura cai em `update`, negado).
+        && ((('debtId' in data())
+              && get(docPath(userId, 'debts', data().debtId)).data.debtorId == data().debtorId
+              && data().amountCents <= get(docPath(userId, 'debts', data().debtId)).data.principalCents)
+            || (('purchaseId' in data())
+              && get(docPath(userId, 'cardPurchases', data().purchaseId)).data.debtorId == data().debtorId
+              && data().amountCents <= get(docPath(userId, 'cardPurchases', data().purchaseId)).data.amountCents))
+        // Recebimento e total do devedor andam JUNTOS: o `receivedCents` do devedor, ao fim do lote, sobe pelo menos o
+        // valor deste recebimento (impede registrar dinheiro sem atualizar o devedor; o teto `<= lentCents` está em debtors).
+        && getAfter(docPath(userId, 'debtors', data().debtorId)).data.receivedCents
+             - get(docPath(userId, 'debtors', data().debtorId)).data.receivedCents >= data().amountCents
+        && optionalString('operationId', 64)
         && optionalString('notes', 500)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId) || isAdmin();
+      // Sem `update` acima = recebimentos IMUTÁVEIS. Exclusão: só administrador, ou (limpeza de dados do dono) quando o
+      // devedor ou a conta do recebimento já não existe — nunca com a cadeia devedor/conta/recebimento íntegra.
+      allow delete: if isAdmin()
+        || (isOwner(userId)
+            && (!exists(docPath(userId, 'debtors', resource.data.debtorId))
+                || !exists(docPath(userId, 'accounts', resource.data.accountId))));
     }
 
     // ---------- metas ----------
@@ -398,7 +429,7 @@ service cloud.firestore {
     // ---------- compras no cartão ----------
     match /users/{userId}/cardPurchases/{purchaseId} {
       allow read: if isOwner(userId) || isAdmin();
-      allow create, update: if isOwner(userId)
+      allow create: if isOwner(userId)
         && keysOk(['cardId', 'description', 'amountCents', 'purchaseDate', 'installmentsTotal',
                    'installmentNumber', 'categoryId', 'invoiceId', 'debtorId', 'notes',
                    'createdAt', 'updatedAt'])
@@ -419,7 +450,11 @@ service cloud.firestore {
         && optionalString('notes', 300)
         && data().updatedAt == request.time
         && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId) || isAdmin();
+      // Compra lançada é imutável (valor/devedor/fatura não mudam depois). Compra de DEVEDOR só é excluída por
+      // administrador ou depois que o devedor foi removido (preserva o que ele deve e os recebimentos dela).
+      allow delete: if isAdmin()
+        || (isOwner(userId)
+            && (!('debtorId' in resource.data) || !exists(docPath(userId, 'debtors', resource.data.debtorId))));
     }
 
     // ---------- faturas ----------
@@ -440,8 +475,12 @@ service cloud.firestore {
         && optionalStamp('paidAt')
         && oneOf('status', ['open', 'closed', 'paid', 'cancelled'])
         && data().updatedAt == request.time
-        && (resource == null || immutable('createdAt'));
-      allow delete: if isOwner(userId) || isAdmin();
+        && (resource == null || immutable('createdAt'))
+        // Fatura PAGA é pagamento confirmado: valor, conta e data não mudam (nem a fatura volta de `paid`).
+        && (resource == null || resource.data.status != 'paid');
+      allow delete: if isAdmin()
+        || (isOwner(userId)
+            && (resource.data.status != 'paid' || !exists(docPath(userId, 'creditCards', resource.data.cardId))));
     }
 
     // ---------- orçamentos ----------

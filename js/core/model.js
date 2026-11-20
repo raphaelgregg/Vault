@@ -315,6 +315,8 @@ export const SCHEMAS = Object.freeze({
       amountCents: money(),
       date: date(),
       accountId: refField(),
+      // Chave de idempotência da operação (UUID gerado ao abrir o formulário): retry/duplo clique não duplica.
+      operationId: optionalText(64),
       notes: optionalText(500),
     },
   },

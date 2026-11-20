@@ -19,10 +19,16 @@ import { list, newBatch, userDoc, writeAudit, listCollectionGroup, docAtPath } f
 
 export const BATCH_LIMIT = 500;
 
-/** Coleções de domínio apagadas (perfil e configurações do usuário ficam). `auditLog` por último e à parte. */
+/**
+ * Coleções de domínio apagadas (perfil e configurações do usuário ficam). `auditLog` por último e à parte.
+ * ORDEM = pais antes dos dependentes: as Rules protegem o histórico financeiro (recebimentos, parcelas pagas, compras
+ * de devedores e faturas pagas só são excluídos pelo dono DEPOIS que o devedor/cartão correspondente não existe mais),
+ * então `debtors` e `creditCards` vêm primeiro e liberam `debtPayments`, `debts`, `cardPurchases` e `invoices`.
+ */
 export const DOMAIN_COLLECTIONS = Object.freeze([
-  COLLECTIONS.goalTransactions, COLLECTIONS.goals, COLLECTIONS.debtPayments, COLLECTIONS.debts, COLLECTIONS.debtors,
-  COLLECTIONS.cardPurchases, COLLECTIONS.invoices, COLLECTIONS.creditCards, COLLECTIONS.subscriptions, COLLECTIONS.budgets,
+  COLLECTIONS.goalTransactions, COLLECTIONS.goals, COLLECTIONS.debtors, COLLECTIONS.creditCards,
+  COLLECTIONS.debtPayments, COLLECTIONS.debts, COLLECTIONS.cardPurchases, COLLECTIONS.invoices,
+  COLLECTIONS.subscriptions, COLLECTIONS.budgets,
   COLLECTIONS.transfers, COLLECTIONS.expenses, COLLECTIONS.incomes, COLLECTIONS.categories, COLLECTIONS.accounts,
 ]);
 export const AUDIT_COLLECTION = 'auditLog';

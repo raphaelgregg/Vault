@@ -48,3 +48,4 @@ jobs:
           java-version: '17'
       - run: npm ci
       - run: npm run test:rules
+      - run: npm run test:integration
