@@ -62,7 +62,7 @@ export function getAdmin(env = process.env) {
     initializeApp(account ? { credential: cert(account), projectId } : { projectId });
   }
   const db = getFirestore();
-  db.settings({ ignoreUndefinedProperties: true });
+  try { db.settings({ ignoreUndefinedProperties: true }); } catch { /* já inicializado por outro módulo/teste: segue com as configurações existentes */ }
   defaultAdmin = { db, verifyIdToken: (token) => getAuth().verifyIdToken(token) };
   return defaultAdmin;
 }

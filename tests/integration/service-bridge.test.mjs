@@ -82,9 +82,9 @@ describe('transferências e contas pelos services', () => {
     const a = await seedAccount(io, '100,00');
     const b = await seedAccount(io, '0,00', 'Outro');
     const raw = { fromAccountId: a, toAccountId: b, amountCents: '80,00', date: '2026-12-04', reason: 'x', status: 'confirmed' };
-    const dup = await Promise.all([createTransfer(ALICE, { ...raw, operationId: 'k1' }, io), createTransfer(ALICE, { ...raw, operationId: 'k1' }, io)]);
-    assert.ok(dup.every((r) => r.ok) && dup[0].id === dup[1].id);
-    const second = await Promise.all([createTransfer(ALICE, { ...raw, operationId: 'k2' }, io), createTransfer(ALICE, { ...raw, operationId: 'k3' }, io)]);
+    const dup = await Promise.all([createTransfer(ALICE, { ...raw, operationId: 'clique-0001' }, io), createTransfer(ALICE, { ...raw, operationId: 'clique-0001' }, io)]);
+    assert.ok(dup.every((r) => r.ok) && dup[0].id === dup[1].id, JSON.stringify(dup));
+    const second = await Promise.all([createTransfer(ALICE, { ...raw, operationId: 'clique-0002' }, io), createTransfer(ALICE, { ...raw, operationId: 'clique-0003' }, io)]);
     assert.equal(second.filter((r) => r.ok).length, 0); // só sobraram R$ 20
     assert.ok(second.every((r) => r.code === 'INSUFFICIENT_BALANCE'));
     assert.equal(await derivedBalance(io, a), 2000);

@@ -138,7 +138,7 @@ describe('Transferências e faturas simultâneas', () => {
     const io = makeRealIo(env);
     const C = await acct(io, 'Banco C', '1.000,00');
     const D = await acct(io, 'Banco D', '0,00');
-    const raw = { fromAccountId: C, toAccountId: D, amountCents: '10,00', date: '2026-12-04', reason: 'mesma', status: 'confirmed', operationId: 'clique-1' };
+    const raw = { fromAccountId: C, toAccountId: D, amountCents: '10,00', date: '2026-12-04', reason: 'mesma', status: 'confirmed', operationId: 'clique-0001' };
     const rs = await Promise.all([createTransfer(ALICE, raw, makeRealIo(env)), createTransfer(ALICE, raw, makeRealIo(env))]);
     assert.ok(rs.every((r) => r.ok));
     assert.equal(rs[0].id, rs[1].id);

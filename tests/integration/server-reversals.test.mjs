@@ -53,7 +53,7 @@ describe('estorno de despesa, receita, transferência, fatura', () => {
       const first = await callOk(UID, 'reversal.create', key, rev('expense', 'e1'));
       const retries = await Promise.all([1, 2, 3].map(() => call(UID, 'reversal.create', key, rev('expense', 'e1'))));
       assert.ok(retries.every((r) => r.status === 200 && r.body.idempotent === true && r.body.reversalId === first.reversalId), JSON.stringify(retries));
-      assert.equal(await oracleBalance('A'), 10000 + 1000);
+      assert.equal(await oracleBalance('A'), 10000); // despesa paga de 1000 (saldo 9000) estornada: volta a 10000
       assert.equal((await dump('reversals')).length, 1);
     });
   });
