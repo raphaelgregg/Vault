@@ -18,6 +18,8 @@ import {
   deleteAccount,
   getAccountTypeOptions,
   getStatusOptions,
+  adjustOpeningBalance,
+  computeOpeningAdjustment,
   formatCents,
   parseMoneyToCents,
 } from '../services/accounts.js';
@@ -47,14 +49,24 @@ async function loadData() {
     listCategories(currentUser.uid),
   ]);
   derived = null; // dados mudaram: o saldo derivado anterior ficou obsoleto
+  await calculateBalances({ silent: true }); // saldo atual calculado ao abrir (e a cada recarga), não só sob demanda
 }
 
-/** Calcula o saldo atual derivado (receitas recebidas, despesas pagas, transferências, recebimentos, metas). */
-async function calculateBalances() {
-  const result = await loadBalances(currentUser.uid, accountsCache);
-  derived = result;
-  renderPage($('.content') || document.getElementById('page-content'));
-  if (result.truncated.length) toast('Leitura limitada: o saldo pode estar incompleto.', 6000);
+/**
+ * Calcula o saldo atual derivado (receitas recebidas, despesas pagas, transferências, recebimentos, metas, faturas).
+ * Falha na leitura não derruba a página: o saldo atual fica indisponível e a tela avisa.
+ */
+async function calculateBalances({ silent = false } = {}) {
+  try {
+    derived = await loadBalances(currentUser.uid, accountsCache);
+  } catch (error) {
+    console.error('[bancos] falha ao calcular saldos', error);
+    derived = null;
+    if (!silent) toast('Não foi possível calcular o saldo atual.', 5000);
+    return;
+  }
+  if (!silent) renderPage($('.content') || document.getElementById('page-content'));
+  if (derived.truncated.length) toast('Leitura limitada: o saldo pode estar incompleto.', 6000);
 }
 
 /** Renderiza a página completa. */
@@ -66,7 +78,7 @@ function renderPage(container) {
       el('span', { class: 'card__icon' }, [el('i', { 'data-lucide': 'landmark', 'aria-hidden': 'true' })]),
       el('div', {}, [
         el('h2', { text: 'Bancos e contas' }),
-        el('p', { class: 'card__hint', text: 'Instituições, tipos de conta e saldo calculado a partir das movimentações.' }),
+        el('p', { class: 'card__hint', text: 'Saldo atual = saldo de abertura + entradas − saídas (calculado das movimentações; nada é gravado).' }),
       ]),
       el('div', { class: 'topbar__spacer' }),
       el('button', {
@@ -88,7 +100,7 @@ function renderPage(container) {
   const cards = el('div', { class: 'grid grid--cards' }, [
     createStatCard('Saldo total', formatCents(stats.totalBalance), 'wallet', 'income', derived
       ? 'Saldo atual derivado das movimentações (contas ativas)'
-      : 'Soma dos saldos iniciais; use "Calcular saldo atual" para incluir as movimentações'),
+      : 'Saldo atual indisponível: exibindo a soma dos saldos de abertura. Use "Calcular saldo atual".'),
     createStatCard('Contas ativas', String(stats.activeCount), 'landmark', null, 'Contas com status "ativo"'),
   ]);
 
@@ -96,6 +108,9 @@ function renderPage(container) {
 
   const limitNotice = accountsCache.length >= ACCOUNT_LIST_LIMIT
     ? el('p', { class: 'notice', role: 'status', text: `Exibindo as primeiras ${ACCOUNT_LIST_LIMIT} contas (limite de leitura).` })
+    : null;
+  const orphanNotice = derived?.orphans?.count
+    ? el('p', { class: 'notice', role: 'status', text: `${derived.orphans.count} movimentação(ões) apontam para uma conta que não existe mais e ficam fora de qualquer saldo (${Object.entries(derived.orphans.byCollection).map(([k, n]) => `${k}: ${n}`).join(', ')}). Revise-as ou recrie a conta.` })
     : null;
   const balanceNotice = derived?.truncated.length
     ? el('p', { class: 'notice', role: 'status', text: `Leitura limitada a ${READ_LIMIT} movimentos por tipo (${derived.truncated.join(', ')}): o saldo atual pode estar incompleto.` })
@@ -106,6 +121,7 @@ function renderPage(container) {
     cards,
     limitNotice,
     balanceNotice,
+    orphanNotice,
     el('section', { class: 'panel' }, [
       el('div', { class: 'panel__header' }, [
         el('h2', { text: 'Contas cadastradas' }),
@@ -150,7 +166,7 @@ function createAccountsTable() {
     { key: 'institution', label: 'Instituição' },
     { key: 'name', label: 'Conta', render: (v) => v || '—' },
     { key: 'type', label: 'Tipo', render: (v) => getTypeLabel(v) },
-    { key: 'initialBalanceCents', label: 'Saldo inicial', numeric: true, render: (v) => formatCents(Number(v) || 0) },
+    { key: 'initialBalanceCents', label: 'Saldo de abertura', numeric: true, render: (v) => formatCents(Number(v) || 0) },
     ...(derived ? [{ key: 'id', label: 'Saldo atual', numeric: true, render: (v) => formatCents(derived.balances.get(v) ?? 0) }] : []),
     { key: 'status', label: 'Status', render: (v) => getStatusLabel(v) },
   ];
@@ -187,6 +203,14 @@ function createAccountsTable() {
         });
       }),
       el('td', { class: 'actions' }, [
+        derived ? el('button', {
+          type: 'button',
+          class: 'btn btn--icon',
+          'aria-label': `Ajustar saldo de ${account.name || account.institution}`,
+          title: 'Ajustar saldo de abertura para o valor real da conta',
+          onClick: () => openAdjustModal(account),
+          html: '<i data-lucide="scale" aria-hidden="true"></i>',
+        }) : null,
         el('button', {
           type: 'button',
           class: 'btn btn--icon',
@@ -211,6 +235,65 @@ function createAccountsTable() {
       el('tbody', {}, bodyWithActions),
     ]),
   ]);
+}
+
+/**
+ * Ajuste guiado do saldo de abertura: o usuário informa quanto a conta tem AGORA e (opcional) desde que data os
+ * lançamentos valem; mostra o antes/depois e só grava `initialBalanceCents` (e `openingDate`) após confirmar.
+ */
+function openAdjustModal(account) {
+  const current = derived?.balances.get(account.id) ?? 0;
+  const preview = el('p', { class: 'card__hint', role: 'status' });
+  const form = el('form', { id: 'adjust-form', novalidate: true }, [
+    el('p', { text: `Saldo atual calculado: ${formatCents(current)} (abertura ${formatCents(Number(account.initialBalanceCents) || 0)}).` }),
+    el('div', { class: 'form__field' }, [
+      el('label', { for: 'realBalance', text: 'Saldo real da conta agora (R$) *' }),
+      el('input', { type: 'text', id: 'realBalance', name: 'realBalance', placeholder: '0,00', autocomplete: 'off' }),
+      el('span', { class: 'form__error', 'data-for': 'realBalance' }),
+    ]),
+    el('div', { class: 'form__field' }, [
+      el('label', { for: 'adjustOpeningDate', text: 'Considerar movimentações a partir de (opcional)' }),
+      el('input', { type: 'date', id: 'adjustOpeningDate', name: 'openingDate', value: account.openingDate ?? '' }),
+      el('span', { class: 'form__error', 'data-for': 'openingDate' }),
+    ]),
+    preview,
+    el('p', { class: 'card__hint', text: 'Só o saldo de abertura desta conta muda; nenhuma receita, despesa ou transferência é alterada.' }),
+  ]);
+  const modal = openModal({
+    title: `Ajustar saldo: ${accountLabel(account)}`,
+    body: form,
+    footer: [
+      el('button', { type: 'button', class: 'btn btn--secondary', onClick: closeModal, text: 'Cancelar' }),
+      el('button', { type: 'submit', class: 'btn btn--primary', text: 'Confirmar ajuste' }),
+    ],
+    onClose: () => form.removeEventListener('submit', handleAdjust),
+  });
+  const realInput = $('#realBalance', modal.overlay);
+  const dateInput = $('#adjustOpeningDate', modal.overlay);
+  const updatePreview = () => {
+    const real = parseMoneyToCents(realInput.value);
+    if (real === null || !derived) { preview.textContent = ''; return; }
+    const r = computeOpeningAdjustment({ ...account, openingDate: dateInput.value || undefined }, derived.movements, real);
+    preview.textContent = `Abertura: ${formatCents(Number(account.initialBalanceCents) || 0)} → ${formatCents(r.newInitialCents)} (movimentações ${formatCents(r.movementsCents)}); saldo atual passará a ${formatCents(real)}.`;
+  };
+  realInput.addEventListener('input', updatePreview);
+  dateInput.addEventListener('change', updatePreview);
+
+  async function handleAdjust(event) {
+    event.preventDefault();
+    clearErrors(form);
+    const result = await adjustOpeningBalance(currentUser.uid, account.id, realInput.value, { openingDate: dateInput.value || null });
+    if (result.ok) {
+      toast(`Saldo de abertura ajustado para ${formatCents(result.newInitialCents)}.`);
+      closeModal();
+      await loadData();
+      renderPage($('.content') || document.getElementById('page-content'));
+    } else {
+      showErrors(form, result.errors);
+    }
+  }
+  form.addEventListener('submit', handleAdjust);
+  realInput.focus();
 }
 
 /** Abre modal para criar/editar conta. */
@@ -273,7 +356,7 @@ function openAccountModal(account = null) {
     ]),
     el('div', { class: 'form__row' }, [
       el('div', { class: 'form__field' }, [
-        el('label', { for: 'initialBalanceCents', text: 'Saldo inicial (R$)' }),
+        el('label', { for: 'initialBalanceCents', text: 'Saldo de abertura (R$)' }),
         el('input', {
           type: 'text',
           id: 'initialBalanceCents',
@@ -282,8 +365,17 @@ function openAccountModal(account = null) {
           placeholder: '0,00',
           autocomplete: 'off',
         }),
+        el('span', { class: 'card__hint', text: 'Dinheiro que a conta já tinha quando você começou a usar o Vault. O saldo atual soma as movimentações a este valor.' }),
         el('span', { class: 'form__error', 'data-for': 'initialBalanceCents' }),
       ]),
+      el('div', { class: 'form__field' }, [
+        el('label', { for: 'openingDate', text: 'Data de abertura' }),
+        el('input', { type: 'date', id: 'openingDate', name: 'openingDate', value: account?.openingDate ?? '' }),
+        el('span', { class: 'card__hint', text: 'Opcional. Com data, só movimentações a partir dela entram no saldo; vazio = todas.' }),
+        el('span', { class: 'form__error', 'data-for': 'openingDate' }),
+      ]),
+    ]),
+    el('div', { class: 'form__row' }, [
       el('div', { class: 'form__field' }, [
         el('label', { for: 'color', text: 'Cor (hex)' }),
         el('input', {
@@ -336,6 +428,7 @@ function openAccountModal(account = null) {
       name: formData.get('name').trim(),
       type: formData.get('type'),
       initialBalanceCents: formData.get('initialBalanceCents') || '0',
+      openingDate: formData.get('openingDate') || undefined,
       color: formData.get('color') || '#1f7a5c',
       status: formData.get('status'),
     };

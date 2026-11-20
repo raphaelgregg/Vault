@@ -50,7 +50,7 @@ try {
   await createAccount('Banco A', 'Conta A', 'checking', '1.000,00');
   await createAccount('Banco B', 'Conta B', 'savings', '');
   assert.match(await rows().filter({ hasText: 'Conta A' }).innerText(), /R\$\s?1\.000,00/); // regressão: coluna lia campo inexistente
-  assert.match(await content(), /Soma dos saldos iniciais/);
+  assert.match(await content(), /Saldo atual derivado das movimentações/); // saldo atual calculado ao abrir a tela
 
   log('seed: categorias via service');
   const cats = await page.evaluate(async () => {
@@ -188,7 +188,7 @@ try {
   log('bancos: saldo atual derivado sob demanda e exclusão bloqueada');
   await go('bancos');
   // A: 1000 + 2000 (recebida) − 300 (paga) − 500 (transferência confirmada) = 2200 · B: 500
-  await page.getByRole('button', { name: 'Calcular saldo atual' }).click();
+  await page.getByRole('button', { name: 'Recalcular saldo atual' }).click();
   await waitText(/Saldo atual derivado/);
   assert.match(await rows().filter({ hasText: 'Conta A' }).innerText(), /R\$\s?2\.200,00/);
   assert.match(await rows().filter({ hasText: 'Conta B' }).innerText(), /R\$\s?500,00/);
@@ -226,7 +226,7 @@ try {
   await go('receitas');
   await confirmDelete('Excluir Salário UI', /saem do saldo de Banco A — Conta A/, /estornados em Banco A — Conta A/);
   await go('bancos');
-  await page.getByRole('button', { name: 'Calcular saldo atual' }).click();
+  await page.getByRole('button', { name: 'Recalcular saldo atual' }).click();
   await waitText(/Saldo atual derivado/);
   assert.match(await rows().filter({ hasText: 'Conta A' }).innerText(), /R\$\s?500,00/); // 1000 − 500 (transferência)
 
@@ -384,6 +384,37 @@ try {
   await page.waitForFunction(() => /Saldo insuficiente em Alelo Pod/.test(document.querySelector('#transfer-form')?.innerText ?? ''));
   assert.equal(await goalSavedNow(goalId), 1500, 'aporte sem saldo não grava');
   await page.getByRole('button', { name: 'Cancelar', exact: true }).click();
+
+  log('saldo de abertura: ajustar para o saldo real (só a abertura muda) e previsão do mês no dashboard');
+  await go('bancos');
+  await page.getByRole('button', { name: 'Nova conta' }).click();
+  await page.fill('#institution', 'Ajuste Bank');
+  await page.selectOption('#type', 'checking');
+  await page.locator('#account-form button[type="submit"]').click();
+  await waitText(/Ajuste Bank/);
+  const adj = () => rows().filter({ hasText: 'Ajuste Bank' });
+  await page.getByRole('button', { name: 'Ajustar saldo de Ajuste Bank' }).click();
+  await page.fill('#realBalance', '1.234,56');
+  await page.waitForFunction(() => /Abertura:.*→.*1\.234,56/.test(document.querySelector('#adjust-form')?.innerText ?? ''));
+  await page.locator('#adjust-form button[type="submit"]').click().catch(async () => page.getByRole('button', { name: 'Confirmar ajuste' }).click());
+  await page.waitForFunction(() => /ajustado/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await waitText(/1\.234,56/);
+  assert.equal((await adj().innerText().then((t) => t.match(/R\$\s?1\.234,56/g) ?? [])).length, 2, `abertura e saldo atual = 1.234,56: ${await adj().innerText()}`);
+  const ajuste = await page.evaluate(async () => {
+    const { listAccounts } = await import('/js/services/accounts.js');
+    const { auth } = await import('/js/firebase/client.js');
+    return (await listAccounts(auth.currentUser.uid)).find((a) => a.institution === 'Ajuste Bank');
+  });
+  assert.equal(ajuste.initialBalanceCents, 123456);
+  assert.equal('openingDate' in ajuste, false);
+
+  await go('dashboard');
+  await waitText(/Previsão do mês/);
+  assert.match(await content(), /Saldo projetado ao fim do mês/);
+  assert.match(await content(), /Como o saldo projetado foi calculado/);
+  assert.match(await content(), /Compromissos dos próximos meses/);
+  await page.locator('#include-debtors').check();
+  await waitText(/A receber de devedores/);
 
   assert.deepEqual(app.problems, [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E movimentos OK');

@@ -12,20 +12,22 @@ const KIND_LABELS = { expense: 'Despesa', subscription: 'Assinatura', invoice: '
 const SOURCE_LABELS = {
   goals: 'metas (saldo vinculado)', monthPending: 'previsto do mês', cardInvoices: 'faturas e limite dos cartões', debtorMonth: 'a receber no mês (devedores)',
   accounts: 'contas', movements: 'movimentações (saldo e resultado)', pendingExpenses: 'despesas a vencer',
-  subscriptions: 'assinaturas', invoices: 'faturas', debtors: 'devedores', budgets: 'orçamentos',
+  subscriptions: 'assinaturas', invoices: 'faturas', debtors: 'devedores', budgets: 'orçamentos', monthlyForecast: 'previsão do mês',
 };
 const COLLECTION_LABELS = {
   incomes: 'receitas', expenses: 'despesas', transfers: 'transferências',
   debtPayments: 'recebimentos', cardInvoices: 'faturas/compras de cartão', invoices: 'faturas pagas', goalTransactions: 'movimentações de metas', budgetExpenses: 'despesas do orçamento',
+  expensesInMonth: 'despesas do mês (previsão)', expensesOverdue: 'despesas vencidas (previsão)', incomesPending: 'receitas pendentes (previsão)',
 };
 
 let selectedMonth = null; // mês do indicador; null = vigente
+let includeDebtors = false; // inclui o "a receber de devedores" no saldo projetado
 
 export async function render(container, { user }) {
   mount(container, el('p', { class: 'card__hint', role: 'status', text: 'Carregando indicadores…' }));
   let data;
   try {
-    data = await loadDashboard(user.uid, selectedMonth ? { month: selectedMonth } : {});
+    data = await loadDashboard(user.uid, { ...(selectedMonth ? { month: selectedMonth } : {}), includeDebtors });
   } catch (error) {
     console.error('[dashboard] falha ao carregar', error);
     mount(container, el('p', { role: 'alert', text: 'Não foi possível carregar o dashboard. Tente recarregar a página.' }));
@@ -91,6 +93,64 @@ function draw(container, data, rerender) {
     statCard(`A receber em ${formatMonth(data.month)}`, money(debtors?.monthDueCents), 'calendar-check', debtors?.monthDueCents == null ? unavailable : 'Fechamento do mês (cartão + dívidas), limitado ao pendente'),
     statCard('Total em aberto', money(debtors?.pendingCents), 'hand-coins', debtors ? `${debtors.openCount} devedor(es) em aberto` : unavailable),
   ]);
+  const f = data.monthlyForecast;
+  const forecastSection = !f
+    ? el('section', { class: 'panel' }, [
+      el('div', { class: 'panel__header' }, [el('h2', { text: `Previsão do mês — ${formatMonth(data.month)}` })]),
+      el('div', { class: 'panel__body' }, [el('p', { class: 'card__hint', role: 'status', text: 'Previsão indisponível: falha ao ler uma das fontes (veja o aviso acima).' })]),
+    ])
+    : [
+      sec(`Previsão do mês — ${formatMonth(data.month)}`, [
+        statCard('Despesas previstas', formatCents(f.expenses.plannedCents), 'calendar-clock', `Vencem no mês · recorrentes ${formatCents(f.expenses.recurringPlannedCents)}`),
+        statCard('Já pagas', formatCents(f.expenses.paidCents), 'check-circle-2', 'Das despesas que vencem no mês', 'income'),
+        statCard('Pendentes', formatCents(f.expenses.pendingCents), 'clock', `Vencidas (todas) ${formatCents(f.expenses.overdueCents)} · de meses anteriores ${formatCents(f.expenses.overduePreviousCents)}`, 'expense'),
+        statCard('Comprometido em cartões', formatCents(f.cards.committedCents), 'credit-card', `Compras não quitadas (inclui parcelas futuras) · compras do mês ${formatCents(f.cards.purchasesInMonthCents)}`),
+        statCard('Faturas a pagar', formatCents(f.cards.invoicesToPayCents), 'receipt', `Abertas ${formatCents(f.cards.openInvoicesCents)} · fechadas ${formatCents(f.cards.closedInvoicesCents)} · vencidas ${formatCents(f.cards.invoicesOverdueCents)}`),
+        statCard('Assinaturas', formatCents(f.subscriptions.monthlyCents), 'repeat', `Valor mensal consolidado · previstas no mês ${formatCents(f.subscriptions.plannedInMonthCents)}`),
+        statCard('Saldo disponível atual', formatCents(f.balanceCents), 'wallet', 'Contas ativas (já inclui o que foi pago/recebido)'),
+        statCard('Saldo projetado ao fim do mês', formatCents(f.projectedBalanceCents), 'trending-up', f.projectedBalanceCents < 0 ? 'Atenção: projeção negativa' : 'Saldo atual + pendentes − compromissos', f.projectedBalanceCents < 0 ? 'expense' : 'income'),
+      ]),
+      el('section', { class: 'panel' }, [
+        el('div', { class: 'panel__header' }, [
+          el('h2', { text: 'Como o saldo projetado foi calculado' }),
+          el('div', { class: 'topbar__spacer' }),
+          el('label', { class: 'card__hint' }, [
+            el('input', { type: 'checkbox', id: 'include-debtors', checked: includeDebtors, onChange: (event) => { includeDebtors = event.target.checked; rerender(); } }),
+            ` Incluir a receber de devedores (${formatCents(f.debtors.receivableCents)})`,
+          ]),
+        ]),
+        el('div', { class: 'panel__body panel__body--flush' }, [
+          dataTable({
+            columns: [
+              { key: 'label', label: 'Item' },
+              { key: 'cents', label: 'Valor', numeric: true, render: (v) => formatCents(v) },
+            ],
+            rows: [
+              { label: 'Saldo atual das contas', cents: f.balanceCents },
+              ...f.components,
+              { label: '= Saldo projetado ao fim do mês', cents: f.projectedBalanceCents },
+            ],
+          }),
+        ]),
+        el('p', { class: 'card__hint', text: 'Compras no cartão são compromisso, não saída: o caixa só sai quando a fatura é paga, por isso entram as faturas (pelo vencimento), nunca as compras. Recorrências ainda não lançadas não são projetadas.' }),
+        ...f.subscriptions.duplicates.map((d) => el('p', { class: 'notice', role: 'status', text: `Assinatura "${d.name}" (${formatCents(d.amountCents)}) ignorada na previsão: já existe como despesa no mês (evita contar duas vezes).` })),
+      ]),
+      el('section', { class: 'panel' }, [
+        el('div', { class: 'panel__header' }, [el('h2', { text: 'Compromissos dos próximos meses' })]),
+        el('div', { class: 'panel__body panel__body--flush' }, [
+          dataTable({
+            columns: [
+              { key: 'month', label: 'Mês', render: (v) => formatMonth(v) },
+              { key: 'expensesCents', label: 'Despesas pendentes', numeric: true, render: (v) => formatCents(v) },
+              { key: 'invoicesCents', label: 'Faturas', numeric: true, render: (v) => formatCents(v) },
+              { key: 'subscriptionsCents', label: 'Assinaturas', numeric: true, render: (v) => formatCents(v) },
+              { key: 'commitmentsCents', label: 'Total', numeric: true, render: (v) => formatCents(v) },
+            ],
+            rows: f.nextMonths,
+          }),
+        ]),
+      ]),
+    ];
   const note = el('p', { class: 'card__hint', text: 'Compras no cartão não entram em Despesas: aparecem em Faturas; pagar a fatura debita a conta escolhida (uma vez).' });
 
   const upcoming = el('section', { class: 'panel' }, [
@@ -110,6 +170,6 @@ function draw(container, data, rerender) {
     ]),
   ]);
 
-  mount(container, header, monthBar, failedNotice, notice, balanceSection, monthSection, cardSection, debtorSection, note, upcoming);
+  mount(container, header, monthBar, failedNotice, notice, balanceSection, ...[].concat(forecastSection), monthSection, cardSection, debtorSection, note, upcoming);
   refreshIcons();
 }

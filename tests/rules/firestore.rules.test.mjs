@@ -1132,3 +1132,34 @@ describe('Contas: `name` opcional (Bancos) e receitas só com accountId', () => 
     await assertSucceeds(deleteDoc(doc(db, 'users', ALICE, 'accounts', 'acc-del')));
   });
 });
+
+describe('Contas: saldo de abertura e data de abertura (VF-2-03ai)', () => {
+  const dbA = () => asUser(ALICE);
+  const accRef = (id) => doc(dbA(), 'users', ALICE, 'accounts', id);
+
+  it('aceita conta com openingDate (timestamp) e saldo de abertura', async () => {
+    await assertSucceeds(setDoc(accRef('acc-ab'), { ...account, openingDate: new Date('2026-11-01') }));
+  });
+
+  it('nega openingDate que não seja timestamp (string, número)', async () => {
+    await assertFails(setDoc(accRef('acc-x1'), { ...account, openingDate: '2026-11-01' }));
+    await assertFails(setDoc(accRef('acc-x2'), { ...account, openingDate: 20261101 }));
+  });
+
+  it('conta antiga sem openingDate segue válida; ajuste de abertura (patch só com initialBalanceCents) é aceito', async () => {
+    await assertSucceeds(updateDoc(accRef('acc-main'), { initialBalanceCents: 987654, updatedAt: serverTimestamp() }));
+    assert.equal((await getDoc(accRef('acc-main'))).data().initialBalanceCents, 987654);
+    await assertSucceeds(updateDoc(accRef('acc-main'), { initialBalanceCents: 100, openingDate: new Date('2026-11-06'), updatedAt: serverTimestamp() }));
+  });
+
+  it('remover openingDate (deleteField) é aceito; saldo de abertura não inteiro continua negado', async () => {
+    await assertSucceeds(setDoc(accRef('acc-ab2'), { ...account, openingDate: new Date('2026-11-01') }));
+    await assertSucceeds(updateDoc(accRef('acc-ab2'), { openingDate: deleteField(), updatedAt: serverTimestamp() }));
+    assert.equal('openingDate' in (await getDoc(accRef('acc-ab2'))).data(), false);
+    await assertFails(updateDoc(accRef('acc-main'), { initialBalanceCents: 10.5, updatedAt: serverTimestamp() }));
+  });
+
+  it('outro usuário não ajusta o saldo de abertura alheio', async () => {
+    await assertFails(updateDoc(doc(asUser(BOB), 'users', ALICE, 'accounts', 'acc-main'), { initialBalanceCents: 1, updatedAt: serverTimestamp() }));
+  });
+});

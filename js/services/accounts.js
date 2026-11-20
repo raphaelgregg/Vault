@@ -11,7 +11,8 @@ import {
   updateAudited,
   removeAudited,
 } from './firestore.js';
-import { buildEntity, formatCents, parseMoneyToCents, ACCOUNT_TYPES } from '../core/model.js';
+import { buildEntity, formatCents, parseMoneyToCents, accountBalances, ACCOUNT_TYPES } from '../core/model.js';
+import { loadBalances } from './balances.js';
 
 const COLLECTION = COLLECTIONS.accounts;
 
@@ -49,8 +50,55 @@ export async function updateAccount(uid, accountId, rawData, io = {}) {
   if (!ok) return { ok: false, errors };
 
   // Conta sem nome: remove `name` se existia (null → deleteField em `update`; update é merge).
-  await updateAudited(uid, COLLECTION, accountId, { ...data, name: data.name ?? null }, io);
+  // `openingDate` ausente também é removida (null → deleteField): voltar a contar todos os movimentos.
+  await updateAudited(uid, COLLECTION, accountId, { ...data, name: data.name ?? null, openingDate: data.openingDate ?? null }, io);
   return { ok: true };
+}
+
+/**
+ * Cálculo PURO do ajuste de saldo de abertura. `account` (com ou sem `openingDate` novo), `movements` = movimentos
+ * realizados lidos; `realCents` = quanto a conta tem de fato agora. Fórmula:
+ *   movimentos = saldo_atual_derivado − abertura_atual      (o que os lançamentos acrescentam)
+ *   nova_abertura = saldo_real − movimentos
+ * Só o saldo de abertura muda; nenhum movimento é tocado. Retorna { currentCents, movementsCents, newInitialCents }.
+ */
+export function computeOpeningAdjustment(account, movements, realCents) {
+  const initial = Number(account.initialBalanceCents) || 0;
+  const current = accountBalances([account], movements).get(account.id) ?? initial;
+  const movementsCents = current - initial;
+  return { currentCents: current, movementsCents, newInitialCents: realCents - movementsCents };
+}
+
+/**
+ * Ajusta o saldo de abertura de UMA conta para que o saldo atual derivado seja `realCents` (ação explícita do
+ * usuário; nada é automático). Opcionalmente define `openingDate` (movimentos anteriores deixam de contar).
+ * Fail-closed: não ajusta se a leitura dos movimentos foi truncada (saldo incompleto) ou falhou, e rejeita
+ * abertura negativa (o saldo informado é menor que o dos lançamentos — informe uma data de abertura).
+ * Retorna { ok, previousInitialCents, newInitialCents, movementsCents, errors }.
+ */
+export async function adjustOpeningBalance(uid, accountId, realInput, { openingDate = null } = {}, io = {}) {
+  const realCents = typeof realInput === 'number' ? realInput : parseMoneyToCents(realInput);
+  if (!Number.isInteger(realCents) || realCents < 0) return { ok: false, errors: { realBalance: 'Informe o saldo atual da conta (valor monetário válido, sem negativo).' } };
+  if (openingDate && !/^\d{4}-\d{2}-\d{2}$/.test(openingDate)) return { ok: false, errors: { openingDate: 'Data inválida (use AAAA-MM-DD).' } };
+  const account = await (io.getById ?? getById)(uid, COLLECTION, accountId);
+  if (!account) return { ok: false, errors: { _form: 'Conta não encontrada.' } };
+  let loaded;
+  try {
+    loaded = await loadBalances(uid, [{ ...account, openingDate: openingDate || undefined }], io.list ? { list: io.list } : {});
+  } catch (error) {
+    console.error('[accounts] falha ao ler movimentos', error);
+    return { ok: false, errors: { _form: 'Não foi possível ler as movimentações da conta; o ajuste foi cancelado por segurança.' } };
+  }
+  if (loaded.truncated.length) {
+    return { ok: false, errors: { _form: `Leitura limitada (${loaded.truncated.join(', ')}): o saldo calculado pode estar incompleto; o ajuste foi cancelado.` } };
+  }
+  const { movementsCents, newInitialCents } = computeOpeningAdjustment({ ...account, openingDate: openingDate || undefined }, loaded.movements, realCents);
+  if (newInitialCents < 0) {
+    return { ok: false, errors: { realBalance: `Os lançamentos já somam ${formatCents(movementsCents)}, mais que o saldo informado. Defina uma data de abertura para ignorar movimentos anteriores.` } };
+  }
+  const patch = { initialBalanceCents: newInitialCents, ...(openingDate ? { openingDate } : {}) };
+  await updateAudited(uid, COLLECTION, accountId, patch, io, 'adjust_opening_balance');
+  return { ok: true, previousInitialCents: Number(account.initialBalanceCents) || 0, newInitialCents, movementsCents };
 }
 
 /**

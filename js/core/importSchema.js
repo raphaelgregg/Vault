@@ -31,7 +31,8 @@ export const IMPORT_ENTITIES = Object.freeze({
       col('instituicao', 'institution', 'text', { required: true, example: 'Nubank' }),
       col('nome', 'name', 'text', { example: 'Conta Corrente', help: 'opcional: conta sem nome específico' }),
       col('tipo', 'type', 'enum', { required: true, example: 'checking', help: 'checking|salary|savings|digital|investment|benefit|other' }),
-      col('saldo_inicial', 'initialBalanceCents', 'money', { def: '0', example: '1500,00' }),
+      col('saldo_inicial', 'initialBalanceCents', 'money', { def: '0', example: '1500,00', help: 'saldo de abertura: dinheiro que a conta já tinha' }),
+      col('data_abertura', 'openingDate', 'date', { example: '', help: 'opcional: só movimentações a partir dela entram no saldo' }),
       col('cor', 'color', 'text', { def: LIGHT_GREEN, example: '#1f7a5c' }),
       col('status', 'status', 'enum', { def: 'active', example: 'active', help: 'active|inactive|archived' }),
     ],
@@ -363,7 +364,7 @@ export function filledFields(entity, values) {
 export function buildMergeRaw(entity, existing, raw, changed) {
   const pick = (names, money = []) => Object.fromEntries(names.map((n) => [n, money.includes(n) ? centsToMoneyString(Number(existing[n]) || 0) : existing[n]]).filter(([, v]) => v !== undefined));
   const bases = {
-    contas: () => pick(['institution', 'name', 'type', 'color', 'status'], []),
+    contas: () => pick(['institution', 'name', 'type', 'color', 'status', 'openingDate'], []),
     categorias: () => pick(['name', 'kind', 'color']),
     cartoes: () => pick(['name', 'brand', 'limitCents', 'closingDay', 'dueDay', 'accountId', 'color'], ['limitCents']),
     devedores: () => pick(['name', 'loanDate', 'lentCents', 'notes'], ['lentCents']),

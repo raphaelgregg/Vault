@@ -5,12 +5,12 @@
  */
 import { COLLECTIONS } from '../utils/constants.js';
 import { list } from './firestore.js';
-import { accountBalances } from '../core/model.js';
+import { accountBalances, orphanMovements } from '../core/model.js';
 
 export const READ_LIMIT = 1000;
 
 /**
- * Retorna { balances: Map(accountId → centavos), movements, truncated: string[] }.
+ * Retorna { balances: Map(accountId → centavos), movements, truncated: string[], orphans: { count, byCollection } }.
  * `accounts` já carregadas pelo chamador; `io.list` injetável. `movements` expõe as listas lidas
  * (o dashboard reaproveita receitas/despesas para o resultado do mês, sem reler).
  */
@@ -27,5 +27,5 @@ export async function loadBalances(uid, accounts, io = {}) {
   ]);
   const movements = { incomes, expenses, transfers, debtPayments, goalTransactions, invoices };
   const truncated = Object.entries(movements).filter(([, rows]) => rows.length >= READ_LIMIT).map(([name]) => name);
-  return { balances: accountBalances(accounts, movements), movements, truncated };
+  return { balances: accountBalances(accounts, movements), movements, truncated, orphans: orphanMovements(accounts, movements) };
 }

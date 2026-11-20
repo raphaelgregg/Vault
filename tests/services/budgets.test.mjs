@@ -111,7 +111,9 @@ describe('dashboard service', () => {
   it('lista coleções truncadas ao atingir o teto de leitura', async () => {
     const many = Array.from({ length: READ_LIMIT }, () => ({ accountId: 'a1', status: 'received', amountCents: 1, receivedDate: '2026-01-01' }));
     const { io } = makeIo({ tables: { accounts: [{ id: 'a1', status: 'active' }], incomes: many } });
-    assert.deepEqual((await loadDashboard(uid, io)).truncated, ['incomes']);
+    // o mock ignora `where`, então a leitura de receitas pendentes da previsão também enche o teto
+    const { truncated } = await loadDashboard(uid, io);
+    assert.ok(truncated.includes('incomes'));
   });
   it('consultas usam índices declarados (status + data) e limites', async () => {
     const { io, calls } = makeIo();

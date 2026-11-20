@@ -21,6 +21,7 @@ import {
   upcomingDue,
 } from '../core/aggregates.js';
 import { getBudgetProgress } from './budgets.js';
+import { loadMonthlyForecast } from './forecast.js';
 
 export { READ_LIMIT };
 const SHORT_LIMIT = 8;
@@ -34,7 +35,7 @@ export function todayParts(now = new Date()) {
 /** Fontes de dados do dashboard; `failed` lista as que falharam (isoladas: uma falha não derruba as demais). */
 export const DASHBOARD_SOURCES = Object.freeze([
   'accounts', 'movements', 'pendingExpenses', 'subscriptions', 'invoices', 'debtors', 'budgets',
-  'goals', 'monthPending', 'cardInvoices', 'debtorMonth',
+  'goals', 'monthPending', 'cardInvoices', 'debtorMonth', 'monthlyForecast',
 ]);
 
 /**
@@ -115,6 +116,14 @@ export async function loadDashboard(uid, io = {}) {
     }, null)
     : null;
 
+  // Previsão mensal: reaproveita saldo, cartões/faturas/compras e devedores já lidos; lê só o que falta.
+  const monthlyForecastData = loaded && cardInvoices
+    ? await attempt('monthlyForecast', () => loadMonthlyForecast(uid, {
+      month, today, balanceCents: totalCents, cards: cardInvoices.cards, invoices: cardInvoices.invoices, purchases: cardInvoices.purchases,
+      debtorsReceivableCents: debtorMonth ?? 0, includeDebtors: Boolean(io.includeDebtors),
+    }, { list: fetchList }), null)
+    : null;
+
   return {
     month,
     isCurrentMonth: month === currentMonth,
@@ -123,12 +132,13 @@ export async function loadDashboard(uid, io = {}) {
     linkedGoalsCents: linkedCents,
     freeBalanceCents: totalCents !== null && linkedCents !== null ? totalCents - linkedCents : null,
     result,
+    monthlyForecast: monthlyForecastData,
     forecast: result && monthPending ? monthForecast(result, monthPending.incomes, monthPending.expenses) : null,
     cardInvoices: cardInvoices ? cardInvoicesSummary({ ...cardInvoices, month }) : null,
     upcoming: upcomingDue({ expenses: pendingExpenses, subscriptions, invoices, today }),
     budgets: budgets ? budgets.summary : null,
     debtors: debtors ? { ...summarizeDebtors(debtors), monthDueCents: debtorMonth } : null,
-    truncated: [...(loaded?.truncated ?? []), ...(budgets?.truncated ? ['budgetExpenses'] : []), ...(cardInvoices?.truncated ? ['cardInvoices'] : [])],
+    truncated: [...(loaded?.truncated ?? []), ...(budgets?.truncated ? ['budgetExpenses'] : []), ...(cardInvoices?.truncated ? ['cardInvoices'] : []), ...(monthlyForecastData?.truncated ?? [])],
     failed,
   };
 }
