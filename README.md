@@ -32,8 +32,9 @@ em metas, recebimentos de devedores, estornos) são processadas por uma **funç�
 | Cartões, compras parceladas e faturas | ✅ limite derivado; fechar/pagar fatura (ver limitações) |
 | Orçamentos por categoria/mês | ✅ gasto derivado das despesas do mês |
 | Dashboard e relatórios (período, categorias, CSV) | ✅ somente leitura, leituras limitadas |
-| Security Rules + testes no emulador | ✅ 65 testes |
-| Testes unitários (modelo + services) | ✅ 340 testes |
+| Security Rules + testes no emulador | ✅ 112 testes |
+| Testes unitários (modelo + services) | ✅ 645 testes |
+| Testes de integração (camada confiável, Emulator) | ✅ 122 testes |
 | Lint sem dependências, CI (GitHub Actions), E2E Playwright | ✅ ver seção 3 (CI e E2E não executados no GitHub) |
 
 **Nada é inventado na tela:** com o banco vazio, indicadores mostram zeros/`—` e as listas exibem
@@ -107,12 +108,12 @@ Firebase real.
 
 | Comando | O que faz |
 |---|---|
-| `npm run test:unit` | modelo, agregações e services com `io` injetado (sem rede) — 340 testes |
-| `npm run test:rules` | sobe Auth+Firestore no emulador e roda `tests/rules/` — 65 testes |
+| `npm run test:unit` | modelo, agregações e services com `io` injetado (sem rede) — 645 testes |
+| `npm run test:rules` | sobe Auth+Firestore no emulador e roda `tests/rules/` — 112 testes |
 | `npm run lint` | sintaxe, espaços, `console.log`, imports não usados, JSON (sem dependências) |
-| `npm run test:integration` | integração com o Firestore Emulator, sem mocks de transação: camada confiável (`server-*.test.mjs`: transferências, recebimentos, lote retomável, despesas/receitas/faturas/metas, estornos, contas/devedores arquivados, segurança com ID tokens reais), services → servidor (`service-bridge`), consistência de saldos/dashboard/previsão contra oráculo independente — `tests/integration/` |
+| `npm run test:integration` | integração com o Firestore Emulator, sem mocks de transação: camada confiável (`server-*.test.mjs`: transferências, recebimentos, lote retomável, despesas/receitas/faturas/metas, estornos, contas/devedores arquivados, segurança com ID tokens reais), services → servidor (`service-bridge`), consistência de saldos/dashboard/previsão contra oráculo independente, leitura de estornos (`reversals-visibility`) — `tests/integration/` — 122 testes |
 | `npm run serve:api` | servidor local: estático + `POST /api/finance` (mesmo handler da Vercel) contra os emuladores — `scripts/dev-server.mjs` |
-| `npm run test:e2e` | Playwright em Chromium contra os emuladores: `flows.mjs` (cadastro, orçamentos, metas, cartões, devedores, dashboard, relatórios, configurações) e `movements.mjs` (bancos, receitas, despesas, transferências: CRUD, filtros, paginação, ordenação, saldo derivado) |
+| `npm run test:e2e` | Playwright em Chromium contra os emuladores: `flows.mjs` (cadastro, orçamentos, metas, cartões, devedores, dashboard, relatórios, configurações) e `movements.mjs` (bancos, receitas, despesas, transferências: CRUD, filtros, paginação, ordenação, saldo derivado), além de `debtors`, `maintenance`, `maintenance-inventory` (inventário de controles de Manutenção: 41 comuns / 64 admin), `validation-center`, `auth`, `csv`, `reversals-visibility` (transferências/devedores/metas com leitura de estornos negada ou offline) e `balances-reversals` (Bancos e Dashboard: saldo nunca exibido sem a leitura dos estornos) |
 
 O E2E **não** adiciona dependência ao projeto: usa o `playwright` já instalado no ambiente e, sem
 ele, sai com aviso. O harness serve o SDK do Firebase a partir de `node_modules` (a CDN pode estar
@@ -217,6 +218,13 @@ isolamento nas Rules.
   transação). Não há atomicidade global: consistência por parcela + estado explícito (`completed`/`partial_failed`).
 - **Rules:** o navegador só lê os próprios dados e grava o que não move saldo; escritas protegidas são negadas (testes em
   `tests/rules`). Contas e devedores com histórico são **arquivados** (nunca apagados fisicamente).
+- **Leitura de estornos nunca presumida (VF-COR-01/02):** o servidor pode criar estornos que o navegador ainda não consegue ler
+  (Rules publicadas sem a coleção `reversals`). `permission-denied` ou falha de conexão significam **desconhecido**, nunca
+  "sem estornos" (`js/utils/reversalsAccess.js`: modo estrito por padrão; modo limitado só onde sinalizado na tela).
+  **Bancos** e **Dashboard** não exibem saldo, resultado nem previsão sem a leitura completa: mostram "—", um aviso explícito
+  (leitura negada × erro de conexão) e "Tentar novamente"; um saldo anterior não permanece na tela após falha de recálculo.
+  O "Saldo total" de Bancos é só o derivado das movimentações (nunca a soma dos saldos de abertura).
+  **Publique as Rules (`firestore.rules`) antes/junto da função de servidor**, senão essas telas ficam indisponíveis.
 - **Desenvolvimento local:** `npm run emulators` + `npm run serve:api` (estático + `/api/finance` contra os emuladores,
   sem credencial). `npm run serve` (somente estático) não tem a API.
 
