@@ -61,3 +61,28 @@ describe('validadores e utilitários', () => {
     assert.equal(isTransient(new FinanceError(409, 'INSUFFICIENT_BALANCE', 'x')), false);
   });
 });
+
+describe('withRetries — política de repetição do servidor (auditoria VF-ARQ-02)', () => {
+  it('repete só falha transitória, no máximo SERVER_ATTEMPTS no total, com backoff linear + jitter; não repete erro de negócio nem INVALID_ARGUMENT comum', async () => {
+    const { withRetries, SERVER_ATTEMPTS, retryDelayMs } = await import('../../server/finance/core.mjs');
+    assert.equal(SERVER_ATTEMPTS, 4);
+    const slept = [];
+    const opts = { sleep: async (ms) => { slept.push(ms); }, random: () => 0.5 };
+    let calls = 0;
+    await assert.rejects(() => withRetries(async () => { calls += 1; throw Object.assign(new Error('3 INVALID_ARGUMENT: Transaction is invalid or closed.'), { code: 3 }); }, opts), /Transaction is invalid/);
+    assert.equal(calls, 4);
+    assert.deepEqual(slept, [25 * 1 + 20, 25 * 2 + 20, 25 * 3 + 20]); // 45, 70, 95 ms (jitter fixo em 0,5 → 20 ms)
+    for (const attempt of [1, 2, 3]) {
+      for (const r of [0, 0.999]) { const d = retryDelayMs(attempt, () => r); assert.ok(d >= 25 * attempt && d < 25 * attempt + 40); }
+    }
+    // sucesso na 3ª tentativa
+    let n = 0;
+    assert.equal(await withRetries(async () => { n += 1; if (n < 3) throw Object.assign(new Error('x'), { code: 10 }); return 'ok'; }, { sleep: async () => {} }), 'ok');
+    // não repete: erro de negócio, INVALID_ARGUMENT de outro motivo, erro desconhecido
+    for (const error of [new FinanceError(409, 'INSUFFICIENT_BALANCE', 'x'), Object.assign(new Error('3 INVALID_ARGUMENT: valor inválido'), { code: 3 }), new Error('boom')]) {
+      let c = 0;
+      await assert.rejects(() => withRetries(async () => { c += 1; throw error; }, { sleep: async () => {} }));
+      assert.equal(c, 1, error.message);
+    }
+  });
+});

@@ -247,13 +247,20 @@ const RETRYABLE = new Set([4, 10, 13, 14]); // DEADLINE_EXCEEDED, ABORTED, INTER
  * (INVALID_ARGUMENT quando a transação expira sob contenção). Seguro reexecutar: a operação é idempotente.
  */
 export const isTransient = (error) => RETRYABLE.has(error?.code) || /Transaction is invalid or closed|too much contention/i.test(String(error?.message ?? ''));
-const SERVER_ATTEMPTS = 4;
+export const SERVER_ATTEMPTS = 4;
 
-async function withRetries(fn) {
+/** Backoff linear (25 ms × tentativa) + jitter (0–39 ms). */
+export const retryDelayMs = (attempt, random = Math.random) => 25 * attempt + Math.floor(random() * 40);
+
+/**
+ * Reexecuta `fn` (uma operação IDEMPOTENTE) em falha transitória, no máximo SERVER_ATTEMPTS vezes no total. Erros de negócio
+ * (`FinanceError`) e qualquer erro não transitório são propagados na hora. `sleep`/`random` injetáveis nos testes.
+ */
+export async function withRetries(fn, { sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), random = Math.random } = {}) {
   for (let attempt = 1; ; attempt += 1) {
     try { return await fn(); } catch (error) {
       if (error instanceof FinanceError || !isTransient(error) || attempt >= SERVER_ATTEMPTS) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 25 * attempt + Math.floor(Math.random() * 40)));
+      await sleep(retryDelayMs(attempt, random));
     }
   }
 }

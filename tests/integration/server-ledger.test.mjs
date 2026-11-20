@@ -4,7 +4,7 @@
  */
 import { describe, it, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { adminDb, clearAll, call, callOk, opId, seed, seedAccount, seedCategory, dump, getDoc, oracleBalance, UID, OTHER } from './helpers/server.mjs';
+import { adminDb, clearAll, call, callOk, opId, seed, seedAccount, seedCategory, dump, getDoc, oracleBalance, UID, OTHER, seedPurchase } from './helpers/server.mjs';
 import { executeOnce } from '../../server/finance/core.mjs';
 
 before(() => adminDb());
@@ -14,7 +14,10 @@ const REPEAT = 10;
 const repeat = async (fn) => { for (let i = 0; i < REPEAT; i += 1) { await clearAll(); await fn(i); } };
 const expense = (id, accountId, amountCents, extra = {}) => seed(UID, 'expenses', id, { description: id, categoryId: 'cat', amountCents, accountId, purchaseDate: '2026-12-01', dueDate: '2026-12-10', status: 'pending', recurrence: 'none', ...extra });
 const income = (id, accountId, amountCents, extra = {}) => seed(UID, 'incomes', id, { description: id, categoryId: 'catI', amountCents, accountId, expectedDate: '2026-12-01', status: 'pending', recurrence: 'none', ...extra });
-const invoice = (id, totalCents, extra = {}) => seed(UID, 'invoices', id, { cardId: 'card', referenceMonth: '2026-12', closingDate: '2026-12-01', dueDate: '2026-12-10', status: 'closed', totalCents, ...extra });
+const invoice = async (id, totalCents, extra = {}) => {
+  await seed(UID, 'invoices', id, { cardId: 'card', referenceMonth: '2026-12', closingDate: '2026-12-01', dueDate: '2026-12-10', status: 'closed', totalCents, ...extra });
+  if (totalCents > 0) await seedPurchase(id, totalCents); // o total a pagar vem das compras
+};
 const world = async (balance = 10000) => { await seedAccount('A', balance); await seedAccount('B', 50000); await seedCategory('cat', 'expense'); await seedCategory('catI', 'income'); };
 
 describe('despesas e receitas — liquidação no servidor', () => {
@@ -219,5 +222,17 @@ describe('metas — aportes e resgates no servidor', () => {
     for (const goalId of ['nao-existe', 'gx']) assert.equal((await call(UID, 'goal.deposit', opId(), { ...dep(100), goalId })).status, 404, goalId);
     assert.equal((await dump('goalTransactions')).length, 0);
     assert.equal(await oracleBalance('A'), 10000);
+  });
+});
+
+describe('fatura fechada — total NÃO confiável (auditoria final)', () => {
+  it('totalCents adulterado na fatura fechada é ignorado: o servidor debita a soma das compras', async () => {
+    await seedAccount('A', 100000); await seedAccount('B', 0);
+    await seed(UID, 'invoices', 'inv', { cardId: 'c', referenceMonth: '2026-12', closingDate: '2026-12-01', dueDate: '2026-12-10', status: 'closed', totalCents: 1 }); // adulterado (real: 6000)
+    for (const [id, cents] of [['p1', 2500], ['p2', 3500]]) await seed(UID, 'cardPurchases', id, { cardId: 'c', description: id, amountCents: cents, purchaseDate: '2026-11-20', installmentsTotal: 1, installmentNumber: 1, invoiceId: 'inv' });
+    const r = await callOk(UID, 'invoice.pay', opId(), { invoiceId: 'inv', accountId: 'A' });
+    assert.equal(r.paidCents, 6000);
+    assert.equal((await getDoc('invoices', 'inv')).paidCents, 6000);
+    assert.equal(await oracleBalance('A'), 94000);
   });
 });

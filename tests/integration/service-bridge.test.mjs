@@ -12,6 +12,14 @@ import { createReversal } from '../../js/services/reversals.js';
 import { createTransfer } from '../../js/services/transfers.js';
 import { createAccount, archiveAccount, deleteAccount } from '../../js/services/accounts.js';
 import { auditFinancialIntegrity } from '../../js/services/integrity.js';
+import { createCategory } from '../../js/services/categories.js';
+import { createIncome } from '../../js/services/incomes.js';
+import { createExpense } from '../../js/services/expenses.js';
+import { createGoal, depositToGoal, listGoalTransactions } from '../../js/services/goals.js';
+import { loadDashboard } from '../../js/services/dashboard.js';
+import { loadDebtorStatements } from '../../js/services/debtors.js';
+import { goalSavedCents } from '../../js/core/model.js';
+import { MONTH, NOW } from './helpers/world.mjs';
 
 let env;
 before(async () => { env = await startEnv(); });
@@ -105,5 +113,47 @@ describe('transferências e contas pelos services', () => {
     assert.equal((await dump(env, 'accounts')).filter((x) => x.status === 'archived').length, 1);
     const fresh = await createAccount(ALICE, { institution: 'Novo', type: 'checking', initialBalanceCents: '0,00', color: '#000', status: 'active' }, io);
     assert.equal(fresh.ok, true);
+  });
+});
+
+describe('estornos × agregações (saldo, dashboard, previsão, extrato do devedor, metas, integridade)', () => {
+  it('nenhuma agregação conta movimento estornado; todas batem com o oráculo recalculado do cru', async () => {
+    const io = makeRealIo(env);
+    const accountId = await seedAccount(io, '1.000,00');
+    const debtorId = await seedDebtor(io);
+    await seedPlan(io, debtorId, '100,00', 1);
+    const cat = async (kind) => (await createCategory(ALICE, { name: `C-${kind}`, kind, color: '#123456' }, io)).id;
+    const [catE, catI] = [await cat('expense'), await cat('income')];
+    const inc = await createIncome(ALICE, { description: 'Salário', categoryId: catI, amountCents: '300,00', expectedDate: '2026-12-02', receivedDate: '2026-12-02', accountId, status: 'received', recurrence: 'none' }, io);
+    const exp = await createExpense(ALICE, { description: 'Luz', categoryId: catE, amountCents: '120,00', purchaseDate: '2026-12-01', dueDate: '2026-12-03', paidDate: '2026-12-03', accountId, status: 'paid', recurrence: 'none' }, io);
+    const goal = await createGoal(ALICE, { name: 'Viagem', targetCents: '1.000,00' }, io);
+    const dep = await depositToGoal(ALICE, goal.id, { amountCents: '200,00', date: '2026-12-04', accountId }, io);
+    const rec = await settleInstallment(ALICE, debtorId, { debtId: (await dump(env, 'debts'))[0].id }, pay(accountId, { date: '2026-12-05' }), io);
+    for (const r of [inc, exp, goal, dep, rec]) assert.equal(r.ok, true, JSON.stringify(r));
+    // antes dos estornos: 1000 + 300 − 120 − 200 + 100 = 1080
+    assert.equal(await derivedBalance(io, accountId), 108000);
+    for (const [kind, id] of [['income', inc.id], ['expense', exp.id], ['goalTransaction', dep.id], ['debtPayment', rec.id]]) {
+      const r = await createReversal(ALICE, kind, id, { reason: 'Auditoria: estorno de teste' }, io);
+      assert.equal(r.ok, true, `${kind}: ${JSON.stringify(r)}`);
+    }
+    // ORÁCULO do cru: só o saldo de abertura (todos os movimentos foram compensados)
+    assert.equal(await derivedBalance(io, accountId), 100000);
+    const dash = await loadDashboard(ALICE, { list: io.list, month: MONTH, now: NOW, includeDebtors: true });
+    assert.equal(dash.totalBalanceCents, 100000);
+    assert.equal(dash.result.incomeCents, 0); // receita estornada voltou a prevista
+    assert.equal(dash.result.expenseCents, 0); // despesa estornada voltou a pendente
+    // previsão: a receita e a despesa estornadas voltam a ser pendentes do mês; a parcela do devedor volta a ser "a receber"
+    assert.equal(dash.monthlyForecast.projectedBalanceCents, 100000 + 30000 - 12000 + 10000);
+    // extrato do devedor: parcela reaberta (recebido líquido 0)
+    const debtor = (await dump(env, 'debtors'))[0];
+    const statements = await loadDebtorStatements(ALICE, [debtor], '2026-12', { list: io.list });
+    assert.equal(statements.get(debtor.id).totalCents, 10000);
+    assert.deepEqual([debtor.receivedCents, debtor.status], [0, 'open']);
+    // meta: guardado líquido 0 e a movimentação original continua no histórico
+    const rows = await listGoalTransactions(ALICE, goal.id, { list: io.list });
+    assert.equal(rows.length, 1);
+    assert.equal(goalSavedCents(rows), 0);
+    assert.equal((await dump(env, 'debtPayments')).length, 1);
+    assert.deepEqual((await auditFinancialIntegrity(ALICE, io)).findings, []);
   });
 });

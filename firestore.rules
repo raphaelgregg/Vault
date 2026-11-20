@@ -210,7 +210,9 @@ service cloud.firestore {
         // VF-ARQ-02: movimentos que alteram saldo só são gravados pela camada confiável (Admin SDK ignora estas Rules).
         && data().status != 'received'
         && (resource == null || resource.data.status != 'received');
-      allow delete: if isAdmin() || (isOwner(userId) && resource.data.status != 'received');
+      // Original já ESTORNADO (reversals/incomes_<id>) é histórico: não é apagado pelo dono.
+      allow delete: if isAdmin() || (isOwner(userId) && resource.data.status != 'received'
+        && !exists(docPath(userId, 'reversals', 'incomes_' + incomeId)));
     }
 
     // ---------- despesas ----------
@@ -238,7 +240,9 @@ service cloud.firestore {
         // VF-ARQ-02: movimentos que alteram saldo só são gravados pela camada confiável (Admin SDK ignora estas Rules).
         && data().status != 'paid'
         && (resource == null || resource.data.status != 'paid');
-      allow delete: if isAdmin() || (isOwner(userId) && resource.data.status != 'paid');
+      // Original já ESTORNADO (reversals/expenses_<id>) é histórico: não é apagado pelo dono.
+      allow delete: if isAdmin() || (isOwner(userId) && resource.data.status != 'paid'
+        && !exists(docPath(userId, 'reversals', 'expenses_' + expenseId)));
     }
 
     // ---------- transferências ----------
@@ -262,7 +266,9 @@ service cloud.firestore {
         // VF-ARQ-02: movimentos que alteram saldo só são gravados pela camada confiável (Admin SDK ignora estas Rules).
         && data().status != 'confirmed'
         && (resource == null || resource.data.status != 'confirmed');
-      allow delete: if isAdmin() || (isOwner(userId) && resource.data.status != 'confirmed');
+      // Original já ESTORNADO (reversals/transfers_<id>) é histórico: não é apagado pelo dono.
+      allow delete: if isAdmin() || (isOwner(userId) && resource.data.status != 'confirmed'
+        && !exists(docPath(userId, 'reversals', 'transfers_' + transferId)));
     }
 
     // ---------- assinaturas ----------
@@ -429,9 +435,12 @@ service cloud.firestore {
         && (resource == null || immutable('createdAt'));
       // Compra lançada é imutável (valor/devedor/fatura não mudam depois). Compra de DEVEDOR só é excluída por
       // administrador ou depois que o devedor foi removido (preserva o que ele deve e os recebimentos dela).
+      // Compra de fatura FECHADA/PAGA também não é apagada (o total a pagar é recalculado delas pelo servidor).
       allow delete: if isAdmin()
         || (isOwner(userId)
-            && (!('debtorId' in resource.data) || !exists(docPath(userId, 'debtors', resource.data.debtorId))));
+            && (!('debtorId' in resource.data) || !exists(docPath(userId, 'debtors', resource.data.debtorId)))
+            && (!('invoiceId' in resource.data) || !exists(docPath(userId, 'invoices', resource.data.invoiceId))
+                || get(docPath(userId, 'invoices', resource.data.invoiceId)).data.status in ['open', 'cancelled']));
     }
 
     // ---------- faturas ----------
@@ -460,7 +469,8 @@ service cloud.firestore {
         && !('paidCents' in data()) && !('accountId' in data()) && !('paidAt' in data());
       allow delete: if isAdmin()
         || (isOwner(userId)
-            && (resource.data.status != 'paid' || !exists(docPath(userId, 'creditCards', resource.data.cardId))));
+            && (resource.data.status != 'paid' || !exists(docPath(userId, 'creditCards', resource.data.cardId)))
+            && !exists(docPath(userId, 'reversals', 'invoices_' + invoiceId)));
     }
 
     // ---------- orçamentos ----------

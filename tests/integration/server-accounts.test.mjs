@@ -4,7 +4,7 @@
  */
 import { describe, it, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { adminDb, clearAll, call, callOk, opId, seed, seedAccount, seedCategory, dump, getDoc, oracleBalance, UID } from './helpers/server.mjs';
+import { adminDb, clearAll, call, callOk, opId, seed, seedAccount, seedCategory, dump, getDoc, oracleBalance, UID, seedPurchase } from './helpers/server.mjs';
 
 before(() => adminDb());
 beforeEach(clearAll);
@@ -19,6 +19,7 @@ describe('contas — arquivamento lógico', () => {
     await seed(UID, 'expenses', 'e1', { description: 'Luz', categoryId: 'cat', amountCents: 1000, accountId: 'A', purchaseDate: '2026-12-01', dueDate: '2026-12-10', status: 'pending', recurrence: 'none' });
     await seed(UID, 'goals', 'g1', { name: 'V', targetCents: 100000, status: 'active' });
     await seed(UID, 'invoices', 'inv', { cardId: 'c', referenceMonth: '2026-12', closingDate: '2026-12-01', dueDate: '2026-12-10', status: 'closed', totalCents: 100 });
+    await seedPurchase('inv', 100);
     await callOk(UID, 'account.archive', opId(), { accountId: 'A' });
     assert.equal((await getDoc('accounts', 'A')).status, 'archived');
     const blocked = [

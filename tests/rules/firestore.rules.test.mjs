@@ -1430,3 +1430,66 @@ describe('Auditoria VF-2-03ao: proteção do histórico financeiro (recebimentos
     });
   });
 });
+
+describe('Auditoria final VF-ARQ-02: terceiros e originais estornados', () => {
+  const COLLECTIONS = ['accounts', 'categories', 'incomes', 'expenses', 'transfers', 'subscriptions', 'debtors', 'debts', 'debtPayments', 'goals',
+    'goalTransactions', 'creditCards', 'cardPurchases', 'invoices', 'budgets', 'reversals', 'operations', 'batches', 'auditLog', 'profile', 'settings'];
+
+  it('VARREDURA: outro usuário (e anônimo) NÃO lê, cria, edita nem apaga documento de NENHUMA coleção do dono', async () => {
+    for (const coll of COLLECTIONS) await seedDoc(`users/${ALICE}/${coll}/alvo`, { description: 'x', amountCents: 100, status: 'pending' });
+    const owner = asUser(ALICE); // o dono lê as próprias coleções: serve de testemunha do estado
+    const sizeBefore = {};
+    for (const coll of COLLECTIONS) sizeBefore[coll] = (await getDocs(collection(owner, 'users', ALICE, coll))).size;
+    for (const [label, db] of [['bob', asUser(BOB)], ['anônimo', asAnonymous()]]) {
+      for (const coll of COLLECTIONS) {
+        const ref = doc(db, 'users', ALICE, coll, 'alvo');
+        await assertFails(getDoc(ref));
+        await assertFails(setDoc(doc(db, 'users', ALICE, coll, 'novo'), { description: 'x', amountCents: 100, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+        await assertFails(updateDoc(ref, { amountCents: 1, updatedAt: serverTimestamp() }));
+        await assertFails(deleteDoc(ref));
+        await assertFails(getDocs(collection(db, 'users', ALICE, coll)));
+      }
+      assert.ok(label);
+    }
+    // nada foi alterado/criado/removido
+    for (const coll of COLLECTIONS) {
+      const snap = await getDocs(collection(owner, 'users', ALICE, coll));
+      assert.equal(snap.size, sizeBefore[coll], coll); // nenhum documento criado/removido
+      assert.equal(snap.docs.find((d) => d.id === 'alvo').data().amountCents, 100, coll); // nenhum alterado
+    }
+  });
+
+  it('original ESTORNADO não é apagado pelo dono (despesa, receita, transferência, fatura); sem estorno, o pendente continua apagável', async () => {
+    const base = { description: 'x', categoryId: 'c', amountCents: 100, accountId: 'a' };
+    await seedDoc(`users/${ALICE}/expenses/e1`, { ...base, status: 'pending', purchaseDate: new Date(), dueDate: new Date(), recurrence: 'none' });
+    await seedDoc(`users/${ALICE}/expenses/e2`, { ...base, status: 'pending', purchaseDate: new Date(), dueDate: new Date(), recurrence: 'none' });
+    await seedDoc(`users/${ALICE}/incomes/i1`, { ...base, status: 'pending', expectedDate: new Date(), recurrence: 'none' });
+    await seedDoc(`users/${ALICE}/transfers/t1`, { fromAccountId: 'a', toAccountId: 'b', amountCents: 100, date: new Date(), reason: 'x', status: 'cancelled' });
+    await seedDoc(`users/${ALICE}/creditCards/card`, { name: 'N' });
+    await seedDoc(`users/${ALICE}/invoices/inv1`, { cardId: 'card', referenceMonth: '2026-12', status: 'closed', totalCents: 100 });
+    for (const [coll, id] of [['expenses', 'e1'], ['incomes', 'i1'], ['transfers', 't1'], ['invoices', 'inv1']]) {
+      await seedDoc(`users/${ALICE}/reversals/${coll}_${id}`, { kind: 'x', targetCollection: coll, targetId: id, amountCents: 100 });
+    }
+    const db = asUser(ALICE);
+    for (const [coll, id] of [['expenses', 'e1'], ['incomes', 'i1'], ['transfers', 't1'], ['invoices', 'inv1']]) {
+      await assertFails(deleteDoc(doc(db, 'users', ALICE, coll, id)));
+      assert.equal((await getDoc(doc(db, 'users', ALICE, coll, id))).exists(), true, `${coll}/${id} preservado`);
+    }
+    await assertSucceeds(deleteDoc(doc(db, 'users', ALICE, 'expenses', 'e2'))); // pendente SEM estorno segue apagável
+  });
+});
+
+describe('Auditoria final: compras de fatura fechada/paga e total editado', () => {
+  it('o dono não apaga compra de fatura FECHADA nem PAGA; compra de fatura ABERTA continua apagável; não edita o total de fatura paga', async () => {
+    await seedDoc(`users/${ALICE}/creditCards/card`, { name: 'N' });
+    for (const [id, status] of [['invOpen', 'open'], ['invClosed', 'closed'], ['invPaid', 'paid']]) {
+      await seedDoc(`users/${ALICE}/invoices/${id}`, { cardId: 'card', referenceMonth: '2026-12', status, totalCents: 500, ...(status === 'paid' ? { paidCents: 500, accountId: 'acc-main', paidAt: new Date() } : {}) });
+      await seedDoc(`users/${ALICE}/cardPurchases/p_${id}`, { cardId: 'card', description: 'x', amountCents: 500, purchaseDate: new Date(), installmentsTotal: 1, installmentNumber: 1, invoiceId: id });
+    }
+    const db = asUser(ALICE);
+    await assertFails(deleteDoc(doc(db, 'users', ALICE, 'cardPurchases', 'p_invClosed')));
+    await assertFails(deleteDoc(doc(db, 'users', ALICE, 'cardPurchases', 'p_invPaid')));
+    await assertSucceeds(deleteDoc(doc(db, 'users', ALICE, 'cardPurchases', 'p_invOpen')));
+    await assertFails(updateDoc(doc(db, 'users', ALICE, 'invoices', 'invPaid'), { totalCents: 1, paidCents: 1, updatedAt: serverTimestamp() }));
+  });
+});

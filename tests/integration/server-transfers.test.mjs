@@ -4,7 +4,7 @@
  */
 import { describe, it, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { adminDb, clearAll, call, callOk, opId, seed, seedAccount, seedCategory, dump, getDoc, oracleBalance, UID, OTHER, noon } from './helpers/server.mjs';
+import { adminDb, clearAll, call, callOk, opId, seed, seedAccount, seedCategory, dump, getDoc, oracleBalance, UID, OTHER, noon, seedPurchase } from './helpers/server.mjs';
 import { executeOnce, FieldValue } from '../../server/finance/core.mjs';
 
 before(() => adminDb());
@@ -64,6 +64,7 @@ describe('transferências — concorrência real (10 repetições cada)', () => 
       await seedAccount('A', 10000); await seedAccount('B', 0);
       await seed(UID, 'creditCards', 'k', { name: 'Cartão' });
       await seed(UID, 'invoices', 'inv', { cardId: 'k', referenceMonth: '2026-12', dueDate: '2026-12-20', status: 'closed', totalCents: 8000 });
+      await seedPurchase('inv', 8000);
       const rs = await Promise.all([call(UID, 'transfer.create', opId(), T('A', 'B', 8000)), call(UID, 'invoice.pay', opId(), { invoiceId: 'inv', accountId: 'A', date: '2026-12-05' })]);
       assert.deepEqual(rs.map((r) => r.status).sort(), [200, 409], JSON.stringify(rs));
       assert.equal(await oracleBalance('A'), 2000);

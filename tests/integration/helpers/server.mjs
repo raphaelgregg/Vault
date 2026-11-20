@@ -80,3 +80,8 @@ export async function oracleBalance(accountId, uid = UID) {
   for (const g of goalTx) if (g.accountId === accountId && !reversed.has(`goalTransactions/${g.id}`)) bal += g.type === 'deposit' ? -g.amountCents : g.amountCents;
   return bal;
 }
+
+/** Compra de cartão de `cents` na fatura `invoiceId` (o servidor recalcula o total a pagar das compras, não do `totalCents`). */
+export const seedPurchase = (invoiceId, cents, uid = UID, id = `buy-${invoiceId}`) => seed(uid, 'cardPurchases', id, {
+  cardId: 'card', description: id, amountCents: cents, purchaseDate: '2026-11-20', installmentsTotal: 1, installmentNumber: 1, invoiceId,
+});

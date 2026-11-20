@@ -5,7 +5,7 @@
  */
 import { describe, it, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { adminDb, clearAll, call, callOk, opId, seed, seedAccount, seedCategory, dump, getDoc, oracleBalance, UID, OTHER } from './helpers/server.mjs';
+import { adminDb, clearAll, call, callOk, opId, seed, seedAccount, seedCategory, dump, getDoc, oracleBalance, UID, OTHER, seedPurchase } from './helpers/server.mjs';
 
 before(() => adminDb());
 beforeEach(clearAll);
@@ -90,6 +90,7 @@ describe('estorno de despesa, receita, transferência, fatura', () => {
   it('fatura paga: o estorno reabre a fatura (fechada) e devolve o saldo à conta que pagou', async () => {
     await world();
     await seed(UID, 'invoices', 'inv', { cardId: 'card', referenceMonth: '2026-12', closingDate: '2026-12-01', dueDate: '2026-12-10', status: 'closed', totalCents: 4000 });
+    await seedPurchase('inv', 4000);
     await callOk(UID, 'invoice.pay', opId(), { invoiceId: 'inv', accountId: 'A' });
     assert.equal(await oracleBalance('A'), 6000);
     await callOk(UID, 'reversal.create', opId(), rev('invoice', 'inv'));

@@ -165,11 +165,10 @@ defineOp('invoice.pay', {
     if (!invoice) throw new FinanceError(404, 'NOT_FOUND', 'Fatura não encontrada.');
     if (!['open', 'closed'].includes(invoice.status)) throw invalidState(invoice.status === 'paid' ? 'Esta fatura já foi paga.' : 'Só é possível pagar faturas abertas ou fechadas.', { status: invoice.status });
     const account = await ctx.account(p.accountId);
-    let total = Number(invoice.totalCents) || 0;
-    if (invoice.status === 'open') {
-      const purchases = await ctx.query('cardPurchases', ['invoiceId', '==', invoice.id]);
-      total = purchases.reduce((t, x) => t + (Number(x.amountCents) || 0), 0);
-    }
+    // O total é SEMPRE recalculado das compras lidas na transação (aberta ou fechada): o `totalCents` gravado na fatura
+    // fechada é editável pelo cliente e nunca é confiável para decidir quanto debitar.
+    const purchases = await ctx.query('cardPurchases', ['invoiceId', '==', invoice.id]);
+    const total = purchases.reduce((t, x) => t + (Number(x.amountCents) || 0), 0);
     if (total <= 0) throw invalidState('Fatura zerada: não há o que pagar. Cancele a fatura.');
     const balance = await ctx.balanceOf(account);
     if (balance < total) throw insufficient(balance, total, account);
@@ -267,7 +266,8 @@ export async function prepareReceive(ctx, p, operationId) {
         [kind === 'debt' ? 'debtId' : 'purchaseId']: parcelId, debtorId: debtor.id, amountCents: amount, date: toTs(p.date), accountId: account.id,
         ...(p.notes ? { notes: p.notes } : {}), operationId, ...stamps(true),
       });
-      if (settled && kind === 'debt') c.tx.update(c.ref('debts', parcelId), { status: 'paid', ...stamps() });
+      // A parcela de dívida é SEMPRE escrita (mesmo no recebimento parcial): serializa com `debt.cancel`/estorno, que a leem.
+      if (kind === 'debt') c.tx.update(c.ref('debts', parcelId), { ...(settled ? { status: 'paid' } : {}), ...stamps() });
       c.tx.update(c.ref('debtors', debtor.id), { receivedCents: debtorApplied.receivedCents, status: debtorApplied.status, ...stamps() });
       c.touchAccount(account.id);
     },
@@ -354,6 +354,8 @@ defineOp('debt.settleBatch', {
         await batchRef.create({ op, requestHash: hash, debtorId: params.debtorId, params, status: 'running', total: items.length, items: items.map((i) => ({ ...i, status: 'pending' })), createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
       } catch (error) { if (error?.code !== 6) throw error; } // ALREADY_EXISTS: outra chamada concorrente criou o mesmo lote
       snap = await batchRef.get();
+      // O lote vencedor pode ter OUTROS parâmetros (mesma chave, payload diferente): reverifica antes de processar qualquer item.
+      if (snap.data().requestHash !== hash) throw new FinanceError(409, 'OPERATION_ID_REUSED', 'Este operationId já foi usado em outra operação ou com outros parâmetros.');
     }
     // processa até BATCH_ITEMS_PER_CALL parcelas pendentes/falhas, cada uma em SUA transação idempotente
     let processed = 0;
@@ -361,7 +363,7 @@ defineOp('debt.settleBatch', {
       if (processed >= BATCH_ITEMS_PER_CALL) break;
       if (!['pending', 'failed'].includes(item.status)) continue;
       processed += 1;
-      await processBatchItem({ db, uid, operationId, params, item, deps, batchRef });
+      await processBatchItem({ db, uid, operationId, params: snap.data().params, item, deps, batchRef }); // sempre os parâmetros GRAVADOS do lote
     }
     const final = (await batchRef.get()).data();
     const count = (s) => final.items.filter((i) => i.status === s).length;
