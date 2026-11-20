@@ -10,9 +10,10 @@ import {
   formatDate, formatMonth, formatCentsInput, selectOptions, todayIso,
 } from '../components/form-kit.js';
 import {
-  listDebts, listDebtPayments, createDebtPlan, cancelDebt, registerDebtPayment, settleDebts, formatCents,
+  listDebts, listDebtPayments, createDebtPlan, cancelDebt, settleDebts, settleInstallment, settleMonthInstallments,
+  previewMonthSettlement, formatCents,
 } from '../services/debtPayments.js';
-import { debtorPendingCents, debtorObligations, accountLabel } from '../core/model.js';
+import { debtorPendingCents, debtorObligations, receivedByInstallment, accountLabel } from '../core/model.js';
 import { getDebtor, getDebtorStatement } from '../services/debtors.js';
 import { listCards } from '../services/creditCards.js';
 import { listAccounts } from '../services/accounts.js';
@@ -37,8 +38,8 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   ]);
   const cardName = new Map(cards.map((c) => [c.id, c.name]));
   debts.sort((a, b) => a.installmentNumber - b.installmentNumber);
-  const receivedBy = new Map();
-  for (const p of payments) receivedBy.set(p.debtId, (receivedBy.get(p.debtId) ?? 0) + p.amountCents);
+  // Recebimentos por parcela (dívida ou compra no cartão); cada um é contado uma única vez.
+  const { byDebt: receivedBy, byPurchase: receivedByPurchase } = receivedByInstallment(payments);
   const isOpen = debtor.status === 'open';
   const activeAccounts = accounts.filter((a) => a.status === 'active').map((a) => ({ value: a.id, label: accountLabel(a) }));
 
@@ -97,26 +98,60 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
     onDone: async (r) => { toast(r.installments > 1 ? `Dívida criada em ${r.installments} parcelas.` : 'Dívida à vista criada.'); await refresh(); },
   });
 
-  const openReceive = (debt) => {
-    const remaining = debt.principalCents - (receivedBy.get(debt.id) ?? 0);
-    const suggested = Math.min(remaining, debtorPendingCents(debtor));
+  // QUITAR UMA PARCELA (dívida ou compra no cartão): só ela; valor padrão = restante (editável: menor = recebimento parcial).
+  const openSettleInstallment = (item) => {
+    const early = item.dueDate && item.dueDate > todayIso();
     formModal({
-      title: `${debt.dueDate > todayIso() ? 'Antecipar' : 'Receber'} — parcela ${debt.installmentNumber}`,
+      title: `Quitar parcela ${item.installmentNumber}${item.installmentsTotal ? `/${item.installmentsTotal}` : ''} — ${item.description}`,
       formId: 'debt-pay-form',
-      submitLabel: debt.dueDate > todayIso() ? 'Registrar antecipação' : 'Registrar recebimento',
+      submitLabel: 'Quitar parcela',
       focusId: 'amountCents',
       fields: [
-        el('p', { class: 'card__hint', text: `Restante da parcela: ${formatCents(remaining)} · pendente do devedor: ${formatCents(debtorPendingCents(debtor))}.` }),
-        field('Valor (R$) *', 'amountCents', el('input', { type: 'text', id: 'amountCents', name: 'amountCents', value: formatCentsInput(suggested), autocomplete: 'off' })),
-        field('Data *', 'date', el('input', { type: 'date', id: 'date', name: 'date', value: todayIso() })),
+        el('p', { class: 'card__hint', text: `Vencimento ${item.dueDate ? formatDate(item.dueDate) : formatMonth(item.referenceMonth)} · restante da parcela ${formatCents(item.remainingCents)} · pendente do devedor ${formatCents(debtorPendingCents(debtor))}. Só esta parcela é afetada${early ? ' (antecipação)' : ''}.` }),
+        field('Valor recebido (R$) *', 'amountCents', el('input', { type: 'text', id: 'amountCents', name: 'amountCents', value: formatCentsInput(item.remainingCents), autocomplete: 'off' })),
+        field('Data do pagamento *', 'date', el('input', { type: 'date', id: 'date', name: 'date', value: todayIso() })),
         field('Conta que recebe *', 'accountId', el('select', { id: 'accountId', name: 'accountId' }, selectOptions(activeAccounts, '', { placeholder: 'Selecione uma conta' }))),
         field('Observações', 'notes', el('textarea', { id: 'notes', name: 'notes', maxlength: 500, rows: 2 })),
       ],
-      submit: (d) => registerDebtPayment(user.uid, debt.id, {
+      submit: (d) => settleInstallment(user.uid, debtor.id, item.source === 'debt' ? { debtId: item.id } : { purchaseId: item.id }, {
         amountCents: d.get('amountCents'), date: d.get('date'), accountId: d.get('accountId'), notes: d.get('notes').trim() || undefined,
       }),
       onDone: async (r) => {
-        toast(r.debtorPaid ? 'Recebimento registrado — devedor quitado!' : r.anticipated ? 'Parcela antecipada registrada.' : 'Recebimento registrado.');
+        toast(r.debtorPaid ? 'Parcela quitada — devedor quitado!' : r.settled ? (r.anticipated ? 'Parcela antecipada e quitada.' : 'Parcela quitada.') : `Recebimento parcial registrado (restam ${formatCents(r.remainingCents)}).`);
+        await refresh();
+      },
+    });
+  };
+
+  // QUITAR TODAS AS PARCELAS PENDENTES DE UM MÊS: confirmação com mês, quantidade e valor total.
+  const ledger = { debts, payments, purchases: statement.purchases, invoicesById: statement.invoicesById };
+  const openSettleMonth = (m) => {
+    const preview = previewMonthSettlement({ debtor, ledger, month: m });
+    formModal({
+      title: `Quitar parcelas de ${formatMonth(m)} — ${debtor.name}`,
+      formId: 'debt-month-form',
+      submitLabel: 'Confirmar quitação',
+      focusId: 'accountId',
+      fields: [
+        el('p', { role: 'status', id: 'month-settle-summary', text: `Mês de referência: ${formatMonth(m)} · ${preview.count} parcela(s) pendente(s) · total a quitar ${formatCents(preview.totalCents)}.` }),
+        el('p', { class: 'card__hint', text: 'Parcelas já pagas e de outros meses não são alteradas. Cada parcela recebe o seu próprio recebimento.' }),
+        dataTable({
+          columns: [
+            { key: 'description', label: 'Dívida', render: (v, i) => (i.cardName ? `${v} · ${i.cardName}` : v) },
+            { key: 'installmentNumber', label: 'Parcela', render: (v, i) => (i.installmentsTotal ? `${v}/${i.installmentsTotal}` : String(v)) },
+            { key: 'remainingCents', label: 'Valor', numeric: true, render: (v) => formatCents(v) },
+          ],
+          rows: preview.items,
+        }),
+        field('Data do pagamento *', 'date', el('input', { type: 'date', id: 'date', name: 'date', value: todayIso() })),
+        field('Conta que recebe *', 'accountId', el('select', { id: 'accountId', name: 'accountId' }, selectOptions(activeAccounts, '', { placeholder: 'Selecione uma conta' }))),
+        field('Observações', 'notes', el('textarea', { id: 'notes', name: 'notes', maxlength: 500, rows: 2 })),
+      ],
+      submit: (d) => settleMonthInstallments(user.uid, debtor.id, m, {
+        date: d.get('date'), accountId: d.get('accountId'), notes: d.get('notes').trim() || undefined,
+      }),
+      onDone: async (r) => {
+        toast(r.debtorPaid ? `Mês quitado (${r.count} parcela(s), ${formatCents(r.totalCents)}) — devedor quitado!` : `Mês quitado: ${r.count} parcela(s), ${formatCents(r.totalCents)}.`);
         await refresh();
       },
     });
@@ -124,7 +159,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
 
   // Lista única de dívidas/parcelas (VF-2-03m): à vista, parceladas, legadas e de cartão.
   const obligations = debtorObligations({
-    debtor, debts, receivedByDebt: receivedBy, purchases: statement.purchases,
+    debtor, debts, receivedByDebt: receivedBy, receivedByPurchase, purchases: statement.purchases,
     invoicesById: statement.invoicesById, cardsById: cardName,
   });
   const reopenMonth = (m) => { closeModal(); openDebtorInstallments({ user, debtor, onChange, month: m }); };
@@ -137,10 +172,19 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   ]);
   const visible = obligations.items.filter((i) => listAll || i.referenceMonth === month);
   const KIND_LABELS = { cash: 'À vista', installment: 'Parcelada', legacy: 'Parcela', card: 'Cartão' };
-  const statusLabel = (i) => {
-    if (i.source === 'card') return i.status === 'paid' ? 'Fatura paga' : i.status === 'cancelled' ? 'Cancelada' : 'Pendente';
+  // Situação visual: paga (devedor pagou a parcela) × pendente × atrasada × cancelada. Em parcela de cartão a
+  // situação da FATURA aparece à parte (fatura paga ≠ devedor pagou).
+  const INVOICE_LABELS = { open: 'fatura aberta', closed: 'fatura fechada', paid: 'fatura paga' };
+  const statusOf = (i) => {
+    if (i.source === 'card') return i.status;
     const raw = debts.find((d) => d.id === i.id);
-    return STATUS_LABELS[raw ? displayDebtStatus(raw) : i.status] ?? i.status;
+    return raw ? displayDebtStatus(raw) : i.status;
+  };
+  const statusBadge = (i) => {
+    const status = statusOf(i);
+    const mark = status === 'paid' ? '✓ ' : '';
+    const extra = i.source === 'card' && status === 'pending' && INVOICE_LABELS[i.invoiceStatus] ? ` · ${INVOICE_LABELS[i.invoiceStatus]}` : '';
+    return el('span', { class: `badge badge--${status === 'paid' ? 'success' : status === 'late' ? 'danger' : 'neutral'}`, 'data-status': status, text: `${mark}${STATUS_LABELS[status] ?? status}${extra}` });
   };
 
   const table = visible.length
@@ -152,19 +196,19 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
         { key: 'referenceMonth', label: 'Mês', render: (v) => formatMonth(v) },
         { key: 'dueDate', label: 'Vencimento', render: (v, i) => (v ? formatDate(v) : (i.source === 'card' ? '—' : '—')) },
         { key: 'amountCents', label: 'Valor', numeric: true, render: (v) => formatCents(v) },
-        { key: 'receivedCents', label: 'Recebido', numeric: true, render: (v, i) => (i.source === 'card' ? '—' : formatCents(v)) },
-        { key: 'status', label: 'Situação', render: (_, i) => statusLabel(i) },
+        { key: 'receivedCents', label: 'Recebido', numeric: true, render: (v) => formatCents(v) },
+        { key: 'status', label: 'Situação', render: (_, i) => statusBadge(i) },
       ],
       rows: visible,
       actions: (item) => {
-        if (item.source !== 'debt') return [];
+        if (!isOpen || item.status !== 'pending' || item.remainingCents <= 0) return [];
+        const label = `parcela ${item.installmentNumber} de ${item.description}`;
+        const acts = [iconButton(`Quitar ${label}`, 'check', () => openSettleInstallment(item), 'btn--success')];
+        if (item.source !== 'debt') return acts;
         const debt = debts.find((d) => d.id === item.id);
-        if (!isOpen || !debt || !['pending', 'late'].includes(debt.status)) return [];
-        const early = debt.dueDate > todayIso();
-        const acts = [
-          iconButton(`${early ? 'Antecipar' : 'Receber'} parcela ${debt.installmentNumber} de ${debt.description}`, early ? 'fast-forward' : 'hand-coins', () => openReceive(debt), 'btn--success'),
-          iconButton(`Quitar dívida ${debt.description}`, 'check-check', () => openSettle(debt.debtGroupId ?? debt.id, debt.description), 'btn--success'),
-        ];
+        if (!debt || !['pending', 'late'].includes(debt.status)) return acts;
+        // Quitar a DÍVIDA inteira (todas as parcelas pendentes dela) é outra operação: só aparece em dívida parcelada.
+        if ((debt.installmentsTotal ?? 1) > 1) acts.push(iconButton(`Quitar dívida ${debt.description}`, 'check-check', () => openSettle(debt.debtGroupId ?? debt.id, debt.description), 'btn--secondary'));
         if (!(receivedBy.get(debt.id) > 0)) {
           acts.push(iconButton(`Cancelar parcela ${debt.installmentNumber} de ${debt.description}`, 'x-circle', () => confirmModal({
             title: 'Cancelar parcela', message: `Cancelar a parcela ${debt.installmentNumber} de ${debtor.name}?`, confirmLabel: 'Cancelar parcela',
@@ -179,6 +223,19 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
     })
     : emptyBlock('list-checks', 'Sem dívidas neste filtro', 'Crie uma dívida (à vista ou parcelada) ou lance uma compra de cartão vinculada a este devedor.');
 
+  // Resumo e ação do MÊS selecionado (quitar o mês ≠ quitar uma parcela ≠ quitar toda a dívida).
+  const monthPending = listAll ? null : previewMonthSettlement({ debtor, ledger, month });
+  const monthPaid = listAll ? 0 : obligations.items.filter((i) => i.referenceMonth === month && i.status === 'paid').length;
+  const monthPanel = listAll
+    ? el('p', { class: 'card__hint', text: 'Escolha um mês de referência para quitar todas as parcelas pendentes dele de uma vez.' })
+    : el('div', { class: 'card', id: 'month-settlement' }, [
+      el('p', { class: 'card__label', text: `Parcelas de ${formatMonth(month)}` }),
+      el('p', { class: 'card__value', text: formatCents(monthPending.totalCents) }),
+      el('p', { class: 'card__hint', text: `${monthPending.count} pendente(s) · ${monthPaid} paga(s)` }),
+      isOpen && monthPending.count > 0
+        ? el('button', { type: 'button', class: 'btn btn--primary', id: 'settle-month', onClick: () => openSettleMonth(month), text: 'Quitar todas as parcelas pendentes deste mês' })
+        : null,
+    ]);
   const closing = el('div', { class: 'card' }, [
     el('p', { class: 'card__label', text: `Total a receber em ${formatMonth(closingMonth)}` }),
     el('p', { class: 'card__value', text: isOpen ? formatCents(statement.totalCents) : '—' }),
@@ -196,6 +253,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
       el('div', { class: 'grid grid--cards' }, [totals, closing]),
       !isOpen ? el('p', { class: 'card__hint', text: 'Devedor não está em aberto: somente consulta.' }) : null,
       el('div', { class: 'form__field' }, [el('label', { for: 'statement-month', text: 'Mês de referência' }), monthSelect]),
+      monthPanel,
       isOpen ? el('button', { type: 'button', class: 'btn btn--primary', onClick: openCreate, text: 'Nova dívida' }) : null,
       isOpen && debts.some((d) => ['pending', 'late'].includes(d.status))
         ? el('button', { type: 'button', class: 'btn btn--secondary', onClick: () => openSettle(null, `todas as dívidas de ${debtor.name}`), text: 'Quitar todas as dívidas' }) : null,

@@ -21,6 +21,7 @@ import {
   debtorPendingCents,
   debtorOverview,
   debtorMonthStatement,
+  receivedByInstallment,
   summarizeDebtors,
   formatCents,
   parseMoneyToCents,
@@ -205,15 +206,14 @@ export async function loadDebtorStatements(uid, debtors, month, io = {}) {
   const cardIds = [...new Set(purchases.map((p) => p.cardId).filter(Boolean))];
   const invoices = cardIds.length ? await byIn(COLLECTIONS.invoices, 'cardId', cardIds) : [];
   const invoicesById = new Map(invoices.map((i) => [i.id, i]));
-  const receivedByDebt = new Map();
-  for (const p of payments) receivedByDebt.set(p.debtId, (receivedByDebt.get(p.debtId) ?? 0) + (Number(p.amountCents) || 0));
+  const { byDebt: receivedByDebt, byPurchase: receivedByPurchase } = receivedByInstallment(payments);
 
   for (const debtor of targets) {
     const own = purchases.filter((p) => p.debtorId === debtor.id);
     const statement = debtorMonthStatement({
-      debtor, month, purchases: own, invoicesById, debts: debts.filter((d) => d.debtorId === debtor.id), receivedByDebt,
+      debtor, month, purchases: own, invoicesById, debts: debts.filter((d) => d.debtorId === debtor.id), receivedByDebt, receivedByPurchase,
     });
-    result.set(debtor.id, { ...statement, purchases: own, invoicesById });
+    result.set(debtor.id, { ...statement, purchases: own, invoicesById, debts: debts.filter((d) => d.debtorId === debtor.id), payments: payments.filter((p) => p.debtorId === debtor.id) });
   }
   return result;
 }

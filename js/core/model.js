@@ -305,7 +305,10 @@ export const SCHEMAS = Object.freeze({
   debtPayments: {
     dateFields: ['date'],
     fields: {
-      debtId: refField(),
+      // Recebimento de UMA parcela: de uma dívida (`debtId`) OU de uma parcela de compra no cartão vinculada ao
+      // devedor (`purchaseId`) — exatamente um dos dois (validado abaixo e nas Rules). Registros antigos têm `debtId`.
+      debtId: refField(false),
+      purchaseId: refField(false),
       debtorId: refField(),
       amountCents: money(),
       date: date(),
@@ -331,7 +334,7 @@ export const REF_FIELDS = Object.freeze({
   goals: ['accountId'],
   goalTransactions: ['goalId', 'accountId'],
   debts: ['debtorId'],
-  debtPayments: ['debtId', 'debtorId', 'accountId'],
+  debtPayments: ['debtId', 'purchaseId', 'debtorId', 'accountId'],
 });
 
 // ---------------------------------------------------------------------------
@@ -457,6 +460,10 @@ export function validateEntity(kind, data, context = {}) {
   if (kind === 'transfers' && data.fromAccountId && data.toAccountId
     && data.fromAccountId === data.toAccountId) {
     errors.toAccountId = 'A conta de destino deve ser diferente da conta de origem.';
+  }
+
+  if (kind === 'debtPayments' && !errors.debtId && !errors.purchaseId && Boolean(data.debtId) === Boolean(data.purchaseId)) {
+    errors.debtId = 'Informe a parcela da dívida OU a parcela do cartão (apenas uma).';
   }
 
   if (kind === 'cardPurchases' && !errors.installmentNumber && !errors.installmentsTotal
@@ -713,13 +720,16 @@ export function debtorOverview(debtor, cardPurchases = []) {
  * mês é limitado ao pendente do devedor (nunca cobra mais do que ele deve). Devedor não aberto → 0.
  * Retorna { month, card: itens, loan: itens, cardCents, loanCents, rawCents, totalCents, capped }.
  */
-export function debtorMonthStatement({ debtor, month, purchases = [], invoicesById = new Map(), debts = [], receivedByDebt = new Map() } = {}) {
+export function debtorMonthStatement({ debtor, month, purchases = [], invoicesById = new Map(), debts = [], receivedByDebt = new Map(), receivedByPurchase = new Map() } = {}) {
   const card = [];
   for (const p of purchases) {
     const invoice = p.invoiceId ? invoicesById.get(p.invoiceId) : null;
     const referenceMonth = invoice?.referenceMonth ?? (typeof p.purchaseDate === 'string' ? p.purchaseDate.slice(0, 7) : null);
     if (referenceMonth !== month) continue;
-    card.push({ ...p, referenceMonth, invoiceStatus: invoice?.status ?? null });
+    // Parcela de cartão já recebida do devedor (`debtPayments.purchaseId`) deixa de ser "a receber".
+    const remainingCents = Math.max(0, (Number(p.amountCents) || 0) - (receivedByPurchase.get(p.id) ?? 0));
+    if (remainingCents <= 0) continue;
+    card.push({ ...p, referenceMonth, invoiceStatus: invoice?.status ?? null, remainingCents });
   }
   const loan = [];
   for (const d of debts) {
@@ -728,7 +738,7 @@ export function debtorMonthStatement({ debtor, month, purchases = [], invoicesBy
     const remainingCents = (Number(d.principalCents) || 0) - (receivedByDebt.get(d.id) ?? 0);
     if (remainingCents > 0) loan.push({ ...d, remainingCents });
   }
-  const cardCents = card.reduce((t, p) => t + (Number(p.amountCents) || 0), 0);
+  const cardCents = card.reduce((t, p) => t + p.remainingCents, 0);
   const loanCents = loan.reduce((t, d) => t + d.remainingCents, 0);
   const rawCents = cardCents + loanCents;
   const open = debtor?.status === 'open';
@@ -738,6 +748,32 @@ export function debtorMonthStatement({ debtor, month, purchases = [], invoicesBy
     month, card, loan, cardCents, loanCents, rawCents, totalCents,
     capped: open && rawCents > pending,
   };
+}
+
+/**
+ * Recebimentos por parcela: { byDebt: Map(debtId → centavos), byPurchase: Map(purchaseId → centavos) }. Puro.
+ * Cada recebimento aponta para UMA parcela (dívida ou compra no cartão); somados uma única vez.
+ */
+export function receivedByInstallment(payments = []) {
+  const byDebt = new Map();
+  const byPurchase = new Map();
+  for (const p of payments) {
+    const amount = Number(p?.amountCents) || 0;
+    if (p?.debtId) byDebt.set(p.debtId, (byDebt.get(p.debtId) ?? 0) + amount);
+    else if (p?.purchaseId) byPurchase.set(p.purchaseId, (byPurchase.get(p.purchaseId) ?? 0) + amount);
+  }
+  return { byDebt, byPurchase };
+}
+
+/**
+ * Parcelas PENDENTES de um mês de referência (puro) — base da quitação em lote e do resumo da tela. São as
+ * obrigações do devedor (dívidas por vencimento; compras no cartão pelo mês da fatura) com restante > 0 e não
+ * pagas/canceladas; parcelas pagas e de outros meses ficam de fora. Retorna { items, count, totalCents }.
+ */
+export function pendingInstallmentsOfMonth({ month, ...input } = {}) {
+  const items = debtorObligations(input).items
+    .filter((i) => i.referenceMonth === month && i.status === 'pending' && i.remainingCents > 0);
+  return { items, count: items.length, totalCents: items.reduce((t, i) => t + i.remainingCents, 0) };
 }
 
 /**
@@ -792,7 +828,7 @@ export function cardInvoicesSummary({ cards = [], invoices = [], purchases = [],
  * `unlistedCents` = parte em aberto sem obrigação detalhada (ex.: valor inicial informado sem parcelas) —
  * informativo, nunca alerta. Não há mais teste de "duplicidade": várias obrigações legítimas coexistem.
  */
-export function debtorObligations({ debtor, debts = [], receivedByDebt = new Map(), purchases = [], invoicesById = new Map(), cardsById = new Map() } = {}) {
+export function debtorObligations({ debtor, debts = [], receivedByDebt = new Map(), receivedByPurchase = new Map(), purchases = [], invoicesById = new Map(), cardsById = new Map() } = {}) {
   const items = [];
   for (const d of debts) {
     if (d.status === 'cancelled') continue;
@@ -811,15 +847,17 @@ export function debtorObligations({ debtor, debts = [], receivedByDebt = new Map
   for (const p of purchases) {
     const invoice = p.invoiceId ? invoicesById.get(p.invoiceId) : null;
     const amount = Number(p.amountCents) || 0;
+    const received = Math.min(amount, receivedByPurchase.get(p.id) ?? 0);
     items.push({
       source: 'card', id: p.id, groupId: p.purchaseGroup ?? `${p.cardId}:${p.description}:${p.purchaseDate}`, kind: 'card',
       description: p.description, cardName: cardsById.get(p.cardId) ?? null,
       installmentNumber: p.installmentNumber, installmentsTotal: p.installmentsTotal,
-      amountCents: amount, receivedCents: 0, remainingCents: invoice?.status === 'cancelled' ? 0 : amount,
+      amountCents: amount, receivedCents: received, remainingCents: invoice?.status === 'cancelled' ? 0 : amount - received,
       dueDate: invoice?.dueDate ?? null,
       referenceMonth: invoice?.referenceMonth ?? (typeof p.purchaseDate === 'string' ? p.purchaseDate.slice(0, 7) : null),
       invoiceStatus: invoice?.status ?? null,
-      status: invoice?.status === 'paid' ? 'paid' : invoice?.status === 'cancelled' ? 'cancelled' : 'pending',
+      // `paid` = o DEVEDOR pagou esta parcela (recebimento registrado); a situação da fatura do cartão é `invoiceStatus`.
+      status: received >= amount ? 'paid' : invoice?.status === 'cancelled' ? 'cancelled' : 'pending',
     });
   }
   items.sort((a, b) => String(a.referenceMonth).localeCompare(String(b.referenceMonth))

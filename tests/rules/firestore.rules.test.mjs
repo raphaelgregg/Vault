@@ -1163,3 +1163,88 @@ describe('Contas: saldo de abertura e data de abertura (VF-2-03ai)', () => {
     await assertFails(updateDoc(doc(asUser(BOB), 'users', ALICE, 'accounts', 'acc-main'), { initialBalanceCents: 1, updatedAt: serverTimestamp() }));
   });
 });
+
+describe('Quitação por parcela e por mês (VF-2-03ak): recebimento de parcela de cartão e IDs determinísticos', () => {
+  const noon = (d) => new Date(`${d}T12:00:00.000Z`);
+  const debtorDoc = (db) => doc(db, 'users', ALICE, 'debtors', 'dev1');
+  const debtDoc = (db, id) => doc(db, 'users', ALICE, 'debts', id);
+  const payDoc = (db, id) => doc(db, 'users', ALICE, 'debtPayments', id);
+  const payment = (o = {}) => ({
+    debtorId: 'dev1', amountCents: 2500, date: noon('2026-12-06'), accountId: 'acc1',
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...o,
+  });
+
+  async function seedAll() {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      const base = { createdAt: new Date('2026-11-01'), updatedAt: new Date('2026-11-01') };
+      await setDoc(doc(db, 'users', ALICE, 'accounts', 'acc1'), { ...account, ...base });
+      await setDoc(doc(db, 'users', ALICE, 'debtors', 'dev1'), { name: 'Renan', loanDate: noon('2026-11-10'), lentCents: 23100, receivedCents: 0, status: 'open', ...base });
+      await setDoc(doc(db, 'users', ALICE, 'creditCards', 'card1'), { name: 'Nubank', ...base });
+      await setDoc(doc(db, 'users', ALICE, 'cardPurchases', 'pc1'), { cardId: 'card1', description: 'Água', amountCents: 2500, purchaseDate: noon('2026-11-20'), installmentsTotal: 1, installmentNumber: 1, debtorId: 'dev1', ...base });
+      await setDoc(doc(db, 'users', ALICE, 'cardPurchases', 'pc2'), { cardId: 'card1', description: 'Mercado', amountCents: 7800, purchaseDate: noon('2026-11-21'), installmentsTotal: 1, installmentNumber: 1, debtorId: 'dev1', ...base });
+      await setDoc(doc(db, 'users', ALICE, 'debts', 'd1'), { debtorId: 'dev1', description: 'Parcela', principalCents: 5000, dueDate: noon('2026-12-30'), installmentNumber: 2, installmentsTotal: 2, debtGroupId: 'g1', status: 'pending', ...base });
+    });
+    return asUser(ALICE);
+  }
+
+  it('aceita recebimento de parcela de CARTÃO (purchaseId) e persiste exatamente esse documento', async () => {
+    const db = await seedAll();
+    await assertSucceeds(setDoc(payDoc(db, 'settle-pc1'), payment({ purchaseId: 'pc1' })));
+    const stored = (await getDoc(payDoc(db, 'settle-pc1'))).data();
+    assert.deepEqual(Object.keys(stored).sort(), ['accountId', 'amountCents', 'createdAt', 'date', 'debtorId', 'purchaseId', 'updatedAt']);
+    assert.equal(stored.purchaseId, 'pc1');
+  });
+
+  it('recebimento antigo (só debtId) continua aceito; exige exatamente UM de debtId/purchaseId', async () => {
+    const db = await seedAll();
+    await assertSucceeds(setDoc(payDoc(db, 'old'), payment({ debtId: 'd1', amountCents: 5000 })));
+    await assertFails(setDoc(payDoc(db, 'both'), payment({ debtId: 'd1', purchaseId: 'pc1' })));
+    await assertFails(setDoc(payDoc(db, 'none'), payment()));
+  });
+
+  it('nega purchaseId inexistente, de tipo errado e campos extras', async () => {
+    const db = await seedAll();
+    await assertFails(setDoc(payDoc(db, 'x1'), payment({ purchaseId: 'nao-existe' })));
+    await assertFails(setDoc(payDoc(db, 'x2'), payment({ purchaseId: 42 })));
+    await assertFails(setDoc(payDoc(db, 'x3'), payment({ purchaseId: 'pc1', institution: 'x' })));
+    await assertFails(setDoc(payDoc(db, 'x4'), payment({ purchaseId: 'pc1', amountCents: 0 })));
+  });
+
+  it('lote da quitação do mês: N recebimentos (dívida + cartão) + parcela paga + devedor, tudo ou nada', async () => {
+    const db = await seedAll();
+    const ok = writeBatch(db);
+    ok.set(payDoc(db, 'settle-pc1'), payment({ purchaseId: 'pc1', amountCents: 2500 }));
+    ok.set(payDoc(db, 'settle-pc2'), payment({ purchaseId: 'pc2', amountCents: 7800 }));
+    ok.set(payDoc(db, 'settle-d1'), payment({ debtId: 'd1', amountCents: 5000 }));
+    ok.update(debtDoc(db, 'd1'), { status: 'paid', updatedAt: serverTimestamp() });
+    ok.update(debtorDoc(db), { receivedCents: 15300, updatedAt: serverTimestamp() });
+    await assertSucceeds(ok.commit());
+    assert.equal((await getDoc(debtDoc(db, 'd1'))).data().status, 'paid');
+    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 15300);
+  });
+
+  it('lote com UMA escrita inválida é negado por inteiro (nada parcial)', async () => {
+    const db = await seedAll();
+    const bad = writeBatch(db);
+    bad.set(payDoc(db, 'settle-pc1'), payment({ purchaseId: 'pc1' }));
+    bad.set(payDoc(db, 'settle-pcx'), payment({ purchaseId: 'nao-existe' })); // inválida
+    bad.update(debtorDoc(db), { receivedCents: 2500, updatedAt: serverTimestamp() });
+    await assertFails(bad.commit());
+    assert.equal((await getDoc(payDoc(db, 'settle-pc1'))).exists(), false);
+    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 0);
+  });
+
+  it('DUPLICIDADE: segundo recebimento com o mesmo ID determinístico é negado (createdAt imutável); o original fica intacto', async () => {
+    const db = await seedAll();
+    await assertSucceeds(setDoc(payDoc(db, 'settle-pc1'), payment({ purchaseId: 'pc1' })));
+    await assertFails(setDoc(payDoc(db, 'settle-pc1'), payment({ purchaseId: 'pc1', date: noon('2026-12-09') })));
+    const stored = (await getDoc(payDoc(db, 'settle-pc1'))).data();
+    assert.equal(stored.date.toDate().toISOString(), '2026-12-06T12:00:00.000Z');
+  });
+
+  it('outro usuário não registra recebimento no devedor alheio', async () => {
+    await seedAll();
+    await assertFails(setDoc(doc(asUser(BOB), 'users', ALICE, 'debtPayments', 'bob'), payment({ purchaseId: 'pc1' })));
+  });
+});

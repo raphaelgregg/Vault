@@ -317,11 +317,14 @@ service cloud.firestore {
     match /users/{userId}/debtPayments/{paymentId} {
       allow read: if isOwner(userId) || isAdmin();
       allow create, update: if isOwner(userId)
-        && keysOk(['debtId', 'debtorId', 'amountCents', 'date', 'accountId', 'notes',
+        && keysOk(['debtId', 'purchaseId', 'debtorId', 'amountCents', 'date', 'accountId', 'notes',
                    'createdAt', 'updatedAt'])
-        && requiredOk(['debtId', 'debtorId', 'amountCents', 'date', 'accountId',
+        && requiredOk(['debtorId', 'amountCents', 'date', 'accountId',
                        'createdAt', 'updatedAt'])
-        && ref(userId, 'debts', 'debtId')
+        // Recebimento de UMA parcela: da dívida (debtId) OU da parcela de cartão do devedor (purchaseId), nunca ambas/nenhuma.
+        && (('debtId' in data()) != ('purchaseId' in data()))
+        && optionalRef(userId, 'debts', 'debtId')
+        && optionalRef(userId, 'cardPurchases', 'purchaseId')
         && ref(userId, 'debtors', 'debtorId')
         && positiveCents(data().amountCents)
         && stamp(data().date)

@@ -193,12 +193,12 @@ try {
   await page.selectOption('#statement-month', 'all'); // o vencimento pode cair no mês anterior
   await page.waitForSelector('.modal__dialog tbody tr');
   assert.match(await modalText(), /Atrasada/); // derivado: vencida e ainda pendente
-  await page.getByRole('button', { name: 'Receber parcela 1' }).click();
+  await page.getByRole('button', { name: 'Quitar parcela 1' }).click();
   await page.fill('#amountCents', '200,00');
   await page.selectOption('#accountId', accountId);
   await page.locator('#debt-pay-form button[type="submit"]').click();
   await page.waitForFunction(() => /R\$\s?200,00/.test(document.querySelector('.modal__dialog')?.innerText ?? ''));
-  await page.getByRole('button', { name: 'Receber parcela 1' }).click();
+  await page.getByRole('button', { name: 'Quitar parcela 1' }).click();
   await page.fill('#amountCents', '300,01');
   await page.selectOption('#accountId', accountId);
   await page.locator('#debt-pay-form button[type="submit"]').click();

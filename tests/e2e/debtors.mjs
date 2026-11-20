@@ -123,10 +123,10 @@ try {
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Parcelas e recebimentos de Maria' }).click();
   await page.waitForSelector('#statement-month');
-  await page.getByRole('button', { name: 'Antecipar parcela 3 de Moto' }).click();
+  await page.getByRole('button', { name: 'Quitar parcela 3 de Moto' }).click();
   await page.selectOption('#accountId', accountId);
   await page.locator('#debt-pay-form button[type="submit"]').click();
-  await page.waitForFunction(() => /Parcela antecipada registrada/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForFunction(() => /Parcela antecipada e quitada/.test(document.querySelector('.toast')?.innerText ?? ''));
   await page.waitForFunction(() => /Total em aberto\s+R\$\s?1\.700,00/.test(document.querySelector('.modal')?.innerText ?? '')); // 1.900 − 200
   assert.match(await modalText(), /Moto\s+3\/3[^\n]*R\$\s?200,00[^\n]*R\$\s?200,00[^\n]*Paga/);
   await page.getByRole('button', { name: 'Quitar dívida Moto' }).first().click();
@@ -138,6 +138,96 @@ try {
   assert.equal((after.match(/Moto\s+\d\/3[^\n]*Paga/g) ?? []).length, 3);
   assert.match(after, /Geladeira[^\n]*Pendente/); // compras de cartão intactas
   assert.equal(await page.getByRole('button', { name: /Quitar dívida Moto/ }).count(), 0);
+
+  log('VF-2-03ak: quitar parcela individual e todas as parcelas pendentes de um mês (cartão + dívida), com Firestore e indicadores');
+  const renan = await page.evaluate(async () => {
+    const { listCards, registerCardPurchase } = await import('/js/services/creditCards.js');
+    const { createDebtor } = await import('/js/services/debtors.js');
+    const { createDebtPlan } = await import('/js/services/debtPayments.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const uid = auth.currentUser.uid;
+    const [card] = (await listCards(uid)).filter((c) => c.name === 'Cartão E2E');
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+    const debtor = await createDebtor(uid, { name: 'Renan', lentCents: '0,00', loanDate: today });
+    let month = null;
+    for (const [description, amountCents] of [['Água', '25,00'], ['Mercado', '78,00'], ['Supermercado', '28,00']]) {
+      const r = await registerCardPurchase(uid, card.id, { description, amountCents, installmentsTotal: 1, purchaseDate: today, debtorId: debtor.id });
+      month = r.invoiceMonths[0].split('_').pop();
+    }
+    // dívida parcelada em 2x de R$ 50: a 1ª vence no mês da fatura, a 2ª no seguinte
+    await createDebtPlan(uid, { debtorId: debtor.id, description: 'Parcela', totalCents: '100,00', installments: 2, firstDueDate: `${month}-28` });
+    return { id: debtor.id, month };
+  });
+  const snapshot = async () => page.evaluate(async ([debtorId, month]) => {
+    const { loadDashboard } = await import('/js/services/dashboard.js');
+    const { loadBalances } = await import('/js/services/balances.js');
+    const { listAccounts } = await import('/js/services/accounts.js');
+    const { list } = await import('/js/services/firestore.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const uid = auth.currentUser.uid;
+    const accs = await listAccounts(uid);
+    const acc = accs.find((a) => a.institution === 'Banco E2E');
+    const bal = (await loadBalances(uid, accs)).balances.get(acc.id);
+    const dash = await loadDashboard(uid, { month, includeDebtors: true });
+    const payments = (await list(uid, 'debtPayments', { where: [['debtorId', '==', debtorId]] })).map(({ id, debtId, purchaseId, amountCents, date, accountId }) => ({ id, debtId, purchaseId, amountCents, date, accountId }));
+    const debtors = await list(uid, 'debtors', {});
+    const debts = await list(uid, 'debts', { where: [['debtorId', '==', debtorId]] });
+    return { bal, receivable: dash.monthlyForecast.debtors.receivableCents, payments, debtor: debtors.find((d) => d.id === debtorId), debts: debts.map((d) => ({ n: d.installmentNumber, status: d.status, due: d.dueDate })), accId: acc.id };
+  }, [renan.id, renan.month]);
+  const base0 = await snapshot();
+  await page.goto(`${app.base}/pages/devedores.html`);
+  await page.waitForSelector('#page-content tbody tr');
+  await page.getByRole('button', { name: 'Parcelas e recebimentos de Renan' }).click();
+  await page.waitForSelector('#statement-month');
+  await page.selectOption('#statement-month', renan.month);
+  await page.waitForSelector('#month-settlement');
+  assert.match(await page.locator('#month-settlement').innerText(), /4 pendente\(s\) · 0 paga\(s\)/);
+  assert.match(await page.locator('#month-settlement').innerText(), /R\$\s?181,00/); // 25 + 78 + 28 + 50
+  assert.equal(await page.getByRole('button', { name: /^Quitar dívida/ }).count(), 1); // dívida parcelada: quitar a dívida inteira é outra operação
+  // — quitar UMA parcela (Água)
+  await page.getByRole('button', { name: 'Quitar parcela 1 de Água' }).click();
+  await page.selectOption('#accountId', base0.accId);
+  await page.locator('#debt-pay-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Parcela (antecipada e )?quitada/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForFunction(() => /3 pendente\(s\) · 1 paga\(s\)/.test(document.querySelector('#month-settlement')?.innerText ?? ''));
+  assert.equal(await page.locator('.modal [data-status="paid"]').count(), 1);
+  assert.equal(await page.getByRole('button', { name: 'Quitar parcela 1 de Água' }).count(), 0); // já paga: sem ação
+  assert.equal(await page.getByRole('button', { name: 'Quitar parcela 1 de Mercado' }).count(), 1);
+  const afterOne = await snapshot();
+  assert.equal(afterOne.bal, base0.bal + 2500);
+  assert.equal(afterOne.debtor.receivedCents, 2500);
+  assert.deepEqual(afterOne.payments.map((p) => [p.id, !!p.purchaseId, !!p.debtId, p.amountCents]), [['settle-' + afterOne.payments[0].purchaseId, true, false, 2500]]);
+  assert.equal(base0.receivable - afterOne.receivable, 2500); // a receber do mês (dashboard/previsão) caiu
+  // — quitar TODAS as pendentes do mês, com confirmação
+  await page.getByRole('button', { name: 'Quitar todas as parcelas pendentes deste mês' }).click();
+  await page.waitForSelector('#debt-month-form');
+  const confirmText = await page.locator('#debt-month-form').innerText();
+  assert.match(confirmText, /3 parcela\(s\) pendente\(s\)/);
+  assert.match(confirmText, /R\$\s?156,00/); // 78 + 28 + 50 (a Água já paga ficou de fora)
+  await page.selectOption('#debt-month-form #accountId', base0.accId);
+  await page.locator('#debt-month-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Mês quitado: 3 parcela/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForFunction(() => /0 pendente\(s\) · 4 paga\(s\)/.test(document.querySelector('#month-settlement')?.innerText ?? ''));
+  assert.equal(await page.getByRole('button', { name: 'Quitar todas as parcelas pendentes deste mês' }).count(), 0);
+  const afterMonth = await snapshot();
+  assert.equal(afterMonth.bal, base0.bal + 18100); // cada recebimento entrou UMA vez na conta (25+78+28+50)
+  assert.equal(afterMonth.debtor.receivedCents, 18100);
+  assert.equal(afterMonth.payments.length, 4); // histórico: 1 individual + 3 do lote, sem duplicar a Água
+  assert.equal(new Set(afterMonth.payments.map((p) => p.id)).size, 4);
+  assert.ok(afterMonth.payments.every((p) => p.id.startsWith('settle-') && p.accountId === base0.accId));
+  assert.equal(afterMonth.payments.filter((p) => p.debtId).length, 1);
+  assert.deepEqual(afterMonth.debts.map((d) => [d.n, d.status]).sort(), [[1, 'paid'], [2, 'pending']]); // a parcela do OUTRO mês não mudou
+  assert.equal(base0.receivable - afterMonth.receivable, 18100);
+  assert.equal(afterMonth.debtor.status, 'open');
+  // repetir não duplica: nada pendente neste mês
+  const dupe = await page.evaluate(async ([debtorId, month, accountId]) => {
+    const { settleMonthInstallments } = await import('/js/services/debtPayments.js');
+    const { auth } = await import('/js/firebase/client.js');
+    return settleMonthInstallments(auth.currentUser.uid, debtorId, month, { date: '2031-01-01', accountId });
+  }, [renan.id, renan.month, base0.accId]);
+  assert.equal(dupe.ok, false);
+  assert.equal((await snapshot()).payments.length, 4);
+  await page.keyboard.press('Escape');
 
   log('VF-2-03p: pagar fatura com conta bancária e cancelar fatura vazia (modal Faturas e compras)');
   const seeded2 = await page.evaluate(async () => {

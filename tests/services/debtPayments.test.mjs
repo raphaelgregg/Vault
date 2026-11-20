@@ -44,7 +44,7 @@ describe('debts/debtPayments — schema', () => {
     assert.deepEqual(Object.keys(SCHEMAS.debts.fields).sort(),
       ['debtGroupId', 'debtorId', 'description', 'dueDate', 'installmentNumber', 'installmentsTotal', 'principalCents', 'status']);
     assert.deepEqual(Object.keys(SCHEMAS.debtPayments.fields).sort(),
-      ['accountId', 'amountCents', 'date', 'debtId', 'debtorId', 'notes']);
+      ['accountId', 'amountCents', 'date', 'debtId', 'debtorId', 'notes', 'purchaseId']);
     assert.deepEqual(SCHEMAS.debts.dateFields, ['dueDate']);
     assert.deepEqual(getDebtStatusOptions().map((o) => o.value), ['pending', 'paid', 'late', 'cancelled']);
   });
