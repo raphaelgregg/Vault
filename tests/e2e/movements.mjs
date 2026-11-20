@@ -25,7 +25,7 @@ const go = async (path) => {
 };
 const content = () => page.locator('#page-content').innerText();
 const rows = () => page.locator('#page-content tbody tr');
-const iso = (offsetDays) => new Date(Date.now() + offsetDays * 86400000).toISOString().slice(0, 10);
+const iso = (offsetDays) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date(Date.now() + offsetDays * 86400000));
 const brDate = (isoDate) => isoDate.split('-').reverse().join('/');
 const waitText = (re) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector('#page-content').innerText), re.source);
 const waitRow = (re) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector('#page-content tbody')?.innerText ?? ''), re.source);
@@ -92,7 +92,7 @@ try {
     const { createIncome } = await import('/js/services/incomes.js');
     const { auth } = await import('/js/firebase/client.js');
     const uid = auth.currentUser.uid;
-    const day = (i) => new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    const day = (i) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date(Date.now() - i * 86400000));
     for (let i = 1; i <= n; i += 1) {
       const r = await createIncome(uid, { description: `Seed R ${i}`, categoryId: category, amountCents: '1,00', expectedDate: day(i), accountId: account, status: 'pending', recurrence: 'none' });
       if (!r.ok) throw new Error(JSON.stringify(r.errors));
@@ -127,7 +127,7 @@ try {
     const { createExpense } = await import('/js/services/expenses.js');
     const { auth } = await import('/js/firebase/client.js');
     const uid = auth.currentUser.uid;
-    const day = (i) => new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    const day = (i) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date(Date.now() - i * 86400000));
     for (let i = 1; i <= n; i += 1) {
       const d = day(i);
       const r = await createExpense(uid, { description: `Seed D ${i}`, categoryId: category, amountCents: '1,00', accountId: account, purchaseDate: d, dueDate: d, status: 'pending', recurrence: 'none' });
@@ -171,7 +171,7 @@ try {
     const { auth } = await import('/js/firebase/client.js');
     const uid = auth.currentUser.uid;
     for (let i = 1; i <= n; i += 1) {
-      const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+      const d = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date(Date.now() - i * 86400000));
       const r = await createTransfer(uid, { fromAccountId: from, toAccountId: to, amountCents: '1,00', date: d, reason: `Seed T ${i}`, status: 'pending' });
       if (!r.ok) throw new Error(JSON.stringify(r.errors));
     }

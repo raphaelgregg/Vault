@@ -21,6 +21,7 @@ import {
 
 import { openDebtorInstallments } from './devedores-parcelas.js';
 
+import { todayInAppZone, currentMonthKey } from '../utils/dates.js';
 export const meta = { title: 'Devedores', icon: 'users' };
 
 let currentUser = null;
@@ -28,7 +29,7 @@ let container = null;
 let debtorsCache = [];
 let statements = new Map(); // fechamento do mês por devedor (VF-2-03j)
 let statementsFailed = false;
-let month = new Date().toISOString().slice(0, 7);
+let month = currentMonthKey();
 
 export async function render(target, { user }) {
   currentUser = user;
@@ -255,7 +256,7 @@ function field(label, id, control) {
 
 function openDebtorModal(item = null) {
   const isEdit = !!item;
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayInAppZone();
 
   const form = el('form', { id: 'debtor-form', novalidate: true }, [
     el('div', { class: 'form__row' }, [

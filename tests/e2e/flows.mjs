@@ -36,7 +36,7 @@ const modalText = () => page.locator('.modal__dialog').innerText();
 const row = (needle) => page.locator('tbody tr', { hasText: needle });
 const shot = async (name) => { if (process.env.E2E_SCREENSHOTS) await page.screenshot({ path: join(process.env.E2E_SCREENSHOTS, `${name}.png`), fullPage: true }); };
 const closeToasts = () => page.waitForTimeout(150);
-const iso = (d) => d.toISOString().slice(0, 10);
+const iso = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(d); // dia civil de Brasília, como o app
 const addDays = (days) => iso(new Date(Date.now() + days * 86400000));
 const thisMonth = iso(new Date()).slice(0, 7);
 

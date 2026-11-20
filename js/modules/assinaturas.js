@@ -24,6 +24,7 @@ import { listAccounts } from '../services/accounts.js';
 import { accountLabel as accountText } from '../core/model.js';
 import { listCards } from '../services/creditCards.js';
 
+import { todayInAppZone } from '../utils/dates.js';
 export const meta = { title: 'Assinaturas', icon: 'repeat' };
 
 let currentUser = null;
@@ -247,7 +248,7 @@ function field(label, id, control) {
 
 function openSubscriptionModal(item = null) {
   const isEdit = !!item;
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayInAppZone();
   const expenseCategories = categoriesCache.filter((c) => c.kind === 'expense' || c.kind === 'both');
   const activeAccounts = accountsCache.filter((a) => a.status === 'active' || a.id === item?.accountId);
 

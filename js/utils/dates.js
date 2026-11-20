@@ -61,9 +61,24 @@ export function startOfMonth(date = new Date()) {
   return new Date(date.getFullYear(), date.getMonth(), 1, 0, 0, 0, 0);
 }
 
+/**
+ * Fuso de referência do app para "hoje", "mês corrente" e classificação de vencimentos. Explícito (não depende do
+ * fuso do navegador nem de UTC): depois das 21h em Brasília o instante UTC já é o dia seguinte, e usar UTC
+ * antecipava um dia (despesa "vencida" cedo demais, virada de mês/ano adiantada). As datas continuam
+ * PERSISTIDAS como antes (meio-dia UTC, strings AAAA-MM-DD no modelo); só a referência de "hoje" muda.
+ */
+export const APP_TIME_ZONE = 'America/Sao_Paulo';
+const ZONE_PARTS = new Intl.DateTimeFormat('en-US', { timeZone: APP_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' });
+
+/** Data de HOJE ("AAAA-MM-DD") no fuso do app para o instante `now`. Puro (dado `now`). */
+export function todayInAppZone(now = new Date()) {
+  const parts = Object.fromEntries(ZONE_PARTS.formatToParts(now).map((p) => [p.type, p.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+/** Mês corrente "AAAA-MM" no fuso do app. */
 export function currentMonthKey(date = new Date()) {
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  return `${date.getFullYear()}-${month}`;
+  return todayInAppZone(date).slice(0, 7);
 }
 
 const MONTH_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;

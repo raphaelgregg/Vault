@@ -28,6 +28,7 @@ import { createPagerFooter } from '../components/pager-footer.js';
 import { listCategories, getCategoryKindOptions } from '../services/categories.js';
 import { listAccounts } from '../services/accounts.js';
 
+import { todayInAppZone, currentMonthKey } from '../utils/dates.js';
 export const meta = { title: 'Despesas', icon: 'trending-down' };
 
 let currentUser = null;
@@ -118,16 +119,13 @@ function renderPage(container) {
 
 /** Computa estatísticas rápidas do mês atual. */
 function computeStats() {
-  const now = new Date();
-  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+  const month = currentMonthKey(); // mês corrente no fuso America/Sao_Paulo
 
   let paidThisMonth = 0;
   let pendingThisMonth = 0;
 
   for (const expense of expensesCache) {
-    const dueDate = new Date(expense.dueDate + 'T00:00:00');
-    const isThisMonth = dueDate >= startOfMonth && dueDate <= endOfMonth;
+    const isThisMonth = String(expense.dueDate).slice(0, 7) === month;
 
     if (expense.status === 'paid' && isThisMonth) {
       paidThisMonth += Number(expense.amountCents) || 0;
@@ -419,7 +417,7 @@ function openExpenseModal(expense = null) {
           id: 'purchaseDate',
           name: 'purchaseDate',
           required: true,
-          value: expense?.purchaseDate ?? new Date().toISOString().split('T')[0],
+          value: expense?.purchaseDate ?? todayInAppZone(),
         }),
         el('span', { class: 'form__error', 'data-for': 'purchaseDate' }),
       ]),
@@ -430,7 +428,7 @@ function openExpenseModal(expense = null) {
           id: 'dueDate',
           name: 'dueDate',
           required: true,
-          value: expense?.dueDate ?? new Date().toISOString().split('T')[0],
+          value: expense?.dueDate ?? todayInAppZone(),
         }),
         el('span', { class: 'form__error', 'data-for': 'dueDate' }),
       ]),

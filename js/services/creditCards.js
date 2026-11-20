@@ -13,6 +13,7 @@
  * não tem `accountId`); sem cancelamento de fatura nem pagamento parcial.
  */
 import { COLLECTIONS } from '../utils/constants.js';
+import { todayInAppZone } from '../utils/dates.js';
 import {
   list,
   getById,
@@ -305,7 +306,7 @@ export async function deleteCardPurchase(uid, purchaseId, io = {}) {
   return { ok: true };
 }
 
-const todayIso = (io) => (io.now ? io.now() : new Date()).toISOString().slice(0, 10);
+const todayIso = (io) => todayInAppZone(io.now ? io.now() : new Date());
 
 /**
  * Fecha a fatura: só a partir do dia de fechamento; grava `totalCents` (soma das parcelas

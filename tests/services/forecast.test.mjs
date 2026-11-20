@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { accountBalances, orphanMovements, debtorMonthStatement } from '../../js/core/model.js';
-import { monthlyForecast, subscriptionOccurrences, unpaidInvoiceCents } from '../../js/core/forecast.js';
+import { monthlyForecast, subscriptionOccurrences, unpaidInvoiceCents, projectedInvoiceForCharge } from '../../js/core/forecast.js';
 import { computeOpeningAdjustment, adjustOpeningBalance } from '../../js/services/accounts.js';
 import { loadMonthlyForecast } from '../../js/services/forecast.js';
 import { updateAccount, createAccount } from '../../js/services/accounts.js';
@@ -218,7 +218,8 @@ describe('previsão mensal', () => {
     assert.deepEqual(subscriptionOccurrences(weekly, '2026-11-01', '2026-11-30'), ['2026-11-03', '2026-11-10', '2026-11-17', '2026-11-24']);
     assert.deepEqual(subscriptionOccurrences({ ...monthly, nextChargeDate: '2026-12-05' }, '2026-11-01', '2026-11-30'), []);
     const f = monthlyForecast({ ...base, subscriptions: [monthly, weekly, { id: 'c', name: 'Cloud', status: 'active', periodicity: 'monthly', nextChargeDate: '2026-11-18', amountCents: 2000, cardId: 'c1' }, { id: 'p', name: 'Pausada', status: 'paused', periodicity: 'monthly', nextChargeDate: '2026-11-18', amountCents: 9999 }] });
-    assert.deepEqual([f.subscriptions.directCents, f.subscriptions.cardCents, f.subscriptions.plannedInMonthCents], [9000, 2000, 11000]);
+    // cartão c1 desconhecido aqui: sem fatura para projetar, a saída de caixa cai na própria data (conservador)
+    assert.deepEqual([f.subscriptions.directCents, f.subscriptions.cardCommitmentCents, f.subscriptions.cardCashCents, f.subscriptions.plannedInMonthCents], [9000, 2000, 2000, 11000]);
     assert.equal(f.subscriptions.monthlyCents, 5000 + Math.round(1000 * 52 / 12) + 2000); // valor mensal consolidado (ativas)
     assert.deepEqual(f.subscriptions.nextCharges.map((s) => s.id), ['m', 'w', 'c']);
   });
@@ -231,7 +232,7 @@ describe('previsão mensal', () => {
     assert.deepEqual(f.subscriptions.duplicates.map((d) => [d.subscriptionId, d.expenseId]), [['s', 'd']]);
     assert.equal(f.expenses.toPayCents, 5590); // conta uma vez, pela despesa
     assert.equal(monthlyForecast({ ...base, expenses: [{ ...twin, amountCents: 6000 }], subscriptions: [sub] }).subscriptions.directCents, 5590); // valor diferente = outra coisa
-    assert.equal(monthlyForecast({ ...base, expenses: [twin], subscriptions: [{ ...sub, cardId: 'c1' }] }).subscriptions.cardCents, 5590);
+    assert.equal(monthlyForecast({ ...base, expenses: [twin], subscriptions: [{ ...sub, cardId: 'c1' }] }).subscriptions.cardCommitmentCents, 5590);
   });
 
   it('PREVENÇÃO DE DUPLICIDADE: pago/recebido não entra de novo; compra do cartão não vira despesa; fatura paga fora', () => {
@@ -332,5 +333,103 @@ describe('data de abertura: cadastro, edição e CSV', () => {
     assert.equal(mapImportRow('contas', { instituicao: 'Nubank', tipo: 'checking' }, ctx).ok, true);
     const merged = buildMergeRaw('contas', { institution: 'Nubank', type: 'checking', color: '#000', status: 'active', initialBalanceCents: 0, openingDate: '2026-11-01' }, { color: '#fff' }, ['color']);
     assert.equal(merged.openingDate, '2026-11-01');
+  });
+});
+
+describe('assinatura no cartão: comprometimento (mês da cobrança) × saída de caixa (vencimento da fatura)', () => {
+  // fecha dia 10, vence dia 17 (mesmo mês da referência); cobrança dia 20 cai na fatura do mês SEGUINTE
+  const card = { id: 'c1', status: 'active', closingDay: 10, dueDay: 17, limitCents: 1000000 };
+  const sub = (over = {}) => ({ id: 's1', name: 'Netflix', status: 'active', periodicity: 'monthly', cardId: 'c1', nextChargeDate: '2026-11-20', amountCents: 5590, ...over });
+  const base = { month: '2026-11', today: '2026-11-15', balanceCents: 100000, cards: [card] };
+
+  it('fatura projetada: fechamento define a referência; vence conforme o cartão; fechada/paga empurra para a próxima', () => {
+    assert.deepEqual(projectedInvoiceForCharge(card, '2026-11-20', []), { referenceMonth: '2026-12', dueDate: '2026-12-17' });
+    assert.deepEqual(projectedInvoiceForCharge(card, '2026-11-05', []), { referenceMonth: '2026-11', dueDate: '2026-11-17' });
+    assert.deepEqual(projectedInvoiceForCharge(card, '2026-12-20', []), { referenceMonth: '2027-01', dueDate: '2027-01-17' }); // virada de ano
+    // vencimento no mês seguinte ao fechamento (fecha 25, vence 5)
+    assert.deepEqual(projectedInvoiceForCharge({ ...card, closingDay: 25, dueDay: 5 }, '2026-11-20', []), { referenceMonth: '2026-11', dueDate: '2026-12-05' });
+    // fatura existente: usa o vencimento dela; fechada não recebe compra nova
+    const open = { cardId: 'c1', referenceMonth: '2026-12', status: 'open', dueDate: '2026-12-18' };
+    assert.deepEqual(projectedInvoiceForCharge(card, '2026-11-20', [open]), { referenceMonth: '2026-12', dueDate: '2026-12-18' });
+    assert.deepEqual(projectedInvoiceForCharge(card, '2026-11-20', [{ ...open, status: 'closed' }]), { referenceMonth: '2027-01', dueDate: '2027-01-17' });
+    assert.equal(projectedInvoiceForCharge(undefined, '2026-11-20', []), null);
+  });
+
+  it('NÃO lançada: compromisso no mês da cobrança (novembro); sem saída de caixa em novembro (fatura vence em dezembro)', () => {
+    const f = monthlyForecast({ ...base, subscriptions: [sub()] });
+    const [c] = f.subscriptions.cardCharges.filter((x) => x.chargeMonth === '2026-11');
+    assert.deepEqual([c.chargeMonth, c.referenceMonth, c.dueDate], ['2026-11', '2026-12', '2026-12-17']);
+    assert.equal(f.subscriptions.cardCommitmentCents, 5590);
+    assert.equal(f.subscriptions.plannedInMonthCents, 5590);
+    assert.equal(f.subscriptions.cardCashCents, 0);
+    assert.equal(f.projectedBalanceCents, 100000); // caixa de novembro intacto
+    // o caixa aparece em dezembro (vencimento da fatura), o comprometimento da cobrança de dezembro também
+    const dec = f.nextMonths[0];
+    assert.deepEqual([dec.month, dec.subscriptionsCents, dec.cardSubscriptionChargesCents], ['2026-12', 5590, 5590]);
+    assert.equal(dec.commitmentsCents, 5590); // total de caixa não soma o comprometimento informativo
+  });
+
+  it('cobrança cuja fatura vence ainda no mês entra no caixa do mês', () => {
+    const f = monthlyForecast({ ...base, subscriptions: [sub({ nextChargeDate: '2026-11-05' })] }); // ≤ fechamento 10 → fatura de novembro, vence 17/11
+    assert.equal(f.subscriptions.cardCashCents, 5590);
+    assert.equal(f.projectedBalanceCents, 100000 - 5590);
+  });
+
+  it('cobrança não lançada do mês anterior pesa no caixa do mês em que a fatura vence', () => {
+    const f = monthlyForecast({ ...base, subscriptions: [sub({ nextChargeDate: '2026-10-20' })] }); // 20/10 → fatura nov (vence 17/11)
+    assert.equal(f.subscriptions.cardCashCents, 5590);
+    assert.equal(f.subscriptions.cardCharges.find((c) => c.chargeMonth === '2026-10').dueDate, '2026-11-17');
+    assert.equal(f.subscriptions.cardCommitmentCents, 5590); // a de 20/11 é o comprometimento de novembro; a de outubro não
+  });
+
+  it('JÁ lançada: compõe fatura e comprometido do cartão; caixa pelo vencimento da fatura; nada é somado de novo', () => {
+    const before = monthlyForecast({ ...base, month: '2026-12', today: '2026-11-15', subscriptions: [sub()], invoices: [], purchases: [] });
+    // lançar: compra 1x na fatura aberta 2026-12 (vence 17/12) e a assinatura avança para 20/12
+    const purchase = { id: 'p1', cardId: 'c1', invoiceId: 'c1_2026-12', amountCents: 5590, purchaseDate: '2026-11-20', description: 'Netflix', notes: 'Assinatura' };
+    const invoice = { id: 'c1_2026-12', cardId: 'c1', referenceMonth: '2026-12', status: 'open', dueDate: '2026-12-17' };
+    const after = monthlyForecast({ ...base, month: '2026-11', today: '2026-11-21', subscriptions: [sub({ nextChargeDate: '2026-12-20' })], invoices: [invoice], purchases: [purchase] });
+    assert.equal(after.subscriptions.cardCommitmentCents, 0); // não é mais "previsto": é compra
+    assert.equal(after.subscriptions.launchedInCardsCents, 5590);
+    assert.equal(after.cards.committedCents, 5590); // comprometimento do cartão
+    assert.equal(after.projectedBalanceCents, 100000); // novembro: nada sai
+    const decAfter = after.nextMonths[0];
+    assert.equal(decAfter.invoicesCents, 5590); // saída de caixa pelo vencimento da fatura…
+    assert.equal(decAfter.subscriptionsCents, 0); // …e NÃO de novo como assinatura
+    // dezembro antes (prevista) e depois (lançada): mesmo caixa, contado uma única vez
+    const decBeforeCash = before.subscriptions.cardCashCents; // dezembro: previstas com fatura ≤ 31/12
+    assert.equal(decBeforeCash, 5590);
+    assert.equal(decAfter.commitmentsCents, 5590);
+  });
+
+  it('compra já existente no cartão (mesma descrição, valor e data) descarta a ocorrência prevista e sinaliza', () => {
+    const purchase = { id: 'p1', cardId: 'c1', invoiceId: 'c1_2026-12', amountCents: 5590, purchaseDate: '2026-11-20', description: ' netflix ' };
+    const f = monthlyForecast({ ...base, subscriptions: [sub()], invoices: [{ id: 'c1_2026-12', cardId: 'c1', referenceMonth: '2026-12', status: 'open', dueDate: '2026-12-17' }], purchases: [purchase] });
+    assert.equal(f.subscriptions.cardCommitmentCents, 0);
+    assert.deepEqual(f.subscriptions.duplicates.map((d) => [d.via, d.purchaseId]), [['purchase', 'p1']]);
+    assert.equal(f.subscriptions.cardCharges.some((c) => c.date === '2026-11-20'), false);
+    // valor diferente = outra compra: a ocorrência continua prevista
+    const other = monthlyForecast({ ...base, subscriptions: [sub()], purchases: [{ ...purchase, amountCents: 100 }] });
+    assert.equal(other.subscriptions.cardCommitmentCents, 5590);
+  });
+
+  it('assinatura direta (conta) segue pela data da cobrança: comprometimento = caixa no mesmo mês', () => {
+    const f = monthlyForecast({ ...base, subscriptions: [sub({ cardId: undefined })] });
+    assert.deepEqual([f.subscriptions.directCents, f.subscriptions.cardCommitmentCents, f.subscriptions.cardCashCents], [5590, 0, 0]);
+    assert.equal(f.projectedBalanceCents, 100000 - 5590);
+  });
+
+  it('a lógica de compras, parcelas e faturas permanece: compras não entram no caixa; só a fatura pelo vencimento', () => {
+    const invoices = [{ id: 'f', cardId: 'c1', referenceMonth: '2026-11', status: 'open', dueDate: '2026-11-17' }];
+    const purchases = [{ id: 'p', cardId: 'c1', invoiceId: 'f', amountCents: 30000, purchaseDate: '2026-11-02' }];
+    const f = monthlyForecast({ ...base, invoices, purchases, subscriptions: [sub()] });
+    assert.deepEqual([f.cards.committedCents, f.cards.invoicesToPayCents], [30000, 30000]);
+    assert.equal(f.projectedBalanceCents, 100000 - 30000); // fatura sim; assinatura (vence em dez) não
+  });
+
+  it('virada de ano: cobrança de dezembro tem fatura em janeiro', () => {
+    const f = monthlyForecast({ month: '2026-12', today: '2026-12-15', balanceCents: 0, cards: [card], subscriptions: [sub({ nextChargeDate: '2026-12-20' })] });
+    assert.equal(f.subscriptions.cardCommitmentCents, 5590);
+    assert.equal(f.subscriptions.cardCashCents, 0);
+    assert.deepEqual([f.nextMonths[0].month, f.nextMonths[0].subscriptionsCents], ['2027-01', 5590]);
   });
 });

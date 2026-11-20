@@ -106,7 +106,7 @@ function draw(container, data, rerender) {
         statCard('Pendentes', formatCents(f.expenses.pendingCents), 'clock', `Vencidas (todas) ${formatCents(f.expenses.overdueCents)} · de meses anteriores ${formatCents(f.expenses.overduePreviousCents)}`, 'expense'),
         statCard('Comprometido em cartões', formatCents(f.cards.committedCents), 'credit-card', `Compras não quitadas (inclui parcelas futuras) · compras do mês ${formatCents(f.cards.purchasesInMonthCents)}`),
         statCard('Faturas a pagar', formatCents(f.cards.invoicesToPayCents), 'receipt', `Abertas ${formatCents(f.cards.openInvoicesCents)} · fechadas ${formatCents(f.cards.closedInvoicesCents)} · vencidas ${formatCents(f.cards.invoicesOverdueCents)}`),
-        statCard('Assinaturas', formatCents(f.subscriptions.monthlyCents), 'repeat', `Valor mensal consolidado · previstas no mês ${formatCents(f.subscriptions.plannedInMonthCents)}`),
+        statCard('Assinaturas', formatCents(f.subscriptions.monthlyCents), 'repeat', `Valor mensal consolidado · cobranças previstas no mês ${formatCents(f.subscriptions.plannedInMonthCents)} (conta ${formatCents(f.subscriptions.directCents)} · cartão ${formatCents(f.subscriptions.cardCommitmentCents)})`),
         statCard('Saldo disponível atual', formatCents(f.balanceCents), 'wallet', 'Contas ativas (já inclui o que foi pago/recebido)'),
         statCard('Saldo projetado ao fim do mês', formatCents(f.projectedBalanceCents), 'trending-up', f.projectedBalanceCents < 0 ? 'Atenção: projeção negativa' : 'Saldo atual + pendentes − compromissos', f.projectedBalanceCents < 0 ? 'expense' : 'income'),
       ]),
@@ -132,8 +132,22 @@ function draw(container, data, rerender) {
             ],
           }),
         ]),
-        el('p', { class: 'card__hint', text: 'Compras no cartão são compromisso, não saída: o caixa só sai quando a fatura é paga, por isso entram as faturas (pelo vencimento), nunca as compras. Recorrências ainda não lançadas não são projetadas.' }),
-        ...f.subscriptions.duplicates.map((d) => el('p', { class: 'notice', role: 'status', text: `Assinatura "${d.name}" (${formatCents(d.amountCents)}) ignorada na previsão: já existe como despesa no mês (evita contar duas vezes).` })),
+        el('p', { class: 'card__hint', text: 'Compras no cartão são compromisso, não saída: o caixa só sai quando a fatura é paga, por isso entram as faturas (pelo vencimento), nunca as compras. Recorrências ainda não lançadas não são projetadas. Assinatura no cartão: o comprometimento é o mês da cobrança; o caixa é o mês do vencimento da fatura que a receberá. Já lançada, ela está na fatura e no comprometido do cartão (nunca somada de novo).' }),
+        f.subscriptions.cardCharges.length
+          ? dataTable({
+            columns: [
+              { key: 'name', label: 'Assinatura no cartão (ainda não lançada)' },
+              { key: 'date', label: 'Cobrança (comprometimento)', render: (v) => formatDate(v) },
+              { key: 'referenceMonth', label: 'Fatura prevista', render: (v) => (v ? formatMonth(v) : '—') },
+              { key: 'dueDate', label: 'Vence (saída de caixa)', render: (v) => formatDate(v) },
+              { key: 'amountCents', label: 'Valor', numeric: true, render: (v) => formatCents(v) },
+            ],
+            rows: f.subscriptions.cardCharges.slice(0, 12),
+          })
+          : null,
+        el('p', { class: 'card__hint', text: `Assinaturas já lançadas nos cartões e ainda não quitadas: ${formatCents(f.subscriptions.launchedInCardsCents)} (já estão na fatura e no comprometido do cartão).` }),
+        ...f.subscriptions.duplicates.filter((d) => d.via === 'purchase').map((d) => el('p', { class: 'notice', role: 'status', text: `Assinatura "${d.name}" (${formatCents(d.amountCents)} em ${formatDate(d.date)}) ignorada na previsão: a compra já está lançada no cartão.` })),
+        ...f.subscriptions.duplicates.filter((d) => d.via === 'expense').map((d) => el('p', { class: 'notice', role: 'status', text: `Assinatura "${d.name}" (${formatCents(d.amountCents)}) ignorada na previsão: já existe como despesa no mês (evita contar duas vezes).` })),
       ]),
       el('section', { class: 'panel' }, [
         el('div', { class: 'panel__header' }, [el('h2', { text: 'Compromissos dos próximos meses' })]),
@@ -142,9 +156,10 @@ function draw(container, data, rerender) {
             columns: [
               { key: 'month', label: 'Mês', render: (v) => formatMonth(v) },
               { key: 'expensesCents', label: 'Despesas pendentes', numeric: true, render: (v) => formatCents(v) },
-              { key: 'invoicesCents', label: 'Faturas', numeric: true, render: (v) => formatCents(v) },
-              { key: 'subscriptionsCents', label: 'Assinaturas', numeric: true, render: (v) => formatCents(v) },
-              { key: 'commitmentsCents', label: 'Total', numeric: true, render: (v) => formatCents(v) },
+              { key: 'invoicesCents', label: 'Faturas (vencimento)', numeric: true, render: (v) => formatCents(v) },
+              { key: 'subscriptionsCents', label: 'Assinaturas (saída de caixa)', numeric: true, render: (v) => formatCents(v) },
+              { key: 'commitmentsCents', label: 'Total de saída de caixa', numeric: true, render: (v) => formatCents(v) },
+              { key: 'cardSubscriptionChargesCents', label: 'Cobranças no cartão (comprometimento)', numeric: true, render: (v) => formatCents(v) },
             ],
             rows: f.nextMonths,
           }),

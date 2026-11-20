@@ -23,7 +23,7 @@ let message = '';
 export async function render(target, ctx) {
   user = ctx.user;
   container = target;
-  toMonth = currentMonthKey(new Date());
+  toMonth = currentMonthKey();
   fromMonth = addMonths(toMonth, -5);
   await run();
 }

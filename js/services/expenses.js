@@ -3,6 +3,7 @@
  * Isolamento por usuário via users/{uid}/expenses.
  */
 import { COLLECTIONS, RECURRENCES } from '../utils/constants.js';
+import { todayInAppZone } from '../utils/dates.js';
 import {
   list,
   getById,
@@ -95,7 +96,7 @@ export async function deleteExpense(uid, expenseId, io = {}) {
 
 /** Marca despesa como paga (status -> paid + paidDate = hoje). */
 export async function markExpensePaid(uid, expenseId, paidDate = null, io = {}) {
-  const date = paidDate ?? new Date().toISOString().split('T')[0];
+  const date = paidDate ?? todayInAppZone();
   await updateAudited(uid, COLLECTION, expenseId, { status: 'paid', paidDate: date }, io, 'mark_paid');
   return { ok: true };
 }

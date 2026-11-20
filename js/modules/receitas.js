@@ -28,6 +28,7 @@ import { createPagerFooter } from '../components/pager-footer.js';
 import { listCategories, getCategoryKindOptions } from '../services/categories.js';
 import { listAccounts } from '../services/accounts.js';
 
+import { todayInAppZone, currentMonthKey } from '../utils/dates.js';
 export const meta = { title: 'Receitas', icon: 'trending-up' };
 
 let currentUser = null;
@@ -120,16 +121,13 @@ function renderPage(container) {
 
 /** Computa estatísticas rápidas do mês atual. */
 function computeStats() {
-  const now = new Date();
-  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+  const month = currentMonthKey(); // mês corrente no fuso America/Sao_Paulo
 
   let receivedThisMonth = 0;
   let pendingThisMonth = 0;
 
   for (const income of incomesCache) {
-    const expectedDate = new Date(income.expectedDate + 'T00:00:00');
-    const isThisMonth = expectedDate >= startOfMonth && expectedDate <= endOfMonth;
+    const isThisMonth = String(income.expectedDate).slice(0, 7) === month;
 
     if (income.status === 'received' && isThisMonth) {
       receivedThisMonth += Number(income.amountCents) || 0;
@@ -421,7 +419,7 @@ function openIncomeModal(income = null) {
           id: 'expectedDate',
           name: 'expectedDate',
           required: true,
-          value: income?.expectedDate ?? new Date().toISOString().split('T')[0],
+          value: income?.expectedDate ?? todayInAppZone(),
         }),
         el('span', { class: 'form__error', 'data-for': 'expectedDate' }),
       ]),

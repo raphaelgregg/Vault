@@ -29,6 +29,7 @@ import {
   listGoals, listGoalTransactions, listRecentGoalTransactions, transferableGoals, depositToGoal, withdrawFromGoal,
 } from '../services/goals.js';
 
+import { todayInAppZone, currentMonthKey } from '../utils/dates.js';
 export const meta = { title: 'Transferências', icon: 'arrow-left-right' };
 
 let currentUser = null;
@@ -155,16 +156,13 @@ function createGoalMovementsPanel() {
 
 /** Computa estatísticas rápidas do mês atual. */
 function computeStats() {
-  const now = new Date();
-  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+  const month = currentMonthKey(); // mês corrente no fuso America/Sao_Paulo
 
   let confirmedThisMonth = 0;
   let pendingCount = 0;
 
   for (const transfer of transfersCache) {
-    const date = new Date(transfer.date + 'T00:00:00');
-    const isThisMonth = date >= startOfMonth && date <= endOfMonth;
+    const isThisMonth = String(transfer.date).slice(0, 7) === month;
 
     if (transfer.status === 'confirmed' && isThisMonth) {
       confirmedThisMonth += Number(transfer.amountCents) || 0;
@@ -421,7 +419,7 @@ function openTransferModal(transfer = null) {
           id: 'date',
           name: 'date',
           required: true,
-          value: transfer?.date ?? new Date().toISOString().split('T')[0],
+          value: transfer?.date ?? todayInAppZone(),
         }),
         el('span', { class: 'form__error', 'data-for': 'date' }),
       ]),

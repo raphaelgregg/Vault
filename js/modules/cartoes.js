@@ -32,6 +32,7 @@ import { listOpenDebtors } from '../services/debtors.js';
 import { describeError } from '../utils/errors.js';
 import { invoiceTotalCents, debtorPendingCents, accountLabel as accountText } from '../core/model.js';
 
+import { todayInAppZone, currentMonthKey } from '../utils/dates.js';
 export const meta = { title: 'Cartões', icon: 'credit-card' };
 
 let user = null;
@@ -189,7 +190,7 @@ async function openPurchaseModal(card) {
         field('Valor total (R$) *', 'amountCents', el('input', { type: 'text', id: 'amountCents', name: 'amountCents', placeholder: '0,00', autocomplete: 'off' })),
         field('Parcelas *', 'installmentsTotal', el('input', { type: 'number', id: 'installmentsTotal', name: 'installmentsTotal', min: 1, max: 48, value: 1 })),
       ]),
-      field('Data da compra *', 'purchaseDate', el('input', { type: 'date', id: 'purchaseDate', name: 'purchaseDate', value: new Date().toISOString().slice(0, 10) })),
+      field('Data da compra *', 'purchaseDate', el('input', { type: 'date', id: 'purchaseDate', name: 'purchaseDate', value: todayInAppZone() })),
       field('Categoria', 'categoryId', el('select', { id: 'categoryId', name: 'categoryId' }, [el('option', { value: '' }, 'Sem categoria'), ...selectOptions(expenseCats, '')])),
       field('Devedor (opcional)', 'debtorId', el('select', { id: 'debtorId', name: 'debtorId' }, [
         el('option', { value: '' }, 'Compra minha (sem devedor)'),
@@ -233,7 +234,7 @@ async function openInvoicesModal(card, { showCancelled = false } = {}) {
     fields: [
       el('p', { class: 'card__hint', text: `Total ${formatCents(totalOf(inv))}. O valor sai do saldo da conta escolhida e o limite do cartão é liberado.${inv.status === 'open' ? ' A fatura aberta será fechada junto.' : ''}` }),
       field('Conta que paga *', 'accountId', el('select', { id: 'accountId', name: 'accountId' }, selectOptions(activeAccounts, '', { placeholder: 'Selecione uma conta' }))),
-      field('Data do pagamento *', 'date', el('input', { type: 'date', id: 'date', name: 'date', value: new Date().toISOString().slice(0, 10) })),
+      field('Data do pagamento *', 'date', el('input', { type: 'date', id: 'date', name: 'date', value: todayInAppZone() })),
     ],
     submit: (d) => payInvoice(user.uid, inv.id, { accountId: d.get('accountId'), date: d.get('date') }),
     onDone: async () => { toast('Fatura paga.'); await refreshModal(); },
@@ -248,7 +249,7 @@ async function openInvoicesModal(card, { showCancelled = false } = {}) {
     focusId: 'referenceMonth',
     fields: [
       el('p', { class: 'card__hint', text: 'Uma única parcela (1x) na fatura do mês escolhido. Faturas fechadas, pagas ou canceladas não são alteradas. Compras de devedores devem continuar lançadas uma a uma; informe o total do extrato para lançar só a diferença.' }),
-      field('Fatura (mês) *', 'referenceMonth', el('input', { type: 'month', id: 'referenceMonth', name: 'referenceMonth', value: new Date().toISOString().slice(0, 7) })),
+      field('Fatura (mês) *', 'referenceMonth', el('input', { type: 'month', id: 'referenceMonth', name: 'referenceMonth', value: currentMonthKey() })),
       field('Total da fatura no extrato (R$)', 'statementCents', el('input', { type: 'text', id: 'statementCents', name: 'statementCents', placeholder: '0,00 (opcional)', autocomplete: 'off' })),
       field('Valor a lançar (R$) *', 'amountCents', el('input', { type: 'text', id: 'amountCents', name: 'amountCents', placeholder: '0,00 (ignorado se o total do extrato for informado)', autocomplete: 'off' })),
       field('Descrição', 'description', el('input', { type: 'text', id: 'description', name: 'description', maxlength: 120, placeholder: 'Consolidado da fatura', autocomplete: 'off' })),

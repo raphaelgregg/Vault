@@ -31,8 +31,8 @@ try {
     const { auth } = await import('/js/firebase/client.js');
     const uid = auth.currentUser.uid;
     const card = await createCard(uid, { name: 'Cartão E2E', brand: 'Visa', limitCents: '5.000,00', closingDay: 28, dueDay: 5 });
-    const debtor = await createDebtor(uid, { name: 'Maria', lentCents: '1.000,00', loanDate: new Date().toISOString().slice(0, 10) });
-    const today = new Date().toISOString().slice(0, 10);
+    const debtor = await createDebtor(uid, { name: 'Maria', lentCents: '1.000,00', loanDate: new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date()) });
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
     const buy = await registerCardPurchase(uid, card.id, {
       description: 'Geladeira', amountCents: '300,00', installmentsTotal: 3, purchaseDate: today, debtorId: debtor.id,
     });

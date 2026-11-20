@@ -6,6 +6,7 @@
 import { el, $, $$, toast } from '../core/ui.js';
 import { openModal, closeModal } from './modal.js';
 import { describeError } from '../utils/errors.js';
+import { todayInAppZone } from '../utils/dates.js';
 
 export function field(label, id, control) {
   return el('div', { class: 'form__field' }, [
@@ -217,8 +218,8 @@ export function selectOptions(items, selectedValue, { placeholder } = {}) {
   ];
 }
 
-/** Hoje em "YYYY-MM-DD" UTC (mesma convenção das datas gravadas). */
-export const todayIso = () => new Date().toISOString().slice(0, 10);
+/** Hoje em "YYYY-MM-DD" no fuso America/Sao_Paulo (datas só-dia; ver utils/dates.js). */
+export const todayIso = () => todayInAppZone();
 
 /** replaceChildren ignorando nulos (replaceChildren(null) inseriria o texto "null"). */
 export function mount(container, ...nodes) {

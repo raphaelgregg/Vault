@@ -12,7 +12,7 @@ import {
   summarizeDebtors, formatCents, cardInvoicesSummary, allocateLinkedGoalBalances,
 } from '../core/model.js';
 import { loadDebtorStatements } from './debtors.js';
-import { monthBounds } from '../utils/dates.js';
+import { monthBounds, todayInAppZone } from '../utils/dates.js';
 import { loadBalances, READ_LIMIT } from './balances.js';
 import {
   monthResult,
@@ -26,9 +26,9 @@ import { loadMonthlyForecast } from './forecast.js';
 export { READ_LIMIT };
 const SHORT_LIMIT = 8;
 
-/** Mês "YYYY-MM" e data "YYYY-MM-DD" de hoje em UTC (mesma convenção das datas gravadas). */
+/** Mês "YYYY-MM" e data "YYYY-MM-DD" de hoje no fuso America/Sao_Paulo (as datas gravadas são só-dia). */
 export function todayParts(now = new Date()) {
-  const iso = now.toISOString().slice(0, 10);
+  const iso = todayInAppZone(now);
   return { today: iso, month: iso.slice(0, 7) };
 }
 

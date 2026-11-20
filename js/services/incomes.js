@@ -3,6 +3,7 @@
  * Isolamento por usuário via users/{uid}/incomes.
  */
 import { COLLECTIONS, RECURRENCES } from '../utils/constants.js';
+import { todayInAppZone } from '../utils/dates.js';
 import {
   list,
   getById,
@@ -95,7 +96,7 @@ export async function deleteIncome(uid, incomeId, io = {}) {
 
 /** Marca receita como recebida (status -> received + receivedDate = hoje). */
 export async function markIncomeReceived(uid, incomeId, receivedDate = null, io = {}) {
-  const date = receivedDate ?? new Date().toISOString().split('T')[0];
+  const date = receivedDate ?? todayInAppZone();
   await updateAudited(uid, COLLECTION, incomeId, { status: 'received', receivedDate: date }, io, 'mark_received');
   return { ok: true };
 }
