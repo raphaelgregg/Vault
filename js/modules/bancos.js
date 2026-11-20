@@ -11,6 +11,7 @@ import { createStatCard } from '../components/stat-card.js';
 import { formatCentsInput, clearErrors, showFormErrors as showErrors } from '../components/form-kit.js';
 import { accountLabel } from '../core/model.js';
 import { newOperationId } from '../services/financeApi.js';
+import { isPermissionDenied } from '../utils/reversalsAccess.js';
 import { loadBalances, READ_LIMIT } from '../services/balances.js';
 import {
   listAccounts,
@@ -31,6 +32,7 @@ export const meta = { title: 'Bancos', icon: 'landmark' };
 
 let currentUser = null;
 let accountsCache = [];
+let balanceError = null; // { kind: 'denied' | 'error', text } — por que o saldo atual está indisponível (nunca presumir "sem estornos")
 let showArchived = false; // contas arquivadas (arquivamento lógico) ficam ocultas por padrão
 /** Teto de contas listadas (VF-4-03); ao atingir, a página avisa. */
 const ACCOUNT_LIST_LIMIT = 200;
@@ -58,14 +60,38 @@ async function loadData() {
 async function calculateBalances({ silent = false } = {}) {
   try {
     derived = await loadBalances(currentUser.uid, accountsCache);
+    balanceError = null;
   } catch (error) {
     console.error('[bancos] falha ao calcular saldos', error);
-    derived = null;
-    if (!silent) toast('Não foi possível calcular o saldo atual.', 5000);
+    derived = null; // NUNCA manter o saldo anterior nem calcular com leitura incompleta (estornos podem alterá-lo)
+    balanceError = describeBalanceError(error);
+    if (!silent) {
+      toast(balanceError.toast, 6000);
+      renderPage($('.content') || document.getElementById('page-content')); // redesenha: o saldo exibido antes NÃO pode permanecer na tela
+    }
     return;
   }
   if (!silent) renderPage($('.content') || document.getElementById('page-content'));
   if (derived.truncated.length) toast('Leitura limitada: o saldo pode estar incompleto.', 6000);
+}
+
+/**
+ * Por que o saldo atual não pôde ser determinado. Leitura negada (Rules publicadas sem a coleção de estornos) e erro de
+ * conexão são estados DISTINTOS e explícitos; nenhum deles vira "zero" nem "sem estornos".
+ */
+function describeBalanceError(error) {
+  if (isPermissionDenied(error) || error?.code === 'reversals-unavailable') {
+    return {
+      kind: 'denied',
+      toast: 'Saldo atual indisponível: leitura de movimentações/estornos negada.',
+      text: 'Saldo atual indisponível: a leitura das movimentações (incluindo estornos) foi negada pelas regras de acesso publicadas. Nenhum saldo é exibido porque não é possível saber se há estornos que o alteram.',
+    };
+  }
+  return {
+    kind: 'error',
+    toast: 'Saldo atual indisponível: erro ao ler as movimentações.',
+    text: 'Saldo atual indisponível: erro de conexão ou indisponibilidade ao ler as movimentações (incluindo estornos). Nenhum saldo é exibido até a leitura completa. Tente novamente.',
+  };
 }
 
 /** Renderiza a página completa. */
@@ -97,9 +123,9 @@ function renderPage(container) {
   ]);
 
   const cards = el('div', { class: 'grid grid--cards' }, [
-    createStatCard('Saldo total', formatCents(stats.totalBalance), 'wallet', 'income', derived
+    createStatCard('Saldo total', stats.totalBalance === null ? '—' : formatCents(stats.totalBalance), 'wallet', 'income', derived
       ? 'Saldo atual derivado das movimentações (contas ativas)'
-      : 'Saldo atual indisponível: exibindo a soma dos saldos de abertura. Use "Calcular saldo atual".'),
+      : (balanceError ? 'Saldo atual indisponível (veja o aviso abaixo)' : 'Saldo atual ainda não calculado. Use "Calcular saldo atual".')),
     createStatCard('Contas ativas', String(stats.activeCount), 'landmark', null, 'Contas com status "ativo"'),
   ]);
 
@@ -107,6 +133,12 @@ function renderPage(container) {
 
   const limitNotice = accountsCache.length >= ACCOUNT_LIST_LIMIT
     ? el('p', { class: 'notice', role: 'status', text: `Exibindo as primeiras ${ACCOUNT_LIST_LIMIT} contas (limite de leitura).` })
+    : null;
+  const balanceErrorNotice = !derived && balanceError
+    ? el('div', { class: 'notice', role: 'alert', id: 'balance-unavailable', 'data-kind': balanceError.kind }, [
+      el('span', { text: balanceError.text }),
+      el('button', { type: 'button', class: 'btn btn--secondary', id: 'retry-balances', onClick: calculateBalances, text: 'Tentar novamente' }),
+    ])
     : null;
   const orphanNotice = derived?.orphans?.count
     ? el('p', { class: 'notice', role: 'status', text: `${derived.orphans.count} movimentação(ões) apontam para uma conta que não existe mais e ficam fora de qualquer saldo (${Object.entries(derived.orphans.byCollection).map(([k, n]) => `${k}: ${n}`).join(', ')}). Revise-as ou recrie a conta.` })
@@ -119,6 +151,7 @@ function renderPage(container) {
     header,
     cards,
     limitNotice,
+    balanceErrorNotice,
     balanceNotice,
     orphanNotice,
     el('section', { class: 'panel' }, [
@@ -142,10 +175,8 @@ function renderPage(container) {
 /** Computa estatísticas rápidas. */
 function computeStats() {
   const activeAccounts = accountsCache.filter((a) => a.status === 'active');
-  // Saldo total: derivado quando calculado sob demanda; senão, soma dos saldos iniciais.
-  const totalBalance = activeAccounts.reduce((sum, acc) => sum + (derived
-    ? (derived.balances.get(acc.id) ?? 0)
-    : (Number(acc.initialBalanceCents) || 0)), 0);
+  // Saldo total: SÓ o derivado das movimentações (com estornos). Sem ele, indisponível (null) — nunca a soma dos saldos de abertura.
+  const totalBalance = derived ? activeAccounts.reduce((sum, acc) => sum + (derived.balances.get(acc.id) ?? 0), 0) : null;
   return { totalBalance, activeCount: activeAccounts.length };
 }
 

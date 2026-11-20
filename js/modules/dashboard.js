@@ -54,6 +54,14 @@ function draw(container, data, rerender) {
     ? el('p', { class: 'notice', role: 'alert', text: `Não foi possível carregar: ${data.failed.map((k) => SOURCE_LABELS[k] ?? k).join(', ')}. Os demais indicadores continuam válidos; recarregue para tentar de novo.` })
     : null;
   const unavailable = 'Indisponível nesta carga';
+  // Saldo/resultado dependem das movimentações E dos estornos: sem a leitura completa NENHUM saldo é exibido (já "—"); aqui o motivo
+  // explícito e uma nova tentativa. O motivo exato (negado × conexão) é apurado pelo serviço, que registra no console.
+  const balanceUnavailableNotice = data.failed.includes('movements')
+    ? el('div', { class: 'notice', role: 'alert', id: 'dashboard-balance-unavailable' }, [
+      el('span', { text: 'Saldo, resultado e previsão indisponíveis: não foi possível ler as movimentações e estornos (leitura negada pelas regras publicadas ou erro de conexão). Nenhum saldo é exibido porque não é possível saber se há estornos que o alteram. ' }),
+      el('button', { type: 'button', class: 'btn btn--secondary', id: 'retry-dashboard', onClick: rerender, text: 'Tentar novamente' }),
+    ])
+    : null;
 
   const monthInput = el('input', {
     type: 'month', id: 'dashboard-month', value: data.month, 'aria-label': 'Mês dos indicadores',
@@ -185,6 +193,6 @@ function draw(container, data, rerender) {
     ]),
   ]);
 
-  mount(container, header, monthBar, failedNotice, notice, balanceSection, ...[].concat(forecastSection), monthSection, cardSection, debtorSection, note, upcoming);
+  mount(container, header, monthBar, failedNotice, balanceUnavailableNotice, notice, balanceSection, ...[].concat(forecastSection), monthSection, cardSection, debtorSection, note, upcoming);
   refreshIcons();
 }
