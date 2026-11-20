@@ -196,7 +196,7 @@ try {
   const afterOne = await snapshot();
   assert.equal(afterOne.bal, base0.bal + 2500);
   assert.equal(afterOne.debtor.receivedCents, 2500);
-  assert.deepEqual(afterOne.payments.map((p) => [p.id, !!p.purchaseId, !!p.debtId, p.amountCents]), [[`pay-${afterOne.payments[0].purchaseId}-1`, true, false, 2500]]);
+  assert.deepEqual(afterOne.payments.map((p) => [!!p.id, !!p.purchaseId, !!p.debtId, p.amountCents]), [[true, true, false, 2500]]); // VF-ARQ-02: o ID do recebimento é do servidor (sem convenção)
   assert.equal(base0.receivable - afterOne.receivable, 2500); // a receber do mês (dashboard/previsão) caiu
   // — quitar TODAS as pendentes do mês, com confirmação
   await page.getByRole('button', { name: 'Quitar todas as parcelas pendentes deste mês' }).click();
@@ -214,7 +214,7 @@ try {
   assert.equal(afterMonth.debtor.receivedCents, 18100);
   assert.equal(afterMonth.payments.length, 4); // histórico: 1 individual + 3 do lote, sem duplicar a Água
   assert.equal(new Set(afterMonth.payments.map((p) => p.id)).size, 4);
-  assert.ok(afterMonth.payments.every((p) => p.id.startsWith('pay-') && p.accountId === base0.accId));
+  assert.ok(afterMonth.payments.every((p) => p.id && p.accountId === base0.accId));
   assert.equal(afterMonth.payments.filter((p) => p.debtId).length, 1);
   assert.deepEqual(afterMonth.debts.map((d) => [d.n, d.status]).sort(), [[1, 'paid'], [2, 'pending']]); // a parcela do OUTRO mês não mudou
   assert.equal(base0.receivable - afterMonth.receivable, 18100);
@@ -287,18 +287,17 @@ try {
   await page.waitForFunction(() => /✓ Paga/.test(document.querySelector('.modal')?.innerText ?? ''));
   // 5–7) dois recebimentos independentes, total 100,00 e saldo +100,00 exatamente
   const p2 = await state();
-  const sofa = p2.payments.filter((p) => /^pay-.+-[12]$/.test(p.id));
+  const sofa = p2.payments.filter((p) => p.purchaseId);
   assert.equal(p2.payments.length, 2);
   assert.deepEqual(p2.payments.map((p) => p.amountCents).sort((a, b) => a - b), [4000, 6000]);
   assert.equal(new Set(p2.payments.map((p) => p.id)).size, 2);
-  assert.deepEqual(p2.payments.map((p) => p.id.replace(/^.*-/, '')).sort(), ['1', '2']); // pay-<parcela>-1 e -2
   assert.ok(sofa.every((p) => p.purchaseId));
   assert.equal(p2.debtor.receivedCents, 10000);
   assert.equal(p2.bal - p0.bal, 10000);
   // nada de receber acima do restante: a parcela paga não tem mais ação
   assert.equal(await page.getByRole('button', { name: 'Quitar parcela 1 de Sofá' }).count(), 0);
   await page.keyboard.press('Escape');
-  // tentativa SIMULTÂNEA (Rules reais do emulador): dois recebimentos de R$ 60,00 sobre a parcela "Cadeira" de R$ 100,00
+  // tentativa SIMULTÂNEA (transação do servidor): dois recebimentos de R$ 60,00 sobre a parcela "Cadeira" de R$ 100,00
   const race = await page.evaluate(async ([debtorId, accId]) => {
     const { settleInstallment } = await import('/js/services/debtPayments.js');
     const { list } = await import('/js/services/firestore.js');
