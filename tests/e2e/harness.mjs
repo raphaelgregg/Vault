@@ -7,11 +7,10 @@
  * diferir da fixada no import map (a chave `integrity` é removida SÓ neste harness).
  * Execução: `npm run test:e2e` (sobe Auth+Firestore e roda os cenários).
  */
-import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { dirname, extname, join, normalize } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -22,24 +21,21 @@ export function loadPlaywright() {
   try { return require('playwright'); } catch { return null; }
 }
 
-export function startStatic(port = 5599) {
-  const server = createServer(async (req, res) => {
-    const path = normalize(decodeURIComponent(new URL(req.url, 'http://x').pathname));
-    const file = join(root, path === '/' || path === '\\' ? 'index.html' : path);
-    if (!file.startsWith(root) || !existsSync(file)) { res.writeHead(404).end('not found'); return; }
-    res.writeHead(200, { 'content-type': TYPES[extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-store' });
-    res.end(await readFile(file));
-  });
-  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({
-    base: `http://localhost:${port}`,
-    close: () => new Promise((done) => server.close(done)),
-  })));
+/**
+ * Servidor estático + `POST /api/finance` (mesmo handler da Vercel, Admin SDK contra os emuladores). Os tokens dos usuários
+ * criados pela UI vêm do Auth Emulator e são verificados de verdade pelo servidor.
+ */
+export async function startStatic(port = 5599) {
+  process.env.FIREBASE_PROJECT_ID ??= 'demo-vault-finance';
+  process.env.GCLOUD_PROJECT ??= 'demo-vault-finance';
+  const { startServer } = await import('../../scripts/dev-server.mjs');
+  return startServer({ port });
 }
 
 /** Contexto de navegador com SDK local, sem SRI e sem lucide (CDNs bloqueadas no ambiente). */
 export async function newContext(browser) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
-  await context.route('https://www.gstatic.com/firebasejs/**', async (route) => {
+  await context.route(`https://www.gstatic.com/firebasejs/${'**'}`, async (route) => {
     const name = route.request().url().split('/').pop();
     const file = join(root, 'node_modules', 'firebase', name);
     if (!existsSync(file)) { await route.fulfill({ status: 404, body: 'missing' }); return; }

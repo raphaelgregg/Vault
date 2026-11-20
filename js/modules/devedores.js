@@ -9,6 +9,8 @@ import {
   createDebtor,
   updateDebtor,
   deleteDebtor,
+  archiveDebtor,
+  unarchiveDebtor,
   cancelDebtor,
   reopenDebtor,
   getDebtorStatusOptions,
@@ -26,6 +28,7 @@ export const meta = { title: 'Devedores', icon: 'users' };
 
 let currentUser = null;
 let container = null;
+let showArchived = false;
 let debtorsCache = [];
 let statements = new Map(); // fechamento do mês por devedor (VF-2-03j)
 let statementsFailed = false;
@@ -102,6 +105,10 @@ function renderPage() {
     el('div', { class: 'panel__header' }, [
       el('h2', { text: 'Devedores cadastrados' }),
       el('div', { class: 'topbar__spacer' }),
+      el('label', { class: 'form__check' }, [
+        el('input', { type: 'checkbox', id: 'show-archived-debtors', ...(showArchived ? { checked: 'checked' } : {}), onChange: (e) => { showArchived = e.target.checked; renderPage(); } }),
+        el('span', { text: ' Mostrar arquivados' }),
+      ]),
       el('span', { class: 'badge', text: `${count} registro${count !== 1 ? 's' : ''}` }),
     ]),
     el('div', { class: 'panel__body panel__body--flush' }, [createTableOrEmpty()]),
@@ -123,7 +130,8 @@ function statCard(label, value, icon, hint) {
 }
 
 function createTableOrEmpty() {
-  if (!debtorsCache.length) {
+  const shown = showArchived ? debtorsCache : debtorsCache.filter((d) => !d.archived);
+  if (!shown.length) {
     return el('div', { class: 'empty' }, [
       el('div', { class: 'empty__icon' }, [el('i', { 'data-lucide': 'users', 'aria-hidden': 'true' })]),
       el('p', { class: 'empty__title', text: 'Nenhum devedor cadastrado' }),
@@ -141,7 +149,7 @@ function createTableOrEmpty() {
       key: 'monthDue', label: `A receber em ${formatMonth(month)}`, numeric: true, strong: true,
       render: (_, item) => (statementsFailed || item.status !== 'open' ? '—' : formatCents(statements.get(item.id)?.totalCents ?? 0)),
     },
-    { key: 'status', label: 'Status', render: (v) => optionLabel(getDebtorStatusOptions(), v) },
+    { key: 'status', label: 'Status', render: (v, item) => `${optionLabel(getDebtorStatusOptions(), v)}${item?.archived ? ' · arquivado' : ''}` },
   ];
 
   return el('div', { class: 'table-wrap' }, [
@@ -152,7 +160,7 @@ function createTableOrEmpty() {
           el('th', { text: 'Ações' }),
         ]),
       ]),
-      el('tbody', {}, debtorsCache.map((item) =>
+      el('tbody', {}, shown.map((item) =>
         el('tr', {}, [
           ...columns.map((c) => {
             const text = c.render ? c.render(item[c.key], item) : (item[c.key] ?? '—');
@@ -190,6 +198,9 @@ function createActions(item) {
   if (item.status === 'cancelled') {
     actions.push(iconButton(`Reabrir ${item.name}`, 'rotate-ccw', () => changeStatus(item, reopenDebtor, 'Devedor reaberto.'), 'btn--success'));
   }
+  // Arquivamento LÓGICO (VF-ARQ-02): preserva dívidas e recebimentos; só devedor quitado/cancelado.
+  if (item.archived) actions.push(iconButton(`Desarquivar ${item.name}`, 'archive-restore', () => changeStatus(item, unarchiveDebtor, 'Devedor desarquivado.'), 'btn--success'));
+  else if (item.status !== 'open') actions.push(iconButton(`Arquivar ${item.name}`, 'archive', () => changeStatus(item, archiveDebtor, 'Devedor arquivado: o histórico foi preservado.')));
   actions.push(iconButton(`Excluir ${item.name}`, 'trash-2', () => confirmDelete(item), 'btn--danger'));
   return actions;
 }

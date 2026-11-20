@@ -29,6 +29,8 @@ import { listCategories, getCategoryKindOptions } from '../services/categories.j
 import { listAccounts } from '../services/accounts.js';
 
 import { todayInAppZone, currentMonthKey } from '../utils/dates.js';
+import { newOperationId } from '../services/financeApi.js';
+import { openReversalModal } from '../components/reversal-modal.js';
 export const meta = { title: 'Receitas', icon: 'trending-up' };
 
 let currentUser = null;
@@ -318,6 +320,25 @@ function createIncomeActions(income) {
     );
   }
 
+  // VF-ARQ-02: receita RECEBIDA é imutável (saldo/histórico): só estorno compensatório pelo servidor.
+  if (income.status === 'received') {
+    actions.push(
+      el('button', {
+        type: 'button',
+        class: 'btn btn--icon btn--danger',
+        'aria-label': `Estornar ${income.description}`,
+        title: 'Estornar (lançamento compensatório)',
+        onClick: () => openReversalModal({
+          user: currentUser, kind: 'income', targetId: income.id, amountCents: Number(income.amountCents) || 0,
+          summary: `${income.description} — ${formatCents(Number(income.amountCents) || 0)} (${accountLabelOf(income.accountId)})`,
+          onDone: async () => { await loadData(); renderPage($('.content') || document.getElementById('page-content')); },
+        }),
+        html: '<i data-lucide="undo-2" aria-hidden="true"></i>',
+      })
+    );
+    return actions;
+  }
+
   actions.push(
     el('button', {
       type: 'button',
@@ -328,18 +349,15 @@ function createIncomeActions(income) {
     })
   );
 
-  // Excluir também receitas recebidas (VF-2-03o): o saldo é derivado, então o valor sai da conta (confirmação explica).
-  {
-    actions.push(
-      el('button', {
-        type: 'button',
-        class: 'btn btn--icon btn--danger',
-        'aria-label': `Excluir ${income.description}`,
-        onClick: () => confirmDeleteIncome(income),
-        html: '<i data-lucide="trash-2" aria-hidden="true"></i>',
-      })
-    );
-  }
+  actions.push(
+    el('button', {
+      type: 'button',
+      class: 'btn btn--icon btn--danger',
+      'aria-label': `Excluir ${income.description}`,
+      onClick: () => confirmDeleteIncome(income),
+      html: '<i data-lucide="trash-2" aria-hidden="true"></i>',
+    })
+  );
 
   return actions;
 }
@@ -347,6 +365,7 @@ function createIncomeActions(income) {
 /** Abre modal para criar/editar receita. */
 function openIncomeModal(income = null) {
   const isEdit = !!income;
+  const operationId = newOperationId(); // idempotência da criação: duplo clique/retry desta abertura não duplica
   const recurrences = getRecurrenceOptions();
   const statuses = getIncomeStatusOptions();
   const incomeCategories = categoriesCache.filter((c) => c.kind === 'income' || c.kind === 'both');
@@ -509,7 +528,7 @@ function openIncomeModal(income = null) {
     clearErrors(form);
     const result = isEdit
       ? await updateIncome(currentUser.uid, income.id, rawData)
-      : await createIncome(currentUser.uid, rawData);
+      : await createIncome(currentUser.uid, { ...rawData, operationId });
 
     if (result.ok) {
       toast(isEdit ? 'Receita atualizada com sucesso.' : 'Receita criada com sucesso.');

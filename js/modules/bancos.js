@@ -10,12 +10,15 @@ import { openModal, closeModal } from '../components/modal.js';
 import { createStatCard } from '../components/stat-card.js';
 import { formatCentsInput, clearErrors, showFormErrors as showErrors } from '../components/form-kit.js';
 import { accountLabel } from '../core/model.js';
+import { newOperationId } from '../services/financeApi.js';
 import { loadBalances, READ_LIMIT } from '../services/balances.js';
 import {
   listAccounts,
   createAccount,
   updateAccount,
   deleteAccount,
+  archiveAccount,
+  unarchiveAccount,
   getAccountTypeOptions,
   getStatusOptions,
   adjustOpeningBalance,
@@ -28,6 +31,7 @@ export const meta = { title: 'Bancos', icon: 'landmark' };
 
 let currentUser = null;
 let accountsCache = [];
+let showArchived = false; // contas arquivadas (arquivamento lógico) ficam ocultas por padrão
 /** Teto de contas listadas (VF-4-03); ao atingir, a página avisa. */
 const ACCOUNT_LIST_LIMIT = 200;
 /** Saldos derivados, calculados SOB DEMANDA (lê movimentos; poupa a cota de leituras): null = não calculado. */
@@ -121,6 +125,10 @@ function renderPage(container) {
       el('div', { class: 'panel__header' }, [
         el('h2', { text: 'Contas cadastradas' }),
         el('div', { class: 'topbar__spacer' }),
+        el('label', { class: 'form__check' }, [
+          el('input', { type: 'checkbox', id: 'show-archived-accounts', ...(showArchived ? { checked: 'checked' } : {}), onChange: (e) => { showArchived = e.target.checked; renderPage($('.content') || document.getElementById('page-content')); } }),
+          el('span', { text: ' Mostrar arquivadas' }),
+        ]),
         el('span', { class: 'badge', text: `${accountsCache.length} registro${accountsCache.length !== 1 ? 's' : ''}` }),
       ]),
       el('div', { class: 'panel__body panel__body--flush' }, [table]),
@@ -171,7 +179,8 @@ function createAccountsTable() {
     el('th', { text: 'Ações' }),
   ]);
 
-  const bodyWithActions = accountsCache.map((account) =>
+  const shownAccounts = showArchived ? accountsCache : accountsCache.filter((a) => a.status !== 'archived');
+  const bodyWithActions = shownAccounts.map((account) =>
     el('tr', {}, [
       ...columns.map((column) => {
         const value = account[column.key];
@@ -199,6 +208,14 @@ function createAccountsTable() {
         }),
         el('button', {
           type: 'button',
+          class: 'btn btn--icon',
+          'aria-label': `${account.status === 'archived' ? 'Desarquivar' : 'Arquivar'} ${account.name || account.institution}`,
+          title: account.status === 'archived' ? 'Desarquivar (volta a receber lançamentos)' : 'Arquivar (preserva o histórico; deixa de receber lançamentos)',
+          onClick: () => toggleArchive(account),
+          html: `<i data-lucide="${account.status === 'archived' ? 'archive-restore' : 'archive'}" aria-hidden="true"></i>`,
+        }),
+        el('button', {
+          type: 'button',
           class: 'btn btn--icon btn--danger',
           'aria-label': `Excluir ${account.name || account.institution}`,
           onClick: () => confirmDeleteAccount(account),
@@ -221,6 +238,7 @@ function createAccountsTable() {
  * lançamentos valem; mostra o antes/depois e só grava `initialBalanceCents` (e `openingDate`) após confirmar.
  */
 function openAdjustModal(account) {
+  const operationId = newOperationId(); // idempotência do ajuste: duplo clique/retry desta abertura não ajusta duas vezes
   const current = derived?.balances.get(account.id) ?? 0;
   const preview = el('p', { class: 'card__hint', role: 'status' });
   const form = el('form', { id: 'adjust-form', novalidate: true }, [
@@ -261,7 +279,7 @@ function openAdjustModal(account) {
   async function handleAdjust(event) {
     event.preventDefault();
     clearErrors(form);
-    const result = await adjustOpeningBalance(currentUser.uid, account.id, realInput.value, { openingDate: dateInput.value || null });
+    const result = await adjustOpeningBalance(currentUser.uid, account.id, realInput.value, { openingDate: dateInput.value || null, operationId });
     if (result.ok) {
       toast(`Saldo de abertura ajustado para ${formatCents(result.newInitialCents)}.`);
       closeModal();
@@ -343,13 +361,16 @@ function openAccountModal(account = null) {
           value: account?.initialBalanceCents ? formatCentsInput(account.initialBalanceCents) : '',
           placeholder: '0,00',
           autocomplete: 'off',
+          ...(isEdit ? { readonly: 'readonly', 'aria-describedby': 'initialBalanceHint' } : {}),
         }),
-        el('span', { class: 'card__hint', text: 'Dinheiro que a conta já tinha quando você começou a usar o Vault. O saldo atual soma as movimentações a este valor.' }),
+        el('span', { class: 'card__hint', id: 'initialBalanceHint', text: isEdit
+          ? 'O saldo de abertura não é editado aqui: use "Ajustar saldo" (ajuste auditado, feito pelo servidor).'
+          : 'Dinheiro que a conta já tinha quando você começou a usar o Vault. O saldo atual soma as movimentações a este valor.' }),
         el('span', { class: 'form__error', 'data-for': 'initialBalanceCents' }),
       ]),
       el('div', { class: 'form__field' }, [
         el('label', { for: 'openingDate', text: 'Data de abertura' }),
-        el('input', { type: 'date', id: 'openingDate', name: 'openingDate', value: account?.openingDate ?? '' }),
+        el('input', { type: 'date', id: 'openingDate', name: 'openingDate', value: account?.openingDate ?? '', ...(isEdit ? { readonly: 'readonly' } : {}) }),
         el('span', { class: 'card__hint', text: 'Opcional. Com data, só movimentações a partir dela entram no saldo; vazio = todas.' }),
         el('span', { class: 'form__error', 'data-for': 'openingDate' }),
       ]),
@@ -431,6 +452,18 @@ function openAccountModal(account = null) {
 
   form.addEventListener('submit', handleSubmit);
   $('#institution', form).focus();
+}
+
+/** Arquivamento LÓGICO (servidor): nenhuma exclusão física; o histórico segue consultável. */
+async function toggleArchive(account) {
+  const result = account.status === 'archived' ? await unarchiveAccount(currentUser.uid, account.id) : await archiveAccount(currentUser.uid, account.id);
+  if (result.ok) {
+    toast(account.status === 'archived' ? 'Conta desarquivada.' : 'Conta arquivada: o histórico foi preservado.');
+    await loadData();
+    renderPage($('.content') || document.getElementById('page-content'));
+  } else {
+    toast(result.errors?._form ?? 'Não foi possível alterar o arquivamento.', 5000);
+  }
 }
 
 /** Confirma exclusão de conta. */

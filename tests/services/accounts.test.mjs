@@ -237,3 +237,39 @@ describe('accounts service — saldo de abertura só pelo servidor (VF-ARQ-02)',
     assert.deepEqual(ops, []);
   });
 });
+
+describe('accounts service — arquivamento lógico pelo servidor (VF-ARQ-02)', () => {
+  const uid = 'u1';
+  const form = { institution: 'Nubank', name: 'Corrente', type: 'checking', initialBalanceCents: '10,00', color: '#000000' };
+  const make = (storedStatus) => {
+    const ops = [];
+    const updates = [];
+    const io = {
+      getById: async () => ({ id: 'a1', status: storedStatus, initialBalanceCents: 1000 }),
+      update: async (_u, _c, _id, d) => { updates.push(d); },
+      writeAudit: async () => {},
+      finance: async (op) => { ops.push(op); return { ok: true }; },
+    };
+    return { io, ops, updates };
+  };
+
+  it('editar para "arquivada" chama account.archive e NUNCA grava status archived direto', async () => {
+    const { io, ops, updates } = make('active');
+    assert.equal((await updateAccount(uid, 'a1', { ...form, status: 'archived' }, io)).ok, true);
+    assert.deepEqual(ops, ['account.archive']);
+    assert.ok(updates.every((d) => d.status !== 'archived'));
+  });
+
+  it('reativar uma arquivada chama account.unarchive', async () => {
+    const { io, ops } = make('archived');
+    assert.equal((await updateAccount(uid, 'a1', { ...form, status: 'active' }, io)).ok, true);
+    assert.deepEqual(ops, ['account.unarchive']);
+  });
+
+  it('ativa ⇄ inativa continua direto (sem efeito no histórico) e sem chamar o servidor', async () => {
+    const { io, ops, updates } = make('active');
+    assert.equal((await updateAccount(uid, 'a1', { ...form, status: 'inactive' }, io)).ok, true);
+    assert.deepEqual(ops, []);
+    assert.ok(updates.some((d) => d.status === 'inactive'));
+  });
+});

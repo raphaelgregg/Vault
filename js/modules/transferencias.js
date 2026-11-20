@@ -30,6 +30,9 @@ import {
 } from '../services/goals.js';
 
 import { todayInAppZone, currentMonthKey } from '../utils/dates.js';
+import { newOperationId } from '../services/financeApi.js';
+import { openReversalModal } from '../components/reversal-modal.js';
+import { listReversals } from '../services/reversals.js';
 export const meta = { title: 'Transferências', icon: 'arrow-left-right' };
 
 let currentUser = null;
@@ -40,6 +43,7 @@ let goalsCache = [];
 let goalSaved = new Map(); // goalId → centavos guardados (aportes − resgates)
 let goalTxCounts = new Map();
 let recentGoalTxs = [];
+let reversedGoalTxIds = new Set(); // movimentos de meta já estornados (VF-ARQ-02)
 let currentTransferEdit = null;
 const GOAL_PREFIX = 'goal:'; // valor das opções de meta nos selects (contas usam o próprio id)
 let currentFilter = { status: 'all', month: null };
@@ -64,6 +68,8 @@ async function loadData() {
     listRecentGoalTransactions(currentUser.uid, 20),
   ]);
   transfersCache = pager.items;
+  const reversals = await listReversals(currentUser.uid, { limit: 500 }).catch(() => []);
+  reversedGoalTxIds = new Set(reversals.filter((r) => r.targetCollection === 'goalTransactions').map((r) => r.targetId));
   const txs = await Promise.all(goalsCache.map(async (g) => [g.id, await listGoalTransactions(currentUser.uid, g.id)]));
   goalSaved = new Map(txs.map(([id, rows]) => [id, goalSavedCents(rows)]));
   goalTxCounts = new Map(txs.map(([id, rows]) => [id, rows.length]));
@@ -134,13 +140,24 @@ function renderPage(container) {
 /** Histórico recente de aportes (conta → meta) e resgates (meta → conta). */
 function createGoalMovementsPanel() {
   if (!recentGoalTxs.length) return null;
-  const head = el('tr', {}, ['Data', 'Movimento', 'Meta', 'Conta', 'Valor'].map((t, i) => el('th', { class: i === 4 ? 'num' : '', text: t })));
+  const head = el('tr', {}, ['Data', 'Movimento', 'Meta', 'Conta', 'Valor', 'Situação'].map((t, i) => el('th', { class: i === 4 ? 'num' : '', text: t })));
   const body = recentGoalTxs.map((t) => el('tr', {}, [
     el('td', { text: formatDate(t.date) }),
     el('td', { text: t.type === 'deposit' ? 'Aporte (conta → meta)' : 'Resgate (meta → conta)' }),
     el('td', { text: goalName(t.goalId) }),
     el('td', { text: getAccountLabel(t.accountId) }),
     el('td', { class: 'num', text: formatCents(Number(t.amountCents) || 0) }),
+    el('td', {}, reversedGoalTxIds.has(t.id)
+      ? [el('span', { class: 'badge', text: 'Estornado' })]
+      : [el('button', {
+        type: 'button', class: 'btn btn--icon btn--danger', 'aria-label': 'Estornar movimentação da meta', title: 'Estornar (lançamento compensatório)',
+        onClick: () => openReversalModal({
+          user: currentUser, kind: 'goalTransaction', targetId: t.id, amountCents: Number(t.amountCents) || 0,
+          summary: `${t.type === 'deposit' ? 'Aporte' : 'Resgate'} — ${goalName(t.goalId)} — ${formatCents(Number(t.amountCents) || 0)}`,
+          onDone: async () => { await loadData(); renderPage($('.content') || document.getElementById('page-content')); },
+        }),
+        html: '<i data-lucide="undo-2" aria-hidden="true"></i>',
+      })]),
   ]));
   return el('section', { class: 'panel' }, [
     el('div', { class: 'panel__header' }, [
@@ -331,6 +348,25 @@ function createTransferActions(transfer) {
     );
   }
 
+  // VF-ARQ-02: transferência CONFIRMADA é imutável (move dinheiro): só estorno compensatório pelo servidor.
+  if (transfer.status === 'confirmed') {
+    actions.push(
+      el('button', {
+        type: 'button',
+        class: 'btn btn--icon btn--danger',
+        'aria-label': 'Estornar transferência',
+        title: 'Estornar (lançamento compensatório)',
+        onClick: () => openReversalModal({
+          user: currentUser, kind: 'transfer', targetId: transfer.id, amountCents: Number(transfer.amountCents) || 0,
+          summary: `${getAccountLabel(transfer.fromAccountId)} → ${getAccountLabel(transfer.toAccountId)} — ${formatCents(Number(transfer.amountCents) || 0)}`,
+          onDone: async () => { await loadData(); renderPage($('.content') || document.getElementById('page-content')); },
+        }),
+        html: '<i data-lucide="undo-2" aria-hidden="true"></i>',
+      })
+    );
+    return actions;
+  }
+
   actions.push(
     el('button', {
       type: 'button',
@@ -357,6 +393,7 @@ function createTransferActions(transfer) {
 /** Abre modal para criar/editar transferência. */
 function openTransferModal(transfer = null) {
   const isEdit = !!transfer;
+  const operationId = newOperationId(); // idempotência da criação: duplo clique/retry desta abertura não duplica
   currentTransferEdit = transfer;
   const statuses = getTransferStatusOptions();
   const activeAccounts = accountsCache.filter((a) => a.status === 'active');
@@ -523,7 +560,7 @@ function openTransferModal(transfer = null) {
     };
 
     clearErrors(form);
-    const result = await submitTransfer(rawData);
+    const result = await submitTransfer(isEdit ? rawData : { ...rawData, operationId });
 
     if (result.ok) {
       toast(result.goalMovement === 'deposit' ? 'Aporte na meta registrado — saldo da conta atualizado.'
@@ -551,16 +588,16 @@ function openTransferModal(transfer = null) {
 async function submitTransfer(rawData) {
   const isGoal = (v) => String(v ?? '').startsWith(GOAL_PREFIX);
   const goalId = (v) => String(v).slice(GOAL_PREFIX.length);
-  const { fromAccountId: from, toAccountId: to } = rawData;
+  const { fromAccountId: from, toAccountId: to, operationId } = rawData;
   if (!isGoal(from) && !isGoal(to)) {
     return currentTransferEdit
       ? updateTransfer(currentUser.uid, currentTransferEdit.id, rawData)
-      : createTransfer(currentUser.uid, rawData);
+      : createTransfer(currentUser.uid, rawData); // rawData.operationId = chave de idempotência da intenção
   }
   if (currentTransferEdit) return { ok: false, errors: { _form: 'Aportes e resgates de metas não podem ser editados; exclua-os pela meta ou registre outro.' } };
   if (isGoal(from) && isGoal(to)) return { ok: false, errors: { toAccountId: 'Não há transferência entre metas: resgate para uma conta primeiro.' } };
   const notes = [rawData.reason, rawData.notes].filter(Boolean).join(' — ').slice(0, 300);
-  const base = { amountCents: rawData.amountCents, date: rawData.date, notes };
+  const base = { amountCents: rawData.amountCents, date: rawData.date, notes, operationId };
   const deposit = isGoal(to);
   const result = deposit
     ? await depositToGoal(currentUser.uid, goalId(to), { ...base, accountId: from })

@@ -18,6 +18,7 @@ import { getDebtor, getDebtorStatement } from '../services/debtors.js';
 import { listCards } from '../services/creditCards.js';
 import { listAccounts } from '../services/accounts.js';
 import { describeError } from '../utils/errors.js';
+import { openReversalModal } from '../components/reversal-modal.js';
 
 const STATUS_LABELS = { pending: 'Pendente', partial: 'Parcial', paid: 'Paga', late: 'Atrasada', cancelled: 'Cancelada' };
 
@@ -40,7 +41,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   const cardName = new Map(cards.map((c) => [c.id, c.name]));
   debts.sort((a, b) => a.installmentNumber - b.installmentNumber);
   // Recebimentos por parcela (dívida ou compra no cartão); cada um é contado uma única vez.
-  const { byDebt: receivedBy, byPurchase: receivedByPurchase } = receivedByInstallment(payments);
+  const { byDebt: receivedBy, byPurchase: receivedByPurchase } = receivedByInstallment(payments, statement.reversals ?? []);
   const isOpen = debtor.status === 'open';
   // Quitado também aceita nova dívida (reabre o devedor); cancelado só consulta até ser reaberto.
   const canAddDebt = isOpen || debtor.status === 'paid';
@@ -129,7 +130,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   };
 
   // QUITAR TODAS AS PARCELAS PENDENTES DE UM MÊS: confirmação com mês, quantidade e valor total.
-  const ledger = { debts, payments, purchases: statement.purchases, invoicesById: statement.invoicesById };
+  const ledger = { debts, payments, reversals: statement.reversals ?? [], purchases: statement.purchases, invoicesById: statement.invoicesById };
   const openSettleMonth = (m) => {
     const operationId = newOperationId();
     const preview = previewMonthSettlement({ debtor, ledger, month: m });
@@ -231,6 +232,27 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
     })
     : emptyBlock('list-checks', 'Sem dívidas neste filtro', 'Crie uma dívida (à vista ou parcelada) ou lance uma compra de cartão vinculada a este devedor.');
 
+  // Histórico de RECEBIMENTOS (imutável): cada recebimento pode ser ESTORNADO (lançamento compensatório pelo servidor);
+  // o original permanece na lista, marcado como estornado.
+  const reversedPayments = new Set((statement.reversals ?? []).filter((r) => r.targetCollection === 'debtPayments').map((r) => r.targetId));
+  const sortedPayments = [...payments].sort((a, b) => (String(a.date) < String(b.date) ? 1 : -1));
+  const paymentsTable = sortedPayments.length
+    ? dataTable({
+      columns: [
+        { key: 'date', label: 'Data', render: (v) => formatDate(v) },
+        { key: 'amountCents', label: 'Valor', numeric: true, render: (v) => formatCents(v) },
+        { key: 'accountId', label: 'Conta', render: (v) => { const a = accounts.find((x) => x.id === v); return a ? accountLabel(a) : '—'; } },
+        { key: 'id', label: 'Situação', render: (v) => (reversedPayments.has(v) ? el('span', { class: 'badge', text: 'Estornado' }) : el('span', { class: 'badge badge--success', text: 'Recebido' })) },
+      ],
+      rows: sortedPayments,
+      actions: (p) => (reversedPayments.has(p.id) ? [] : [iconButton(`Estornar recebimento de ${formatCents(p.amountCents)}`, 'undo-2', () => openReversalModal({
+        user, kind: 'debtPayment', targetId: p.id, amountCents: Number(p.amountCents) || 0,
+        summary: `Recebimento de ${debtor.name} — ${formatCents(Number(p.amountCents) || 0)} em ${formatDate(p.date)}`,
+        onDone: () => refresh(),
+      }), 'btn--danger')]),
+    })
+    : null;
+
   // Resumo e ação do MÊS selecionado (quitar o mês ≠ quitar uma parcela ≠ quitar toda a dívida).
   const monthPending = listAll ? null : previewMonthSettlement({ debtor, ledger, month });
   const monthPaid = listAll ? 0 : obligations.items.filter((i) => i.referenceMonth === month && i.status === 'paid').length;
@@ -268,6 +290,8 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
       isOpen && debts.some((d) => ['pending', 'late'].includes(d.status))
         ? el('button', { type: 'button', class: 'btn btn--secondary', onClick: () => openSettle(null, `todas as dívidas de ${debtor.name}`), text: 'Quitar todas as dívidas' }) : null,
       table,
+      paymentsTable ? el('h3', { text: 'Recebimentos' }) : null,
+      paymentsTable,
     ]),
     footer: [el('button', { type: 'button', class: 'btn btn--secondary', onClick: closeModal, text: 'Fechar' })],
   });

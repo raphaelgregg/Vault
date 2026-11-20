@@ -33,7 +33,6 @@ const DEBTS = COLLECTIONS.debts;
 const PAYMENTS = COLLECTIONS.debtPayments;
 const DEBTORS = COLLECTIONS.debtors;
 const MAX_INSTALLMENT = 360;
-const MAX_SETTLE_INSTALLMENTS = 120; // teto de parcelas por quitação de dívida (gravadas em blocos atômicos, ver RECEIPT_BATCH_SIZE)
 const MAX_PLAN_INSTALLMENTS = 120; // 2 escritas por parcela (+ devedor) no mesmo lote (limite de 500)
 
 export async function listDebts(uid, debtorId) {

@@ -16,6 +16,7 @@ import { listAccounts } from '../services/accounts.js';
 import { accountLabel as accountText } from '../core/model.js';
 import { loadBalances } from '../services/balances.js';
 import { describeError } from '../utils/errors.js';
+import { newOperationId } from '../services/financeApi.js';
 
 export const meta = { title: 'Metas', icon: 'target' };
 
@@ -155,6 +156,7 @@ function openGoalModal(goal = null) {
 
 function openMovementModal(goal, type) {
   const isDeposit = type === 'deposit';
+  const operationId = newOperationId(); // idempotência: duplo clique/retry desta abertura não duplica o aporte
   const activeAccounts = accounts.filter((a) => a.status === 'active').map((a) => ({ value: a.id, label: accountLabel(a.id) }));
   formModal({
     title: `${isDeposit ? 'Aportar em' : 'Resgatar de'} ${goal.name}`,
@@ -170,7 +172,7 @@ function openMovementModal(goal, type) {
       field('Observações', 'notes', el('textarea', { id: 'notes', name: 'notes', maxlength: 300, rows: 2 })),
     ],
     submit: (d) => (isDeposit ? depositToGoal : withdrawFromGoal)(user.uid, goal.id, {
-      amountCents: d.get('amountCents'), date: d.get('date'), accountId: d.get('accountId'), notes: d.get('notes').trim() || undefined,
+      amountCents: d.get('amountCents'), date: d.get('date'), accountId: d.get('accountId'), notes: d.get('notes').trim() || undefined, operationId,
     }),
     onDone: async (r) => {
       toast(r.status === 'completed' && isDeposit ? 'Aporte registrado — meta concluída!' : (isDeposit ? 'Aporte registrado.' : 'Resgate registrado.'));

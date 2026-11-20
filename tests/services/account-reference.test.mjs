@@ -255,7 +255,7 @@ describe('contas sem nome (Bancos): instituição como identificação', () => {
 
   it('3) editar conta sem nome: nome removido envia null (deleteField); com nome mantém o texto', async () => {
     const calls = [];
-    const io = { getById: async () => ({ id: 'n1', initialBalanceCents: 0 }), update: async (_u, _c, id, d) => { calls.push([id, d]); }, writeAudit: async () => {} };
+    const io = { getById: async () => ({ id: 'n1', initialBalanceCents: 0, status: 'active' }), update: async (_u, _c, id, d) => { calls.push([id, d]); }, writeAudit: async () => {} };
     assert.equal((await updateAccount(UID, 'n1', { ...base }, io)).ok, true);
     assert.equal(calls[0][1].name, null);
     assert.equal(calls[0][1].institution, 'Alelo Pod');

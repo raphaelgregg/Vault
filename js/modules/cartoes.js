@@ -31,6 +31,8 @@ import { listCategories } from '../services/categories.js';
 import { listOpenDebtors } from '../services/debtors.js';
 import { describeError } from '../utils/errors.js';
 import { invoiceTotalCents, debtorPendingCents, accountLabel as accountText } from '../core/model.js';
+import { newOperationId } from '../services/financeApi.js';
+import { openReversalModal } from '../components/reversal-modal.js';
 
 import { todayInAppZone, currentMonthKey } from '../utils/dates.js';
 export const meta = { title: 'Cartões', icon: 'credit-card' };
@@ -226,7 +228,7 @@ async function openInvoicesModal(card, { showCancelled = false } = {}) {
 
   // Pagar fatura (VF-2-03p): escolhe a conta bancária que paga; abate o saldo derivado e libera o limite.
   const activeAccounts = accounts.filter((a) => a.status === 'active').map((a) => ({ value: a.id, label: accountLabel(a.id) }));
-  const openPayInvoice = (inv) => formModal({
+  const openPayInvoice = (inv) => { const operationId = newOperationId(); return formModal({
     title: `Pagar fatura ${formatMonth(inv.referenceMonth)} — ${card.name}`,
     formId: 'invoice-pay-form',
     submitLabel: 'Pagar fatura',
@@ -236,9 +238,9 @@ async function openInvoicesModal(card, { showCancelled = false } = {}) {
       field('Conta que paga *', 'accountId', el('select', { id: 'accountId', name: 'accountId' }, selectOptions(activeAccounts, '', { placeholder: 'Selecione uma conta' }))),
       field('Data do pagamento *', 'date', el('input', { type: 'date', id: 'date', name: 'date', value: todayInAppZone() })),
     ],
-    submit: (d) => payInvoice(user.uid, inv.id, { accountId: d.get('accountId'), date: d.get('date') }),
+    submit: (d) => payInvoice(user.uid, inv.id, { accountId: d.get('accountId'), date: d.get('date'), operationId }),
     onDone: async () => { toast('Fatura paga.'); await refreshModal(); },
-  });
+  }); };
 
   // Consolidado (VF-2-03r): reflete a fatura do mês sem lançar compra a compra. Devedores e assinaturas seguem
   // lançados à parte (rastreáveis); informe o total do extrato e o consolidado cobre só o que falta.
@@ -296,6 +298,12 @@ async function openInvoicesModal(card, { showCancelled = false } = {}) {
         inv.status === 'open' ? iconButton(`Fechar fatura ${formatMonth(inv.referenceMonth)}`, 'lock', () => act(closeInvoice, inv.id, 'Fatura fechada.')) : null,
         ['open', 'closed'].includes(inv.status) && totalOf(inv) > 0
           ? iconButton(`Pagar fatura ${formatMonth(inv.referenceMonth)}`, 'check-circle-2', () => openPayInvoice(inv), 'btn--success') : null,
+        inv.status === 'paid'
+          ? iconButton(`Estornar pagamento da fatura ${formatMonth(inv.referenceMonth)}`, 'undo-2', () => openReversalModal({
+            user, kind: 'invoice', targetId: inv.id, amountCents: Number(inv.paidCents) || 0,
+            summary: `Fatura ${formatMonth(inv.referenceMonth)} — ${card.name} — ${formatCents(Number(inv.paidCents) || 0)} (${accountLabel(inv.accountId)})`,
+            onDone: () => refreshModal(),
+          }), 'btn--danger') : null,
         inv.status === 'open' && !purchases.some((p) => p.invoiceId === inv.id)
           ? iconButton(`Cancelar fatura ${formatMonth(inv.referenceMonth)}`, 'x-circle', () => confirmModal({
             title: 'Cancelar fatura', message: `Cancelar a fatura ${formatMonth(inv.referenceMonth)} (sem compras)?`, confirmLabel: 'Cancelar fatura',

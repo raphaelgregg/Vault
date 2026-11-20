@@ -95,9 +95,10 @@ describe('services delegam aos helpers (criar/atualizar/excluir/status)', () => 
     return { ops, finance: async (op, params) => { ops.push(op); return { ok: true, id: 'new1', transferId: 'new1', ...params }; } };
   };
   const pendingDoc = { getById: async (_u, _c, id) => ({ id, status: 'pending', initialBalanceCents: 1000 }) };
+  const accountDoc = { getById: async (_u, _c, id) => ({ id, status: 'active', initialBalanceCents: 1000 }) };
 
   const direct = [
-    ['accounts', createAccount, updateAccount, account, pendingDoc],
+    ['accounts', createAccount, updateAccount, account, accountDoc],
     ['categories', createCategory, updateCategory, category, {}],
   ];
   for (const [name, createFn, updateFn, raw, extra] of direct) {

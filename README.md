@@ -8,7 +8,9 @@ Repositório de integração e trabalho. O projeto principal desta branch é o *
 
 Sistema de controle financeiro pessoal em **HTML5 + CSS3 + JavaScript (ES Modules) puro**, com
 **Firebase Authentication** e **Cloud Firestore** como backend. Sem framework, sem build
-obrigatório e sem servidor próprio — roda em qualquer hospedagem estática (Vercel Hobby).
+obrigatório. Operações que movem dinheiro (transferências, liquidação de receitas/despesas, pagamento de fatura, aportes
+em metas, recebimentos de devedores, estornos) são processadas por uma **função de servidor** na Vercel
+(`POST /api/finance`, Firebase Admin SDK + transações + idempotência — ver seção 6); o restante é estático (Vercel Hobby).
 
 > **Estado atual: módulos financeiros entregues (etapa 2 do `PLAN.md`).** Bancos, receitas,
 > despesas, transferências, categorias, assinaturas, devedores (parcelas e recebimentos), metas,
@@ -108,7 +110,8 @@ Firebase real.
 | `npm run test:unit` | modelo, agregações e services com `io` injetado (sem rede) — 340 testes |
 | `npm run test:rules` | sobe Auth+Firestore no emulador e roda `tests/rules/` — 65 testes |
 | `npm run lint` | sintaxe, espaços, `console.log`, imports não usados, JSON (sem dependências) |
-| `npm run test:integration` | integração com o Firestore Emulator (Rules reais, sem mocks): recebimentos de devedores simultâneos/parciais/repetidos, falhas e recuperação, quitação em blocos, transferências e faturas simultâneas, consistência de saldos/dashboard/previsão contra um oráculo independente — `tests/integration/` |
+| `npm run test:integration` | integração com o Firestore Emulator, sem mocks de transação: camada confiável (`server-*.test.mjs`: transferências, recebimentos, lote retomável, despesas/receitas/faturas/metas, estornos, contas/devedores arquivados, segurança com ID tokens reais), services → servidor (`service-bridge`), consistência de saldos/dashboard/previsão contra oráculo independente — `tests/integration/` |
+| `npm run serve:api` | servidor local: estático + `POST /api/finance` (mesmo handler da Vercel) contra os emuladores — `scripts/dev-server.mjs` |
 | `npm run test:e2e` | Playwright em Chromium contra os emuladores: `flows.mjs` (cadastro, orçamentos, metas, cartões, devedores, dashboard, relatórios, configurações) e `movements.mjs` (bancos, receitas, despesas, transferências: CRUD, filtros, paginação, ordenação, saldo derivado) |
 
 O E2E **não** adiciona dependência ao projeto: usa o `playwright` já instalado no ambiente e, sem
@@ -194,6 +197,28 @@ isolamento nas Rules.
 ---
 
 ## 6. Segurança
+
+### Camada financeira confiável (VF-ARQ-02)
+
+- **Por quê:** Security Rules + JavaScript no navegador não garantem saldo não negativo sob concorrência, idempotência,
+  soma por parcela nem atomicidade de lotes. Toda operação que **move dinheiro** passou para `POST /api/finance`
+  (`api/finance.mjs` → `server/finance/`), que usa o Firebase Admin SDK (a credencial `FIREBASE_SERVICE_ACCOUNT` vive só
+  na Vercel) e **transações do Firestore**. O navegador nunca recebe credencial administrativa.
+- **Cada chamada:** `Authorization: Bearer <Firebase ID token>`; `{ op, operationId, params }`. O servidor valida o token,
+  usa o `uid` do token (nunca do corpo), valida parâmetros (centavos inteiros), confere propriedade de contas/parcelas/devedores
+  e **lê o estado atual dentro da transação** (saldo, restante da parcela, status) — jamais confia em saldo/total/status
+  enviado pelo cliente. Erros reais voltam à tela (`INSUFFICIENT_BALANCE`, `EXCEEDS_REMAINING`, `ALREADY_REVERSED`…).
+- **Idempotência:** o cliente gera um `operationId` ao abrir o formulário e o reaproveita em retry/duplo clique/timeout;
+  mesma chave + mesmos parâmetros devolve o resultado original sem repetir; chave reutilizada com outros parâmetros → `409`.
+- **Correções = estorno:** lançamento liquidado (receita recebida, despesa paga, transferência confirmada, fatura paga,
+  recebimento de devedor, movimento de meta) é imutável; o botão "Estornar" cria um lançamento compensatório com motivo,
+  preserva o original, não pode ser repetido e ajusta saldos atomicamente.
+- **Lote:** quitar um mês/dívida com muitas parcelas é um lote retomável (estado em `batches/{id}`; cada parcela é uma
+  transação). Não há atomicidade global: consistência por parcela + estado explícito (`completed`/`partial_failed`).
+- **Rules:** o navegador só lê os próprios dados e grava o que não move saldo; escritas protegidas são negadas (testes em
+  `tests/rules`). Contas e devedores com histórico são **arquivados** (nunca apagados fisicamente).
+- **Desenvolvimento local:** `npm run emulators` + `npm run serve:api` (estático + `/api/finance` contra os emuladores,
+  sem credencial). `npm run serve` (somente estático) não tem a API.
 
 - Negação padrão (`match /{document=**} { allow read, write: if false; }`).
 - Isolamento por usuário em todos os `match`.
@@ -283,9 +308,11 @@ O projeto não habilita nada fora do Spark e não faz chamadas pagas.
 - **Cartões:** pagar fatura não movimenta conta (o schema `invoices` não tem `accountId`) e é sempre
   integral; não há cancelamento de fatura; parcelas de uma compra não têm `installmentGroupId` (o
   schema `cardPurchases` não o aceita) e são identificadas por cartão + descrição + data + total.
-- **Concorrência:** leitura prévia + escrita em lote, sem transação (limite de cartão, valores
-  recebidos e unicidade de orçamento por categoria/mês podem ser violados por abas simultâneas).
-- Movimentações de metas e recebimentos são imutáveis (sem estorno); orçamentos consideram só
+- **Concorrência:** saldos, recebimentos, pagamentos e aportes são decididos por transação no servidor (seção 6). Ainda
+  valem a leitura prévia + escrita em lote do cliente para limite de cartão e unicidade de orçamento por categoria/mês
+  (abas simultâneas podem violá-los). O saldo é recalculado por varredura dentro da transação (teto de 5.000 movimentos
+  por coleção; acima disso a operação falha fechada).
+- Lançamentos liquidados são imutáveis: correção por estorno (um por lançamento); orçamentos consideram só
   despesas (compras no cartão não entram).
 - Backup do Firestore **não é automático no plano gratuito**; exportação completa por usuário ainda
   não existe. Não presuma backup gerenciado.

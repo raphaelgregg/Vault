@@ -29,6 +29,8 @@ import { listCategories, getCategoryKindOptions } from '../services/categories.j
 import { listAccounts } from '../services/accounts.js';
 
 import { todayInAppZone, currentMonthKey } from '../utils/dates.js';
+import { newOperationId } from '../services/financeApi.js';
+import { openReversalModal } from '../components/reversal-modal.js';
 export const meta = { title: 'Despesas', icon: 'trending-down' };
 
 let currentUser = null;
@@ -316,6 +318,25 @@ function createExpenseActions(expense) {
     );
   }
 
+  // VF-ARQ-02: despesa PAGA é imutável (saldo/histórico): só estorno compensatório pelo servidor; as demais editam/excluem.
+  if (expense.status === 'paid') {
+    actions.push(
+      el('button', {
+        type: 'button',
+        class: 'btn btn--icon btn--danger',
+        'aria-label': `Estornar ${expense.description}`,
+        title: 'Estornar (lançamento compensatório)',
+        onClick: () => openReversalModal({
+          user: currentUser, kind: 'expense', targetId: expense.id, amountCents: Number(expense.amountCents) || 0,
+          summary: `${expense.description} — ${formatCents(Number(expense.amountCents) || 0)} (${getAccountLabel(expense.accountId)})`,
+          onDone: async () => { await loadData(); renderPage($('.content') || document.getElementById('page-content')); },
+        }),
+        html: '<i data-lucide="undo-2" aria-hidden="true"></i>',
+      })
+    );
+    return actions;
+  }
+
   actions.push(
     el('button', {
       type: 'button',
@@ -326,18 +347,15 @@ function createExpenseActions(expense) {
     })
   );
 
-  // Excluir também despesas pagas (VF-2-03o): o saldo é derivado, então o valor volta à conta (confirmação explica).
-  {
-    actions.push(
-      el('button', {
-        type: 'button',
-        class: 'btn btn--icon btn--danger',
-        'aria-label': `Excluir ${expense.description}`,
-        onClick: () => confirmDeleteExpense(expense),
-        html: '<i data-lucide="trash-2" aria-hidden="true"></i>',
-      })
-    );
-  }
+  actions.push(
+    el('button', {
+      type: 'button',
+      class: 'btn btn--icon btn--danger',
+      'aria-label': `Excluir ${expense.description}`,
+      onClick: () => confirmDeleteExpense(expense),
+      html: '<i data-lucide="trash-2" aria-hidden="true"></i>',
+    })
+  );
 
   return actions;
 }
@@ -345,6 +363,7 @@ function createExpenseActions(expense) {
 /** Abre modal para criar/editar despesa. */
 function openExpenseModal(expense = null) {
   const isEdit = !!expense;
+  const operationId = newOperationId(); // idempotência da criação: duplo clique/retry desta abertura não duplica
   const recurrences = getRecurrenceOptions();
   const statuses = getExpenseStatusOptions();
   const expenseCategories = categoriesCache.filter((c) => c.kind === 'expense' || c.kind === 'both');
@@ -533,7 +552,7 @@ function openExpenseModal(expense = null) {
     clearErrors(form);
     const result = isEdit
       ? await updateExpense(currentUser.uid, expense.id, rawData)
-      : await createExpense(currentUser.uid, rawData);
+      : await createExpense(currentUser.uid, { ...rawData, operationId });
 
     if (result.ok) {
       toast(isEdit ? 'Despesa atualizada com sucesso.' : 'Despesa criada com sucesso.');

@@ -58,7 +58,19 @@ export async function updateAccount(uid, accountId, rawData, io = {}) {
   }
   // Conta sem nome: remove `name` se existia (null → deleteField em `update`; update é merge).
   const { initialBalanceCents: _kept, openingDate: _keptDate, ...editable } = data;
-  await updateAudited(uid, COLLECTION, accountId, { ...editable, name: data.name ?? null }, io);
+  // Arquivar/desarquivar é do SERVIDOR (arquivamento lógico, serializado com os lançamentos da conta); o resto grava aqui.
+  const archiving = data.status === 'archived' && current.status !== 'archived';
+  const unarchiving = current.status === 'archived' && data.status !== 'archived';
+  await updateAudited(uid, COLLECTION, accountId, { ...editable, status: current.status, name: data.name ?? null }, io);
+  if (archiving) return archiveAccount(uid, accountId, io);
+  if (unarchiving) {
+    const back = await unarchiveAccount(uid, accountId, io);
+    if (!back.ok) return back;
+    if (data.status !== 'active') await updateAudited(uid, COLLECTION, accountId, { status: data.status }, io);
+  } else if (data.status !== current.status && !archiving) {
+    // active ⇄ inactive: sem efeito no histórico
+    await updateAudited(uid, COLLECTION, accountId, { status: data.status }, io);
+  }
   return { ok: true };
 }
 
