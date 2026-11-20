@@ -163,17 +163,17 @@ describe('Quitação mensal em lote concorrente com recebimentos individuais', (
 });
 
 describe('Estresse — muitas operações simultâneas (pior caso: todas leem o estado antigo)', () => {
-  it('8 clientes recebendo R$ 30 NA MESMA parcela de R$ 100: exatamente UM passa; 7 rejeitados com erro identificável', async () => {
+  it('8 clientes recebendo R$ 30 NA MESMA parcela de R$ 100: no máximo 3 passam (R$ 90) e os demais são recusados com erro identificável', async () => {
     const { io, accountId, debtorId, debtIds } = await setup('100,00', 1);
     const cs = clients(8, true);
     const results = await Promise.all(cs.map((c) => attempt(() => settleInstallment(ALICE, debtorId, { debtId: debtIds[0] }, pay(accountId, { amountCents: '30,00' }), c))));
-    assert.equal(results.filter((r) => r.ok).length, 1, JSON.stringify(results.map((r) => r.ok)));
-    assert.equal(results.filter((r) => !r.ok && r.code === 'permission-denied').length, 7);
+    assert.equal(results.filter((r) => r.ok).length, 3, JSON.stringify(results.map((r) => r.ok)));
+    assert.equal(results.filter((r) => !r.ok && ['EXCEEDS_REMAINING', 'INVALID_STATE'].includes(r.result?.code)).length, 5, JSON.stringify(results));
     const o = await oracle(env, { accountId, debtorId });
-    assert.equal(o.payments.length, 1);
-    assert.equal(o.sumPayments, 3000);
-    assert.equal(o.received, 3000);
-    assert.equal(await derivedBalance(io, accountId), 100000 + 3000);
+    assert.equal(o.payments.length, 3);
+    assert.equal(o.sumPayments, 9000);
+    assert.equal(o.received, 9000);
+    assert.equal(await derivedBalance(io, accountId), 100000 + 9000);
   });
 
   it('10 parcelas de R$ 10, 10 clientes quitando uma cada, ao mesmo tempo: 10 recebimentos, total R$ 100, devedor quitado (conciliado), saldo +100', async () => {

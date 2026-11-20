@@ -5,7 +5,7 @@
  */
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { startEnv, makeRealIo, makeBarrier, dump, attempt, ALICE } from './helpers/real-io.mjs';
+import { startEnv, makeRealIo, dump, attempt, ALICE } from './helpers/real-io.mjs';
 import { seedDebtor, seedPlan, MONTH, NOW } from './helpers/world.mjs';
 import { createAccount } from '../../js/services/accounts.js';
 import { createCategory } from '../../js/services/categories.js';
@@ -120,28 +120,30 @@ describe('Consistência de saldos e previsão entre módulos (oráculo independe
 });
 
 describe('Transferências e faturas simultâneas', () => {
-  it('LIMITAÇÃO CONHECIDA: duas transferências de R$ 80 de uma conta com R$ 100, simultâneas, passam as duas (saldo −60) — a auditoria DETECTA', async () => {
+  it('duas transferências de R$ 80 de uma conta com R$ 100, simultâneas: UMA passa (servidor); saldo nunca negativo; auditoria limpa', async () => {
     const io = makeRealIo(env);
     const C = await acct(io, 'Banco C', '100,00');
     const D = await acct(io, 'Banco D', '0,00');
-    const barrier = makeBarrier(2);
-    const clients = [0, 1].map(() => makeRealIo(env, ALICE, { beforeWrite: async (kind, c) => { if (kind === 'create' && c === 'transfers') await barrier(); } }));
-    const results = await Promise.all(clients.map((cl) => attempt(() => createTransfer(ALICE, { fromAccountId: C, toAccountId: D, amountCents: '80,00', date: '2026-12-04', reason: 'x', status: 'confirmed' }, cl))));
-    // o saldo é DERIVADO e a checagem é do cliente: as Rules não somam movimentos; ambas leram saldo 100
-    assert.deepEqual(results.map((r) => r.ok), [true, true]);
+    const raw = { fromAccountId: C, toAccountId: D, amountCents: '80,00', date: '2026-12-04', reason: 'x', status: 'confirmed' };
+    const results = await Promise.all([0, 1].map(() => attempt(() => createTransfer(ALICE, raw, makeRealIo(env)))));
+    assert.equal(results.filter((r) => r.ok).length, 1, JSON.stringify(results));
+    assert.equal(results.find((r) => !r.ok).result.code, 'INSUFFICIENT_BALANCE');
     const oracle = await oracleBalances();
-    assert.equal(oracle[C], -6000);
-    const audit = await auditFinancialIntegrity(ALICE, io);
-    assert.ok(audit.findings.some((x) => x.code === 'ACCOUNT_NEGATIVE_BALANCE' && x.accountId === C), JSON.stringify(audit.findings));
+    assert.equal(oracle[C], 2000);
+    assert.equal(oracle[D], 8000);
+    assert.deepEqual((await auditFinancialIntegrity(ALICE, io)).findings, []);
   });
 
-  it('LIMITAÇÃO CONHECIDA: o mesmo envio de transferência repetido (duplo clique) cria 2 documentos — sem chave de idempotência', async () => {
+  it('o mesmo envio repetido (duplo clique) com a MESMA operationId cria UM documento; sem chave, cada envio é uma intenção nova', async () => {
     const io = makeRealIo(env);
     const C = await acct(io, 'Banco C', '1.000,00');
     const D = await acct(io, 'Banco D', '0,00');
-    const raw = { fromAccountId: C, toAccountId: D, amountCents: '10,00', date: '2026-12-04', reason: 'mesma', status: 'confirmed' };
-    await Promise.all([createTransfer(ALICE, raw, makeRealIo(env)), createTransfer(ALICE, raw, makeRealIo(env))]);
-    assert.equal((await dump(env, 'transfers')).length, 2);
+    const raw = { fromAccountId: C, toAccountId: D, amountCents: '10,00', date: '2026-12-04', reason: 'mesma', status: 'confirmed', operationId: 'clique-1' };
+    const rs = await Promise.all([createTransfer(ALICE, raw, makeRealIo(env)), createTransfer(ALICE, raw, makeRealIo(env))]);
+    assert.ok(rs.every((r) => r.ok));
+    assert.equal(rs[0].id, rs[1].id);
+    assert.equal((await dump(env, 'transfers')).length, 1);
+    assert.equal((await oracleBalances())[C], 99000);
   });
 
   it('confirmar a MESMA transferência pendente duas vezes ao mesmo tempo debita uma única vez (o estado é um só documento)', async () => {
@@ -149,28 +151,24 @@ describe('Transferências e faturas simultâneas', () => {
     const C = await acct(io, 'Banco C', '100,00');
     const D = await acct(io, 'Banco D', '0,00');
     const tr = ok(await createTransfer(ALICE, { fromAccountId: C, toAccountId: D, amountCents: '30,00', date: '2026-12-04', reason: 'x', status: 'pending' }, io), 't').id;
-    const barrier = makeBarrier(2);
-    const clients = [0, 1].map(() => makeRealIo(env, ALICE, { beforeWrite: async (kind, c) => { if (kind === 'update' && c === 'transfers') await barrier(); } }));
-    await Promise.all(clients.map((cl) => attempt(() => confirmTransfer(ALICE, tr, cl))));
+    await Promise.all([0, 1].map(() => attempt(() => confirmTransfer(ALICE, tr, makeRealIo(env)))));
     const oracle = await oracleBalances();
     assert.equal(oracle[C], 7000);
     assert.equal(oracle[D], 3000);
     assert.equal((await dump(env, 'transfers')).length, 1);
   });
 
-  it('pagamento da MESMA fatura por duas contas ao mesmo tempo: só um passa (fatura paga é imutável nas Rules); débito único', async () => {
+  it('pagamento da MESMA fatura por duas contas ao mesmo tempo: só um passa (transação no servidor); débito único', async () => {
     const io = makeRealIo(env);
     const A = await acct(io, 'Banco A', '1.000,00');
     const B = await acct(io, 'Banco B', '1.000,00');
     const card = ok(await createCard(ALICE, { name: 'Cartão', brand: 'Visa', limitCents: '5.000,00', closingDay: 10, dueDay: 20 }, io), 'card').id;
     ok(await registerCardPurchase(ALICE, card, { description: 'Compra', amountCents: '300,00', installmentsTotal: 1, purchaseDate: '2026-12-02' }, io), 'compra');
     const invoice = (await dump(env, 'invoices'))[0];
-    const barrier = makeBarrier(2);
-    const clients = [0, 1].map(() => makeRealIo(env, ALICE, { beforeWrite: async (kind, c) => { if (kind === 'update' && c === 'invoices') await barrier(); } }));
-    const results = await Promise.all([A, B].map((acc, i) => attempt(() => payInvoice(ALICE, invoice.id, { accountId: acc, date: '2026-12-06' }, clients[i]))));
+    const results = await Promise.all([A, B].map((acc) => attempt(() => payInvoice(ALICE, invoice.id, { accountId: acc, date: '2026-12-06' }, makeRealIo(env)))));
     assert.equal(results.filter((r) => r.ok).length, 1, JSON.stringify(results));
     const rejected = results.find((r) => !r.ok);
-    assert.equal(rejected.code, 'permission-denied'); // erro identificável: a fatura já está paga
+    assert.equal(rejected.result.code, 'INVALID_STATE'); // erro identificável: a fatura já está paga
     const paid = (await dump(env, 'invoices'))[0];
     assert.equal(paid.status, 'paid');
     const oracle = await oracleBalances();

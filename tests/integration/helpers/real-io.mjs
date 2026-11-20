@@ -13,6 +13,8 @@ import {
   doc, collection, getDoc, getDocs, query, where, orderBy, limit as limitTo, writeBatch, setDoc, addDoc, updateDoc, deleteDoc,
   serverTimestamp, getCountFromServer,
 } from 'firebase/firestore';
+import { handleFinance } from '../../../server/finance/index.mjs';
+import { adminDb, opId } from './server.mjs';
 import {
   commitAtomic, toFirestoreData, fromFirestoreDoc, toWhereValue, withFieldDeletes, auditPayload,
 } from '../../../js/services/firestore.js';
@@ -33,6 +35,23 @@ export async function startEnv() {
  * `hooks.beforeCommit(ops)` (opcional, assíncrono) roda ANTES de cada lote — usado para forçar leituras antigas
  * (barreira) e para injetar falhas.
  */
+/**
+ * Ponte cliente → SERVIDOR REAL (VF-ARQ-02): o `io.finance` dos services chama o MESMO handler da Vercel (Admin SDK +
+ * transações) contra o emulador e devolve no formato de `financeResult`. Sem mocks: end-to-end serviço → servidor → banco.
+ */
+export function serverBridge(uid = ALICE) {
+  return async (op, params, options = {}) => {
+    const res = await handleFinance(
+      { method: 'POST', headers: { authorization: `Bearer tok-${uid}` }, body: { op, operationId: options.operationId ?? opId('bridge'), params } },
+      { db: adminDb(), verifyIdToken: async (t) => ({ uid: String(t).replace(/^tok-/, '') }), log: () => {} },
+    );
+    if (res.status === 200) return res.body;
+    const errors = { _form: res.body.message ?? res.body.error };
+    if (res.body.details?.field) errors[res.body.details.field] = res.body.message;
+    return { ok: false, errors, code: res.body.error, status: res.status, details: res.body.details, retryable: res.status === 503 };
+  };
+}
+
 export function makeRealIo(testEnv, uid = ALICE, hooks = {}) {
   const db = testEnv.authenticatedContext(uid).firestore();
   const userDoc = (u, c, id) => doc(db, 'users', u, c, id);
@@ -41,6 +60,7 @@ export function makeRealIo(testEnv, uid = ALICE, hooks = {}) {
   const batchIo = { newBatch: () => writeBatch(db), userDoc, newDocRef };
   const io = {
     db,
+    finance: serverBridge(uid),
     getById: async (u, c, id) => {
       const snap = await getDoc(userDoc(u, c, id));
       return snap.exists() ? fromFirestoreDoc(snap.id, snap.data()) : null;
