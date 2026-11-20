@@ -24,7 +24,10 @@ import {
 import { createPager } from '../services/pager.js';
 import { createPagerFooter } from '../components/pager-footer.js';
 import { listAccounts } from '../services/accounts.js';
-import { accountLabel } from '../core/model.js';
+import { accountLabel, isAccountLinkedGoal, goalSavedCents } from '../core/model.js';
+import {
+  listGoals, listGoalTransactions, listRecentGoalTransactions, transferableGoals, depositToGoal, withdrawFromGoal,
+} from '../services/goals.js';
 
 export const meta = { title: 'Transferências', icon: 'arrow-left-right' };
 
@@ -32,6 +35,12 @@ let currentUser = null;
 let transfersCache = [];
 let pager = null;
 let accountsCache = [];
+let goalsCache = [];
+let goalSaved = new Map(); // goalId → centavos guardados (aportes − resgates)
+let goalTxCounts = new Map();
+let recentGoalTxs = [];
+let currentTransferEdit = null;
+const GOAL_PREFIX = 'goal:'; // valor das opções de meta nos selects (contas usam o próprio id)
 let currentFilter = { status: 'all', month: null };
 
 /** Render principal do módulo. */
@@ -47,12 +56,24 @@ async function loadData() {
   pager = createPager({
     fetchPage: ({ limit, startAfterId }) => listTransfers(currentUser.uid, { limit, startAfterId }),
   });
-  [, accountsCache] = await Promise.all([
+  [, accountsCache, goalsCache, recentGoalTxs] = await Promise.all([
     pager.loadFirst(),
     listAccounts(currentUser.uid),
+    listGoals(currentUser.uid),
+    listRecentGoalTransactions(currentUser.uid, 20),
   ]);
   transfersCache = pager.items;
+  const txs = await Promise.all(goalsCache.map(async (g) => [g.id, await listGoalTransactions(currentUser.uid, g.id)]));
+  goalSaved = new Map(txs.map(([id, rows]) => [id, goalSavedCents(rows)]));
+  goalTxCounts = new Map(txs.map(([id, rows]) => [id, rows.length]));
 }
+
+/** Metas que recebem aportes por transferência (ativas, sem vínculo de conta). */
+const goalDestinations = () => transferableGoals(goalsCache, goalTxCounts);
+/** Metas de onde dá para sacar: com valor guardado, ativas/concluídas, sem vínculo de conta. */
+const goalSources = () => goalsCache.filter((g) => ['active', 'completed'].includes(g.status)
+  && !isAccountLinkedGoal(g, goalTxCounts.get(g.id)) && (goalSaved.get(g.id) ?? 0) > 0);
+const goalName = (id) => goalsCache.find((g) => g.id === id)?.name ?? id;
 
 async function loadMore() {
   await pager.loadMore();
@@ -102,10 +123,34 @@ function renderPage(container) {
       el('div', { class: 'panel__body panel__body--flush' }, [table]),
     ]),
     createPagerFooter({ pager, noun: 'transferências', onLoadMore: loadMore }),
+    createGoalMovementsPanel(),
   ];
 
   container.replaceChildren(...nodes.filter(Boolean));
   refreshIcons();
+}
+
+/** Histórico recente de aportes (conta → meta) e resgates (meta → conta). */
+function createGoalMovementsPanel() {
+  if (!recentGoalTxs.length) return null;
+  const head = el('tr', {}, ['Data', 'Movimento', 'Meta', 'Conta', 'Valor'].map((t, i) => el('th', { class: i === 4 ? 'num' : '', text: t })));
+  const body = recentGoalTxs.map((t) => el('tr', {}, [
+    el('td', { text: formatDate(t.date) }),
+    el('td', { text: t.type === 'deposit' ? 'Aporte (conta → meta)' : 'Resgate (meta → conta)' }),
+    el('td', { text: goalName(t.goalId) }),
+    el('td', { text: getAccountLabel(t.accountId) }),
+    el('td', { class: 'num', text: formatCents(Number(t.amountCents) || 0) }),
+  ]));
+  return el('section', { class: 'panel' }, [
+    el('div', { class: 'panel__header' }, [
+      el('h2', { text: 'Aportes e resgates em metas' }),
+      el('div', { class: 'topbar__spacer' }),
+      el('span', { class: 'badge', text: 'Últimos 20' }),
+    ]),
+    el('div', { class: 'panel__body panel__body--flush' }, [
+      el('div', { class: 'table-wrap' }, [el('table', { class: 'table' }, [el('thead', {}, [head]), el('tbody', {}, body)])]),
+    ]),
+  ]);
 }
 
 /** Computa estatísticas rápidas do mês atual. */
@@ -314,36 +359,43 @@ function createTransferActions(transfer) {
 /** Abre modal para criar/editar transferência. */
 function openTransferModal(transfer = null) {
   const isEdit = !!transfer;
+  currentTransferEdit = transfer;
   const statuses = getTransferStatusOptions();
   const activeAccounts = accountsCache.filter((a) => a.status === 'active');
 
   const form = el('form', { id: 'transfer-form', novalidate: true }, [
     el('div', { class: 'form__row' }, [
       el('div', { class: 'form__field' }, [
-        el('label', { for: 'fromAccountId', text: 'Conta de origem *' }),
+        el('label', { for: 'fromAccountId', text: 'Origem *' }),
         el('select', {
           id: 'fromAccountId',
           name: 'fromAccountId',
           required: true,
         }, [
-          el('option', { value: '', disabled: true, selected: !transfer }, 'Selecione a conta de origem'),
-          ...activeAccounts.map((a) =>
+          el('option', { value: '', disabled: true, selected: !transfer }, 'Selecione a origem'),
+          el('optgroup', { label: 'Contas' }, activeAccounts.map((a) =>
             el('option', { value: a.id, selected: transfer?.fromAccountId === a.id }, accountLabel(a))
-          ),
+          )),
+          ...(!isEdit && goalSources().length ? [el('optgroup', { label: 'Metas (sacar o guardado)' }, goalSources().map((g) =>
+            el('option', { value: `${GOAL_PREFIX}${g.id}` }, `Meta: ${g.name} (guardado ${formatCents(goalSaved.get(g.id) ?? 0)})`)
+          ))] : []),
         ]),
         el('span', { class: 'form__error', 'data-for': 'fromAccountId' }),
       ]),
       el('div', { class: 'form__field' }, [
-        el('label', { for: 'toAccountId', text: 'Conta de destino *' }),
+        el('label', { for: 'toAccountId', text: 'Destino *' }),
         el('select', {
           id: 'toAccountId',
           name: 'toAccountId',
           required: true,
         }, [
-          el('option', { value: '', disabled: true, selected: !transfer }, 'Selecione a conta de destino'),
-          ...activeAccounts.map((a) =>
+          el('option', { value: '', disabled: true, selected: !transfer }, 'Selecione o destino'),
+          el('optgroup', { label: 'Contas' }, activeAccounts.map((a) =>
             el('option', { value: a.id, selected: transfer?.toAccountId === a.id }, accountLabel(a))
-          ),
+          )),
+          ...(!isEdit && goalDestinations().length ? [el('optgroup', { label: 'Metas (guardar / investir)' }, goalDestinations().map((g) =>
+            el('option', { value: `${GOAL_PREFIX}${g.id}` }, `Meta: ${g.name} (guardado ${formatCents(goalSaved.get(g.id) ?? 0)} de ${formatCents(g.targetCents)})`)
+          ))] : []),
         ]),
         el('span', { class: 'form__error', 'data-for': 'toAccountId' }),
       ]),
@@ -399,6 +451,7 @@ function openTransferModal(transfer = null) {
           el('option', { value: s.value, selected: transfer?.status === s.value }, s.label)
         )),
         el('span', { class: 'form__error', 'data-for': 'status' }),
+        el('span', { class: 'card__hint', id: 'goal-transfer-hint', hidden: true, text: 'Com uma meta, o aporte/resgate é efetivado na hora e o saldo das contas é atualizado.' }),
       ]),
     ]),
     el('div', { class: 'form__field' }, [
@@ -434,7 +487,16 @@ function openTransferModal(transfer = null) {
   // Validação de conta origem ≠ destino
   const fromSelect = $('#fromAccountId', form);
   const toSelect = $('#toAccountId', form);
+  const statusSelect = $('#status', form);
+  const goalHint = $('#goal-transfer-hint', form);
+  const syncGoalMode = () => {
+    const withGoal = fromSelect.value.startsWith(GOAL_PREFIX) || toSelect.value.startsWith(GOAL_PREFIX);
+    statusSelect.disabled = withGoal;
+    if (withGoal) statusSelect.value = 'confirmed';
+    goalHint.hidden = !withGoal;
+  };
   const validateAccounts = () => {
+    syncGoalMode();
     if (fromSelect.value && toSelect.value && fromSelect.value === toSelect.value) {
       toSelect.setCustomValidity('A conta de destino deve ser diferente da conta de origem.');
       toSelect.reportValidity();
@@ -463,12 +525,12 @@ function openTransferModal(transfer = null) {
     };
 
     clearErrors(form);
-    const result = isEdit
-      ? await updateTransfer(currentUser.uid, transfer.id, rawData)
-      : await createTransfer(currentUser.uid, rawData);
+    const result = await submitTransfer(rawData);
 
     if (result.ok) {
-      toast(isEdit ? 'Transferência atualizada com sucesso.' : 'Transferência criada com sucesso.');
+      toast(result.goalMovement === 'deposit' ? 'Aporte na meta registrado — saldo da conta atualizado.'
+        : result.goalMovement === 'withdraw' ? 'Resgate da meta registrado — valor devolvido à conta.'
+        : (isEdit ? 'Transferência atualizada com sucesso.' : 'Transferência criada com sucesso.'));
       closeModal();
       await loadData();
       renderPage($('.content') || document.getElementById('page-content'));
@@ -481,6 +543,36 @@ function openTransferModal(transfer = null) {
 
   form.addEventListener('submit', handleSubmit);
   $('#fromAccountId', form).focus();
+}
+
+/**
+ * Cria/edita a transferência. Se origem ou destino for uma META, vira aporte (conta → meta) ou resgate
+ * (meta → conta) pelo serviço de metas (atômico, saldo derivado, com checagem de saldo); metas não aparecem
+ * como conta e não há transferência entre metas. Erros dos campos de conta voltam ao select correspondente.
+ */
+async function submitTransfer(rawData) {
+  const isGoal = (v) => String(v ?? '').startsWith(GOAL_PREFIX);
+  const goalId = (v) => String(v).slice(GOAL_PREFIX.length);
+  const { fromAccountId: from, toAccountId: to } = rawData;
+  if (!isGoal(from) && !isGoal(to)) {
+    return currentTransferEdit
+      ? updateTransfer(currentUser.uid, currentTransferEdit.id, rawData)
+      : createTransfer(currentUser.uid, rawData);
+  }
+  if (currentTransferEdit) return { ok: false, errors: { _form: 'Aportes e resgates de metas não podem ser editados; exclua-os pela meta ou registre outro.' } };
+  if (isGoal(from) && isGoal(to)) return { ok: false, errors: { toAccountId: 'Não há transferência entre metas: resgate para uma conta primeiro.' } };
+  const notes = [rawData.reason, rawData.notes].filter(Boolean).join(' — ').slice(0, 300);
+  const base = { amountCents: rawData.amountCents, date: rawData.date, notes };
+  const deposit = isGoal(to);
+  const result = deposit
+    ? await depositToGoal(currentUser.uid, goalId(to), { ...base, accountId: from })
+    : await withdrawFromGoal(currentUser.uid, goalId(from), { ...base, accountId: to });
+  if (result.ok) return { ...result, goalMovement: deposit ? 'deposit' : 'withdraw' };
+  const errors = { ...result.errors };
+  if (errors.accountId) { errors[deposit ? 'fromAccountId' : 'toAccountId'] = errors.accountId; delete errors.accountId; }
+  // Erro da meta (ex.: resgate acima do guardado) aparece junto do select da meta, não só em toast.
+  if (errors._form) { errors[deposit ? 'toAccountId' : 'fromAccountId'] = errors._form; delete errors._form; }
+  return { ok: false, errors };
 }
 
 /** Confirma transferência. */

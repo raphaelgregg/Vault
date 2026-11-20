@@ -417,7 +417,7 @@ describe('metas vinculadas a conta (VF-2-03o)', () => {
   it('aporte/resgate bloqueado em meta vinculada sem movimentações; meta sem conta ou legada segue aceitando', async () => {
     const mk = (goal, txs = []) => {
       const atomic = [];
-      return { atomic, io: { getById: async (u, c, id) => (c === 'goals' ? goal : { id, status: 'active' }), list: async () => txs, commitAtomic: async (u, ops) => { atomic.push(ops); return ['t']; } } };
+      return { atomic, io: { getById: async (u, c, id) => (c === 'goals' ? goal : { id, status: 'active', initialBalanceCents: 100000 }), list: async () => txs, commitAtomic: async (u, ops) => { atomic.push(ops); return ['t']; } } };
     };
     const raw = { amountCents: '10,00', date: '2026-11-19', accountId: 'a1' };
     const linked = mk({ id: 'g1', accountId: 'nu', targetCents: 100000, status: 'active' });

@@ -343,6 +343,48 @@ try {
   await page.waitForFunction(() => !/Apagar pendente UI/.test(document.querySelector('#page-content').innerText));
   assert.equal(await balanceOf(alelo.id), before);
 
+  log('transferências ↔ metas: aportar (conta → meta), sacar (meta → conta), saldo insuficiente e resgate acima do guardado');
+  const goalId = await page.evaluate(async () => {
+    const { createGoal } = await import('/js/services/goals.js');
+    const { auth } = await import('/js/firebase/client.js');
+    return (await createGoal(auth.currentUser.uid, { name: 'Viagem UI', targetCents: '1.000,00' })).id;
+  });
+  const goalSavedNow = (id) => page.evaluate(async (g) => {
+    const { listGoalTransactions, goalSavedCents } = await import('/js/services/goals.js');
+    const { auth } = await import('/js/firebase/client.js');
+    return goalSavedCents(await listGoalTransactions(auth.currentUser.uid, g));
+  }, id);
+  const goalTransferUi = async (from, to, amount, reason) => {
+    await go('transferencias');
+    await page.getByRole('button', { name: 'Nova transferência' }).click();
+    await page.selectOption('#fromAccountId', from);
+    await page.selectOption('#toAccountId', to);
+    await page.fill('#amountCents', amount);
+    await page.fill('#reason', reason);
+    await page.locator('#transfer-form button[type="submit"]').click();
+  };
+  const balA = await balanceOf(accounts['Conta A']);
+  await goalTransferUi(accounts['Conta A'], `goal:${goalId}`, '20,00', 'Aporte UI');
+  await waitText(/Aporte \(conta → meta\)/);
+  assert.equal(await balanceOf(accounts['Conta A']), balA - 2000);
+  assert.equal(await goalSavedNow(goalId), 2000);
+  assert.match(await content(), /Viagem UI/);
+
+  await goalTransferUi(`goal:${goalId}`, accounts['Conta A'], '5,00', 'Saque UI');
+  await waitText(/Resgate \(meta → conta\)/);
+  assert.equal(await balanceOf(accounts['Conta A']), balA - 1500);
+  assert.equal(await goalSavedNow(goalId), 1500);
+
+  await goalTransferUi(`goal:${goalId}`, accounts['Conta A'], '100,00', 'Saque demais UI');
+  await page.waitForFunction(() => /excede|insuficiente|maior/i.test(document.querySelector('#transfer-form')?.innerText ?? ''));
+  assert.equal(await goalSavedNow(goalId), 1500, 'resgate acima do guardado não grava');
+  await page.getByRole('button', { name: 'Cancelar', exact: true }).click();
+
+  await goalTransferUi(alelo.id, `goal:${goalId}`, '10,00', 'Aporte sem saldo UI');
+  await page.waitForFunction(() => /Saldo insuficiente em Alelo Pod/.test(document.querySelector('#transfer-form')?.innerText ?? ''));
+  assert.equal(await goalSavedNow(goalId), 1500, 'aporte sem saldo não grava');
+  await page.getByRole('button', { name: 'Cancelar', exact: true }).click();
+
   assert.deepEqual(app.problems, [], `erros de console/página: ${app.problems.join(' | ')}`);
   console.info('E2E movimentos OK');
 } catch (error) {

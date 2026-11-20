@@ -256,6 +256,12 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Solução: botão sempre visível; confirmação explica o estorno (saldo derivado: valor volta à origem e sai do destino, nada é regravado); `deleteTransfer` retorna `{ reversed, amountCents }`. Pendente/cancelada não afetam saldo. Limitação: excluir uma confirmada não valida o saldo do destino (mesmo comportamento de receitas/despesas), podendo deixá-lo negativo se o dinheiro já foi usado.
 - Arquivos: `js/modules/transferencias.js`, `js/services/transfers.js`, `tests/services/transfers.test.mjs`, `tests/e2e/movements.mjs`.
 
+- [x] **VF-2-03ah — Transferências para/de metas (guardar e sacar)** (funcionalidade) — CONCLUÍDA 2026-11-20 (**`firestore.rules` e modelo NÃO alterados**).
+- Decisão: meta continua sendo meta (não vira conta). Origem/destino do formulário de Transferências aceitam metas (optgroup "Metas"); conta → meta = aporte (`depositToGoal`) e meta → conta = resgate (`withdrawFromGoal`) em `goalTransactions`, fonte única do guardado (aportes − resgates); saldo da conta segue derivado (aporte debita, resgate credita). Sem transferência entre metas; aporte/resgate efetivado na hora (status desabilitado) e não editável (movimentações são imutáveis; histórico em "Aportes e resgates em metas", últimos 20).
+- Regras: aporte exige saldo na conta (`checkSufficientBalance`, também vale para o "Aportar" de Metas); resgate limitado ao guardado; metas vinculadas a conta não aparecem (alimente a conta); só ativas recebem aporte; ativas/concluídas com saldo > 0 permitem saque.
+- Arquivos: `js/modules/transferencias.js`, `js/services/goals.js`, `js/services/transfers.js`, `tests/services/{goals,debtor-origins}.test.mjs`, `tests/e2e/movements.mjs`.
+- Limitações: checagem de saldo client-side; aportes/resgates não aparecem na tabela paginada de transferências (painel próprio); sem rendimento/juros automático — a meta guarda o que foi aportado.
+
 ### Fase 3 — Arquitetura, qualidade e refatoração
 
 - [x] **VF-3-01 — Reduzir duplicação nos services** (Médio) — CONCLUÍDA 2026-11-18: extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
@@ -328,3 +334,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-19 — VF-2-03ae concluída (conta sem nome, `accountLabel` único nos selects). **Republicar `firestore.rules`** (`npx firebase deploy --only firestore:rules`, com autorização).
 - 2026-11-19 — VF-2-03af concluída (transferência bloqueada sem saldo na origem). Sem mudança em Rules/índices.
 - 2026-11-19 — VF-2-03ag concluída (excluir transferência confirmada/pendente/cancelada, com estorno explicado).
+- 2026-11-20 — VF-2-03ah concluída (transferir para meta e sacar de meta pelo formulário de Transferências; aporte exige saldo).

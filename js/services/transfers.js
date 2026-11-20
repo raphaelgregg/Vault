@@ -39,7 +39,7 @@ export async function getTransfer(uid, transferId) {
  * LIMITAÇÃO: checagem client-side (janela de concorrência entre leitura e gravação, como nas demais
  * verificações); o saldo lê até READ_LIMIT movimentos por coleção (ver services/balances.js).
  */
-export async function checkSufficientBalance(uid, fromAccountId, amountCents, { creditCents = 0, field = 'fromAccountId' } = {}, io = {}) {
+export async function checkSufficientBalance(uid, fromAccountId, amountCents, { creditCents = 0, field = 'fromAccountId', what = 'transferência' } = {}, io = {}) {
   try {
     const account = await (io.getById ?? getById)(uid, COLLECTIONS.accounts, fromAccountId);
     if (!account) return { ok: false, errors: { [field]: 'Conta de origem não encontrada.' } };
@@ -48,13 +48,13 @@ export async function checkSufficientBalance(uid, fromAccountId, amountCents, { 
     if (available < amountCents) {
       return {
         ok: false,
-        errors: { [field]: `Saldo insuficiente em ${accountLabel(account)}: disponível ${formatCents(available)}, transferência de ${formatCents(amountCents)}.` },
+        errors: { [field]: `Saldo insuficiente em ${accountLabel(account)}: disponível ${formatCents(available)}, ${what} de ${formatCents(amountCents)}.` },
       };
     }
     return null;
   } catch (error) {
     console.error('[transfers] falha ao verificar saldo', error);
-    return { ok: false, errors: { [field]: 'Não foi possível verificar o saldo da conta de origem. A transferência não foi registrada; tente novamente.' } };
+    return { ok: false, errors: { [field]: 'Não foi possível verificar o saldo da conta de origem. A operação não foi registrada; tente novamente.' } };
   }
 }
 

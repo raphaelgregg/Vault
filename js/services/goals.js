@@ -16,6 +16,7 @@ import {
   removeAudited,
   commitAtomic,
 } from './firestore.js';
+import { checkSufficientBalance } from './transfers.js';
 import {
   buildEntity,
   applyGoalTransaction,
@@ -46,6 +47,19 @@ export async function getGoal(uid, goalId) {
 
 export async function listGoalTransactions(uid, goalId) {
   return list(uid, TXS, { where: [['goalId', '==', goalId]] });
+}
+
+/** Aportes/resgates mais recentes de todas as metas (histórico exibido em Transferências). */
+export async function listRecentGoalTransactions(uid, limit = 20, io = {}) {
+  return (io.list ?? list)(uid, TXS, { orderBy: ['date', 'desc'], limit });
+}
+
+/**
+ * Metas que podem receber/devolver dinheiro por transferência: ativas e NÃO vinculadas a conta (as vinculadas
+ * seguem o saldo da conta; para alimentá-las transfira para a conta). Puro. `txCounts`: Map(goalId → nº de movimentações).
+ */
+export function transferableGoals(goals = [], txCounts = new Map()) {
+  return goals.filter((g) => g.status === 'active' && !isAccountLinkedGoal(g, txCounts.get(g.id)));
 }
 
 /** Valida a conta opcional da meta (precisa existir). */
@@ -152,6 +166,11 @@ export async function registerGoalTransaction(uid, goalId, type, rawData, io = {
   const saved = goalSavedCents(transactions);
   const applied = applyGoalTransaction(goal, saved, type, data.amountCents);
   if (!applied.ok) return { ok: false, errors: { _form: applied.error } };
+  // Aporte tira dinheiro da conta: ela precisa ter saldo (resgate é limitado ao guardado, em applyGoalTransaction).
+  if (type === 'deposit') {
+    const blocked = await checkSufficientBalance(uid, data.accountId, data.amountCents, { field: 'accountId', what: 'aporte' }, io);
+    if (blocked) return blocked;
+  }
 
   const ops = [{ type: 'create', collection: TXS, data }];
   if (applied.status !== goal.status) {
