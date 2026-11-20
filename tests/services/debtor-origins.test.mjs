@@ -337,7 +337,7 @@ describe('antecipar e quitar (VF-2-03n)', () => {
     const { io, atomic } = make({ debts: [future] });
     const part = await registerDebtPayment(uid, 'f1', { amountCents: '100,00', date: '2026-11-19', accountId: 'a1' }, { ...io, list: async () => [] });
     assert.deepEqual([part.ok, part.anticipated, part.debtPaid], [true, true, false]);
-    assert.equal(atomic.at(-1).find((o) => o.collection === 'debtors').data.receivedCents, 10000);
+    assert.equal(atomic.at(-1).find((o) => o.collection === 'debtors').increments.receivedCents, 10000);
     const full = await registerDebtPayment(uid, 'f1', { amountCents: '300,00', date: '2026-11-19', accountId: 'a1' }, { ...io, list: async () => [] });
     assert.deepEqual([full.ok, full.anticipated, full.debtPaid], [true, true, true]);
     assert.ok(atomic.at(-1).some((o) => o.collection === 'debts' && o.data.status === 'paid'));
@@ -359,7 +359,7 @@ describe('antecipar e quitar (VF-2-03n)', () => {
       [['p1', 23335], ['p2', 33333], ['p3', 33333]]);
     assert.deepEqual(ops.filter((o) => o.collection === 'debts').map((o) => o.docId), ['p1', 'p2', 'p3']); // g2 e cancelada intactas
     assert.ok(ops.filter((o) => o.collection === 'debts').every((o) => o.data.status === 'paid'));
-    assert.deepEqual(ops.at(-1).data, { receivedCents: 90001, status: 'open' }); // 100000 emprestado: cartão/restante mantém aberto
+    assert.deepEqual([ops.at(-1).data, ops.at(-1).increments], [{}, { receivedCents: 23335 + 33333 + 33333 }]); // soma por increment; cartão/restante mantém aberto
     assert.equal(r.debtorPaid, false);
   });
 
@@ -368,7 +368,7 @@ describe('antecipar e quitar (VF-2-03n)', () => {
     const { io, atomic } = make({ debts });
     const r = await settleDebts(uid, 'd1', {}, rawS(), io);
     assert.deepEqual([r.ok, r.count, r.totalCents, r.debtorPaid], [true, 2, 100000, true]);
-    assert.deepEqual(atomic[0].at(-1).data, { receivedCents: 100000, status: 'paid' });
+    assert.deepEqual([atomic[0].at(-1).data, atomic[0].at(-1).increments], [{ status: 'paid' }, { receivedCents: 100000 }]);
     const legacy = await settleDebts(uid, 'd1', { groupId: 'p1' }, rawS(), make({ debts }).io); // parcela legada: grupo = próprio id
     assert.equal(legacy.count, 1);
   });

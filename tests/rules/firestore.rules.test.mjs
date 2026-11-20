@@ -37,7 +37,7 @@ import {
   query,
   limit,
 } from 'firebase/firestore';
-import { serverTimestamp, deleteField } from 'firebase/firestore';
+import { serverTimestamp, deleteField, increment } from 'firebase/firestore';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rules = readFileSync(join(here, '..', '..', 'firestore.rules'), 'utf8');
@@ -1246,5 +1246,87 @@ describe('Quitação por parcela e por mês (VF-2-03ak): recebimento de parcela 
   it('outro usuário não registra recebimento no devedor alheio', async () => {
     await seedAll();
     await assertFails(setDoc(doc(asUser(BOB), 'users', ALICE, 'debtPayments', 'bob'), payment({ purchaseId: 'pc1' })));
+  });
+});
+
+describe('Recebimentos parciais: histórico imutável, IDs sequenciais e total do devedor por increment (VF-2-03al)', () => {
+  const noon = (d) => new Date(`${d}T12:00:00.000Z`);
+  const debtorDoc = (db) => doc(db, 'users', ALICE, 'debtors', 'dev1');
+  const debtDoc = (db, id = 'd1') => doc(db, 'users', ALICE, 'debts', id);
+  const payDoc = (db, id) => doc(db, 'users', ALICE, 'debtPayments', id);
+  const payment = (o = {}) => ({
+    debtId: 'd1', debtorId: 'dev1', amountCents: 4000, date: noon('2026-12-06'), accountId: 'acc1',
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...o,
+  });
+
+  async function seedParcela() {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      const base = { createdAt: new Date('2026-11-01'), updatedAt: new Date('2026-11-01') };
+      await setDoc(doc(db, 'users', ALICE, 'accounts', 'acc1'), { ...account, ...base });
+      await setDoc(doc(db, 'users', ALICE, 'debtors', 'dev1'), { name: 'Renan', loanDate: noon('2026-11-10'), lentCents: 10000, receivedCents: 0, status: 'open', ...base });
+      await setDoc(doc(db, 'users', ALICE, 'debts', 'd1'), { debtorId: 'dev1', description: 'Parcela', principalCents: 10000, dueDate: noon('2026-12-30'), installmentNumber: 1, installmentsTotal: 1, debtGroupId: 'g', status: 'pending', ...base });
+    });
+    return asUser(ALICE);
+  }
+
+  it('cenário 40 + 60: dois recebimentos independentes (IDs sequenciais), parcela paga, devedor somado por increment', async () => {
+    const db = await seedParcela();
+    const one = writeBatch(db);
+    one.set(payDoc(db, 'pay-d1-1'), payment({ amountCents: 4000 }));
+    one.update(debtorDoc(db), { receivedCents: increment(4000), updatedAt: serverTimestamp() });
+    await assertSucceeds(one.commit());
+    assert.equal((await getDoc(debtDoc(db))).data().status, 'pending'); // parcial: segue pendente
+    const two = writeBatch(db);
+    two.set(payDoc(db, 'pay-d1-2'), payment({ amountCents: 6000, date: noon('2026-12-10') }));
+    two.update(debtDoc(db), { status: 'paid', updatedAt: serverTimestamp() });
+    two.update(debtorDoc(db), { receivedCents: increment(6000), status: 'paid', updatedAt: serverTimestamp() });
+    await assertSucceeds(two.commit());
+    const p1 = (await getDoc(payDoc(db, 'pay-d1-1'))).data();
+    const p2 = (await getDoc(payDoc(db, 'pay-d1-2'))).data();
+    assert.deepEqual([p1.amountCents, p2.amountCents], [4000, 6000]);
+    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 10000);
+    assert.equal((await getDoc(debtDoc(db))).data().status, 'paid');
+  });
+
+  it('HISTÓRICO IMUTÁVEL: não edita valor/data/conta de recebimento existente nem regrava o mesmo ID', async () => {
+    const db = await seedParcela();
+    await assertSucceeds(setDoc(payDoc(db, 'pay-d1-1'), payment()));
+    await assertFails(updateDoc(payDoc(db, 'pay-d1-1'), { amountCents: 9999, updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(payDoc(db, 'pay-d1-1'), { date: noon('2026-01-01'), updatedAt: serverTimestamp() }));
+    await assertFails(setDoc(payDoc(db, 'pay-d1-1'), payment({ amountCents: 6000 }))); // 2º envio com o mesmo ID (leitura antiga)
+    assert.equal((await getDoc(payDoc(db, 'pay-d1-1'))).data().amountCents, 4000);
+  });
+
+  it('segundo envio concorrente (mesmo ID) derruba o LOTE INTEIRO: devedor não soma duas vezes', async () => {
+    const db = await seedParcela();
+    const a = writeBatch(db);
+    a.set(payDoc(db, 'pay-d1-1'), payment({ amountCents: 6000 }));
+    a.update(debtorDoc(db), { receivedCents: increment(6000), updatedAt: serverTimestamp() });
+    await assertSucceeds(a.commit());
+    const b = writeBatch(db); // leu o mesmo histórico: gera o MESMO ID
+    b.set(payDoc(db, 'pay-d1-1'), payment({ amountCents: 6000 }));
+    b.update(debtorDoc(db), { receivedCents: increment(6000), updatedAt: serverTimestamp() });
+    await assertFails(b.commit());
+    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 6000);
+  });
+
+  it('increment: soma nas duas direções sem perder (parcelas diferentes) e as Rules barram receber acima do emprestado', async () => {
+    const db = await seedParcela();
+    const x = writeBatch(db);
+    x.set(payDoc(db, 'pay-d1-1'), payment({ amountCents: 4000 }));
+    x.update(debtorDoc(db), { receivedCents: increment(4000), updatedAt: serverTimestamp() });
+    await assertSucceeds(x.commit());
+    const y = writeBatch(db); // outra operação, também lida com received=0: o increment soma sobre o valor ATUAL
+    y.set(payDoc(db, 'pay-d1-2'), payment({ amountCents: 3000 }));
+    y.update(debtorDoc(db), { receivedCents: increment(3000), updatedAt: serverTimestamp() });
+    await assertSucceeds(y.commit());
+    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 7000);
+    const over = writeBatch(db);
+    over.set(payDoc(db, 'pay-d1-3'), payment({ amountCents: 3001 }));
+    over.update(debtorDoc(db), { receivedCents: increment(3001), updatedAt: serverTimestamp() }); // 10001 > 10000 emprestado
+    await assertFails(over.commit());
+    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 7000);
+    assert.equal((await getDoc(payDoc(db, 'pay-d1-3'))).exists(), false);
   });
 });

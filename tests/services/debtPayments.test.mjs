@@ -103,7 +103,8 @@ describe('registerDebtPayment — fluxo atômico', () => {
     const [pay, debtOp, debtorOp] = calls.atomic[0];
     assert.deepEqual(pay.data, { debtId: 'd1', debtorId: 'dev1', amountCents: 50000, date: '2026-11-18', accountId: 'acc1' });
     assert.deepEqual(debtOp, { type: 'update', collection: 'debts', docId: 'd1', data: { status: 'paid' }, action: 'pay' });
-    assert.deepEqual(debtorOp.data, { receivedCents: 50000, status: 'paid' });
+    // total do devedor por `increment` atômico (não valor absoluto de leitura velha); `status: paid` só quando zera o pendente
+    assert.deepEqual([debtorOp.data, debtorOp.increments], [{ status: 'paid' }, { receivedCents: 50000 }]);
     assert.equal(debtorOp.action, 'receive');
     assert.equal(calls.create.length + calls.update.length, 0); // nada fora do lote
   });
@@ -114,14 +115,14 @@ describe('registerDebtPayment — fluxo atômico', () => {
     assert.deepEqual([r.ok, r.debtPaid, r.debtorPaid], [true, false, false]);
     const ops = calls.atomic[0];
     assert.equal(ops.length, 2);
-    assert.deepEqual(ops[1].data, { receivedCents: 20000, status: 'open' });
+    assert.deepEqual([ops[1].data, ops[1].increments], [{}, { receivedCents: 20000 }]); // parcial: não reescreve o status
   });
 
   it('considera recebimentos anteriores da parcela e quita ao completar', async () => {
     const { io, calls } = makeIo({ payments: [{ amountCents: 20000 }], debtors: [debtor({ receivedCents: 20000 })] });
     const r = await registerDebtPayment(uid, 'd1', rawPay({ amountCents: '300,00' }), io);
     assert.equal(r.debtPaid, true);
-    assert.deepEqual(calls.atomic[0][2].data, { receivedCents: 50000, status: 'open' });
+    assert.deepEqual([calls.atomic[0][2].data, calls.atomic[0][2].increments], [{}, { receivedCents: 30000 }]);
     const over = await registerDebtPayment(uid, 'd1', rawPay({ amountCents: '300,01' }), io);
     assert.ok(over.errors.amountCents);
   });

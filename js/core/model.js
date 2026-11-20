@@ -818,6 +818,18 @@ export function cardInvoicesSummary({ cards = [], invoices = [], purchases = [],
 }
 
 /**
+ * Estado de recebimento de UMA parcela, derivado da SOMA dos recebimentos associados (nunca gravado):
+ * `pending` = nada recebido; `partial` = recebido menor que o valor; `paid` = recebido igual (ou parcela já
+ * marcada paga). Puro.
+ */
+export function installmentPaymentState(amountCents, receivedCents, debtStatus = null) {
+  if (debtStatus === 'cancelled') return 'cancelled';
+  const received = Number(receivedCents) || 0;
+  if (debtStatus === 'paid' || received >= (Number(amountCents) || 0)) return 'paid';
+  return received > 0 ? 'partial' : 'pending';
+}
+
+/**
  * Dívidas do devedor em lista única (VF-2-03m) — puro. Cada obrigação é independente:
  *  - `cash`: dívida à vista (`debts` com installmentsTotal 1);
  *  - `installment`: dívida parcelada (`debts` com installmentsTotal N, agrupadas por `debtGroupId`);
@@ -842,6 +854,7 @@ export function debtorObligations({ debtor, debts = [], receivedByDebt = new Map
       remainingCents: d.status === 'paid' ? 0 : Math.max(0, (Number(d.principalCents) || 0) - received),
       dueDate: d.dueDate, referenceMonth: typeof d.dueDate === 'string' ? d.dueDate.slice(0, 7) : null,
       status: d.status === 'paid' || (Number(d.principalCents) || 0) - received <= 0 ? 'paid' : 'pending',
+      paymentState: installmentPaymentState(Number(d.principalCents) || 0, received, d.status),
     });
   }
   for (const p of purchases) {
@@ -858,6 +871,7 @@ export function debtorObligations({ debtor, debts = [], receivedByDebt = new Map
       invoiceStatus: invoice?.status ?? null,
       // `paid` = o DEVEDOR pagou esta parcela (recebimento registrado); a situação da fatura do cartão é `invoiceStatus`.
       status: received >= amount ? 'paid' : invoice?.status === 'cancelled' ? 'cancelled' : 'pending',
+      paymentState: invoice?.status === 'cancelled' && received < amount ? 'cancelled' : installmentPaymentState(amount, received),
     });
   }
   items.sort((a, b) => String(a.referenceMonth).localeCompare(String(b.referenceMonth))

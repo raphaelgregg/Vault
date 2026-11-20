@@ -21,6 +21,7 @@ import {
   collectionGroup,
   serverTimestamp,
   deleteField,
+  increment,
   Timestamp,
   writeBatch,
 } from 'firebase/firestore';
@@ -285,10 +286,14 @@ export async function commitAtomic(uid, ops, io = {}) {
         action: op.action ?? 'delete', collection: op.collection, docId: op.docId, before: op.before,
       }));
     } else {
-      batch.update(userDocFn(uid, op.collection, op.docId), { ...toFirestoreData(op.data), ...stamps });
+      // `op.increments` ({ campo: delta }): soma ATÔMICA no servidor (`increment`) — seguro contra leituras antigas
+      // concorrentes (um valor absoluto calculado de leitura velha perderia a soma da outra operação).
+      const increments = Object.fromEntries(Object.entries(op.increments ?? {}).map(([field, delta]) => [field, increment(delta)]));
+      batch.update(userDocFn(uid, op.collection, op.docId), { ...toFirestoreData(op.data), ...increments, ...stamps });
       ids.push(op.docId);
       batch.set(newDocRef(uid, 'auditLog'), auditPayload(uid, {
-        action: op.action ?? 'update', collection: op.collection, docId: op.docId, after: op.data,
+        action: op.action ?? 'update', collection: op.collection, docId: op.docId,
+        after: { ...op.data, ...Object.fromEntries(Object.entries(op.increments ?? {}).map(([field, delta]) => [`${field}Delta`, delta])) },
       }));
     }
   }

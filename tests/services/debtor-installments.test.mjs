@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  settleInstallment, settleMonthInstallments, previewMonthSettlement, loadDebtorLedger, settlementPaymentId, registerDebtPayment,
+  settleInstallment, settleMonthInstallments, previewMonthSettlement, loadDebtorLedger, receiptPaymentId, registerDebtPayment,
 } from '../../js/services/debtPayments.js';
 import { loadDebtorStatements } from '../../js/services/debtors.js';
 import {
@@ -13,61 +13,8 @@ import {
 } from '../../js/core/model.js';
 import { monthlyForecast } from '../../js/core/forecast.js';
 
-const UID = 'u1';
-const DEBTOR = 'd1';
+import { makeStore, UID, DEBTOR } from './helpers/memory-store.mjs';
 
-/** Base em memória com o contrato do Firestore que importa aqui: lote atômico e `create` com ID existente negado (Rules). */
-function makeStore(seed = {}) {
-  const tables = structuredClone({
-    accounts: [{ id: 'acc', status: 'active', institution: 'Banco', name: 'Conta', initialBalanceCents: 100000 }, { id: 'off', status: 'inactive', institution: 'Banco', name: 'Off', initialBalanceCents: 0 }],
-    debtors: [{ id: DEBTOR, name: 'Renan', status: 'open', lentCents: 23100, receivedCents: 0 }],
-    cards: [{ id: 'k1', name: 'Nubank' }],
-    invoices: [{ id: 'inv12', cardId: 'k1', referenceMonth: '2026-12', dueDate: '2026-12-06', status: 'open' }],
-    cardPurchases: [
-      { id: 'pAgua', cardId: 'k1', debtorId: DEBTOR, description: 'Água', amountCents: 2500, invoiceId: 'inv12', installmentNumber: 1, installmentsTotal: 1, purchaseDate: '2026-11-20' },
-      { id: 'pMercado', cardId: 'k1', debtorId: DEBTOR, description: 'Mercado', amountCents: 7800, invoiceId: 'inv12', installmentNumber: 1, installmentsTotal: 1, purchaseDate: '2026-11-21' },
-      { id: 'pSuper', cardId: 'k1', debtorId: DEBTOR, description: 'Supermercado', amountCents: 2800, invoiceId: 'inv12', installmentNumber: 1, installmentsTotal: 1, purchaseDate: '2026-11-22' },
-    ],
-    debts: [
-      { id: 'dNov', debtorId: DEBTOR, description: 'Parcela', principalCents: 5000, dueDate: '2026-11-30', installmentNumber: 1, installmentsTotal: 2, debtGroupId: 'g1', status: 'pending' },
-      { id: 'dDez', debtorId: DEBTOR, description: 'Parcela', principalCents: 5000, dueDate: '2026-12-30', installmentNumber: 2, installmentsTotal: 2, debtGroupId: 'g1', status: 'pending' },
-    ],
-    debtPayments: [],
-    ...seed,
-  });
-  const calls = { commits: [] };
-  const where = (rows, clauses = []) => rows.filter((r) => clauses.every(([f, op, v]) => (op === '==' ? r[f] === v : op === 'in' ? v.includes(r[f]) : true)));
-  const io = {
-    getById: async (_u, c, id) => structuredClone((tables[c] ?? []).find((r) => r.id === id) ?? null),
-    list: async (_u, c, o = {}) => structuredClone(where(tables[c] ?? [], o.where)),
-    commitAtomic: async (_u, ops) => {
-      calls.commits.push(structuredClone(ops));
-      if (ops.length > 250) throw new Error('lote acima do limite');
-      const draft = structuredClone(tables);
-      let n = 0;
-      const ids = [];
-      for (const op of ops) {
-        draft[op.collection] ??= [];
-        if (op.type === 'create') {
-          const id = op.docId ?? `auto${(n += 1)}${draft[op.collection].length}`;
-          // Rules: criar em ID que já existe vira update e exige createdAt imutável (serverTimestamp muda) → negado.
-          if (draft[op.collection].some((r) => r.id === id)) throw Object.assign(new Error('permission-denied'), { code: 'permission-denied' });
-          draft[op.collection].push({ id, ...op.data });
-          ids.push(id);
-        } else {
-          const row = draft[op.collection].find((r) => r.id === op.docId);
-          if (!row) throw new Error('not-found');
-          Object.assign(row, op.data);
-          ids.push(op.docId);
-        }
-      }
-      for (const k of Object.keys(draft)) tables[k] = draft[k]; // tudo ou nada
-      return ids;
-    },
-  };
-  // loadDebtorStatements lê 'cardPurchases'/'debts'/'debtPayments'/'invoices' pelo nome da coleção
-  return { tables, io, calls };
-}
 const debtorOf = (s) => s.tables.debtors.find((d) => d.id === DEBTOR);
 const payments = (s) => s.tables.debtPayments;
 const pay = { date: '2026-12-06', accountId: 'acc' };
@@ -84,7 +31,7 @@ describe('quitar UMA parcela', () => {
     const s = makeStore();
     const r = await settleInstallment(UID, DEBTOR, { purchaseId: 'pAgua' }, pay, s.io);
     assert.deepEqual([r.ok, r.settled, r.amountCents, r.remainingCents], [true, true, 2500, 0]);
-    assert.deepEqual(payments(s), [{ id: 'settle-pAgua', purchaseId: 'pAgua', debtorId: DEBTOR, amountCents: 2500, date: '2026-12-06', accountId: 'acc', action: undefined }].map(({ action, ...x }) => x));
+    assert.deepEqual(payments(s), [{ id: 'pay-pAgua-1', purchaseId: 'pAgua', debtorId: DEBTOR, amountCents: 2500, date: '2026-12-06', accountId: 'acc', action: undefined }].map(({ action, ...x }) => x));
     assert.equal(await statusOf(s, 'pAgua'), 'paid');
     for (const id of ['pMercado', 'pSuper', 'dNov', 'dDez']) assert.equal(await statusOf(s, id), 'pending', id);
     assert.equal(s.tables.debts.every((d) => d.status === 'pending'), true); // nenhuma outra parcela mudou
@@ -141,7 +88,8 @@ describe('quitar UMA parcela', () => {
     const part = await settleInstallment(UID, DEBTOR, { purchaseId: 'pMercado' }, { ...pay, amountCents: '30,00' }, s.io);
     assert.deepEqual([part.ok, part.settled, part.remainingCents], [true, false, 4800]);
     assert.equal(await statusOf(s, 'pMercado'), 'pending');
-    assert.notEqual(payments(s)[0].id, settlementPaymentId('pMercado'));
+    assert.equal(payments(s)[0].id, 'pay-pMercado-1'); // cada recebimento (parcial ou final) tem ID próprio e sequencial
+    assert.equal(receiptPaymentId('pMercado', payments(s)), 'pay-pMercado-2');
     assert.match((await settleInstallment(UID, DEBTOR, { purchaseId: 'pMercado' }, { ...pay, amountCents: '48,01' }, s.io)).errors.amountCents, /excede/);
     const rest = await settleInstallment(UID, DEBTOR, { purchaseId: 'pMercado' }, pay, s.io);
     assert.deepEqual([rest.ok, rest.settled, rest.amountCents], [true, true, 4800]);
@@ -184,7 +132,7 @@ describe('quitar TODAS as parcelas pendentes de um mês', () => {
     const r = await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, s.io);
     assert.deepEqual([r.ok, r.count, r.totalCents, r.debtorPaid], [true, 4, 2500 + 7800 + 2800 + 5000, false]);
     assert.equal(s.calls.commits.length, 1); // lote ATÔMICO único
-    assert.deepEqual(payments(s).map((p) => p.id).sort(), ['settle-dDez', 'settle-pAgua', 'settle-pMercado', 'settle-pSuper']);
+    assert.deepEqual(payments(s).map((p) => p.id).sort(), ['pay-dDez-1', 'pay-pAgua-1', 'pay-pMercado-1', 'pay-pSuper-1']);
     assert.ok(payments(s).every((p) => p.date === '2026-12-06' && p.accountId === 'acc' && p.debtorId === DEBTOR));
     assert.equal(s.tables.debts.find((d) => d.id === 'dDez').status, 'paid');
     assert.equal(s.tables.debts.find((d) => d.id === 'dNov').status, 'pending'); // 6) outro mês intacto
@@ -348,16 +296,16 @@ describe('integridade financeira: saldo, histórico e indicadores', () => {
     assert.equal(buildEntity('debtPayments', { ...base, debtId: 'x', purchaseId: 'p' }).ok, false);
   });
 
-  it('registerDebtPayment (parcial/antecipação) segue funcionando e o recebimento que quita usa ID determinístico', async () => {
+  it('registerDebtPayment (parcial/antecipação) segue funcionando e cada recebimento tem ID exclusivo e sequencial', async () => {
     const s = makeStore();
     const ops = [];
     const spy = { ...s.io, commitAtomic: async (u, o) => { ops.push(o); return s.io.commitAtomic(u, o); } };
     const part = await registerDebtPayment(UID, 'dDez', { amountCents: '20,00', date: '2026-12-01', accountId: 'acc' }, spy);
     assert.equal(part.debtPaid, false);
-    assert.equal(ops[0][0].docId, undefined);
+    assert.equal(ops[0][0].docId, 'pay-dDez-1');
     const rest = await registerDebtPayment(UID, 'dDez', { amountCents: '30,00', date: '2026-12-02', accountId: 'acc' }, spy);
     assert.equal(rest.debtPaid, true);
-    assert.equal(ops[1][0].docId, 'settle-dDez');
+    assert.equal(ops[1][0].docId, 'pay-dDez-2');
   });
 });
 

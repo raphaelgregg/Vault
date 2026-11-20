@@ -196,7 +196,7 @@ try {
   const afterOne = await snapshot();
   assert.equal(afterOne.bal, base0.bal + 2500);
   assert.equal(afterOne.debtor.receivedCents, 2500);
-  assert.deepEqual(afterOne.payments.map((p) => [p.id, !!p.purchaseId, !!p.debtId, p.amountCents]), [['settle-' + afterOne.payments[0].purchaseId, true, false, 2500]]);
+  assert.deepEqual(afterOne.payments.map((p) => [p.id, !!p.purchaseId, !!p.debtId, p.amountCents]), [[`pay-${afterOne.payments[0].purchaseId}-1`, true, false, 2500]]);
   assert.equal(base0.receivable - afterOne.receivable, 2500); // a receber do mês (dashboard/previsão) caiu
   // — quitar TODAS as pendentes do mês, com confirmação
   await page.getByRole('button', { name: 'Quitar todas as parcelas pendentes deste mês' }).click();
@@ -214,7 +214,7 @@ try {
   assert.equal(afterMonth.debtor.receivedCents, 18100);
   assert.equal(afterMonth.payments.length, 4); // histórico: 1 individual + 3 do lote, sem duplicar a Água
   assert.equal(new Set(afterMonth.payments.map((p) => p.id)).size, 4);
-  assert.ok(afterMonth.payments.every((p) => p.id.startsWith('settle-') && p.accountId === base0.accId));
+  assert.ok(afterMonth.payments.every((p) => p.id.startsWith('pay-') && p.accountId === base0.accId));
   assert.equal(afterMonth.payments.filter((p) => p.debtId).length, 1);
   assert.deepEqual(afterMonth.debts.map((d) => [d.n, d.status]).sort(), [[1, 'paid'], [2, 'pending']]); // a parcela do OUTRO mês não mudou
   assert.equal(base0.receivable - afterMonth.receivable, 18100);
@@ -228,6 +228,94 @@ try {
   assert.equal(dupe.ok, false);
   assert.equal((await snapshot()).payments.length, 4);
   await page.keyboard.press('Escape');
+
+  log('VF-2-03al: recebimento parcial (40 + 60 de uma parcela de R$ 100), histórico independente, saldo uma vez e tentativa simultânea');
+  const parcial = await page.evaluate(async () => {
+    const { listCards, registerCardPurchase } = await import('/js/services/creditCards.js');
+    const { createDebtor } = await import('/js/services/debtors.js');
+    const { listAccounts } = await import('/js/services/accounts.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const uid = auth.currentUser.uid;
+    const [card] = (await listCards(uid)).filter((c) => c.name === 'Cartão E2E');
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+    const debtor = await createDebtor(uid, { name: 'Parcial', lentCents: '0,00', loanDate: today });
+    let month = null;
+    for (const description of ['Sofá', 'Cadeira']) {
+      const r = await registerCardPurchase(uid, card.id, { description, amountCents: '100,00', installmentsTotal: 1, purchaseDate: today, debtorId: debtor.id });
+      month = r.invoiceMonths[0].split('_').pop();
+    }
+    const accounts = await listAccounts(uid);
+    return { id: debtor.id, month, accId: accounts.find((a) => a.institution === 'Banco E2E').id };
+  });
+  const state = async () => page.evaluate(async ([debtorId, accId]) => {
+    const { list } = await import('/js/services/firestore.js');
+    const { loadBalances } = await import('/js/services/balances.js');
+    const { listAccounts } = await import('/js/services/accounts.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const uid = auth.currentUser.uid;
+    const accs = await listAccounts(uid);
+    const bal = (await loadBalances(uid, accs)).balances.get(accId);
+    const payments = (await list(uid, 'debtPayments', { where: [['debtorId', '==', debtorId]] })).map(({ id, purchaseId, amountCents, date }) => ({ id, purchaseId, amountCents, date }));
+    const debtor = (await list(uid, 'debtors', {})).find((d) => d.id === debtorId);
+    return { bal, payments: payments.sort((a, b) => a.id.localeCompare(b.id)), debtor };
+  }, [parcial.id, parcial.accId]);
+  const p0 = await state();
+  await page.goto(`${app.base}/pages/devedores.html`);
+  await page.waitForSelector('#page-content tbody tr');
+  await page.getByRole('button', { name: 'Parcelas e recebimentos de Parcial' }).click();
+  await page.waitForSelector('#statement-month');
+  await page.selectOption('#statement-month', parcial.month);
+  await page.waitForSelector('#month-settlement');
+  // 1) primeiro recebimento de R$ 40,00
+  await page.getByRole('button', { name: 'Quitar parcela 1 de Sofá' }).click();
+  await page.fill('#amountCents', '40,00');
+  await page.selectOption('#accountId', parcial.accId);
+  await page.locator('#debt-pay-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Recebimento parcial registrado \(restam R\$\s?60,00\)/.test(document.querySelector('.toast')?.innerText ?? ''));
+  // 2) segue pendente (parcial), com o valor recebido visível
+  await page.waitForFunction(() => /Parcial · recebido R\$\s?40,00 de R\$\s?100,00/.test(document.querySelector('.modal')?.innerText ?? ''));
+  assert.equal(await page.locator('.modal [data-status="partial"]').count(), 1);
+  assert.match(await page.locator('#month-settlement').innerText(), /2 pendente\(s\) \(1 com recebimento parcial\) · 0 paga\(s\)/);
+  const p1 = await state();
+  assert.deepEqual([p1.bal - p0.bal, p1.debtor.receivedCents, p1.payments.length], [4000, 4000, 1]);
+  // 3–4) segundo recebimento de R$ 60,00 (valor sugerido = restante) → paga
+  await page.getByRole('button', { name: 'Quitar parcela 1 de Sofá' }).click();
+  assert.equal(await page.inputValue('#amountCents'), '60,00');
+  await page.selectOption('#accountId', parcial.accId);
+  await page.locator('#debt-pay-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Parcela (antecipada e )?quitada/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForFunction(() => /✓ Paga/.test(document.querySelector('.modal')?.innerText ?? ''));
+  // 5–7) dois recebimentos independentes, total 100,00 e saldo +100,00 exatamente
+  const p2 = await state();
+  const sofa = p2.payments.filter((p) => /^pay-.+-[12]$/.test(p.id));
+  assert.equal(p2.payments.length, 2);
+  assert.deepEqual(p2.payments.map((p) => p.amountCents).sort((a, b) => a - b), [4000, 6000]);
+  assert.equal(new Set(p2.payments.map((p) => p.id)).size, 2);
+  assert.deepEqual(p2.payments.map((p) => p.id.replace(/^.*-/, '')).sort(), ['1', '2']); // pay-<parcela>-1 e -2
+  assert.ok(sofa.every((p) => p.purchaseId));
+  assert.equal(p2.debtor.receivedCents, 10000);
+  assert.equal(p2.bal - p0.bal, 10000);
+  // nada de receber acima do restante: a parcela paga não tem mais ação
+  assert.equal(await page.getByRole('button', { name: 'Quitar parcela 1 de Sofá' }).count(), 0);
+  await page.keyboard.press('Escape');
+  // tentativa SIMULTÂNEA (Rules reais do emulador): dois recebimentos de R$ 60,00 sobre a parcela "Cadeira" de R$ 100,00
+  const race = await page.evaluate(async ([debtorId, accId]) => {
+    const { settleInstallment } = await import('/js/services/debtPayments.js');
+    const { list } = await import('/js/services/firestore.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const uid = auth.currentUser.uid;
+    const chair = (await list(uid, 'cardPurchases', { where: [['debtorId', '==', debtorId]] })).find((p) => p.description === 'Cadeira');
+    const attempt = () => settleInstallment(uid, debtorId, { purchaseId: chair.id }, { amountCents: '60,00', date: '2026-12-20', accountId: accId }).then((r) => ({ ok: r.ok }), (e) => ({ ok: false, code: e.code }));
+    const results = await Promise.all([attempt(), attempt()]);
+    return { results, chairId: chair.id };
+  }, [parcial.id, parcial.accId]);
+  assert.equal(race.results.filter((r) => r.ok).length, 1, JSON.stringify(race.results)); // exatamente uma passa
+  const p3 = await state();
+  const chairPays = p3.payments.filter((p) => p.purchaseId === race.chairId);
+  assert.equal(chairPays.length, 1);
+  assert.equal(chairPays[0].amountCents, 6000);
+  assert.equal(p3.debtor.receivedCents, 10000 + 6000); // o total do devedor == soma dos recebimentos (sem perda/excesso)
+  assert.equal(p3.bal - p0.bal, 10000 + 6000);
 
   log('VF-2-03p: pagar fatura com conta bancária e cancelar fatura vazia (modal Faturas e compras)');
   const seeded2 = await page.evaluate(async () => {

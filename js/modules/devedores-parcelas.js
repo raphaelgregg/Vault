@@ -18,7 +18,7 @@ import { getDebtor, getDebtorStatement } from '../services/debtors.js';
 import { listCards } from '../services/creditCards.js';
 import { listAccounts } from '../services/accounts.js';
 
-const STATUS_LABELS = { pending: 'Pendente', paid: 'Paga', late: 'Atrasada', cancelled: 'Cancelada' };
+const STATUS_LABELS = { pending: 'Pendente', partial: 'Parcial', paid: 'Paga', late: 'Atrasada', cancelled: 'Cancelada' };
 
 /** Status exibido: pendente vencida aparece como atrasada (sem gravar). */
 export function displayDebtStatus(debt, today = todayIso()) {
@@ -107,7 +107,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
       submitLabel: 'Quitar parcela',
       focusId: 'amountCents',
       fields: [
-        el('p', { class: 'card__hint', text: `Vencimento ${item.dueDate ? formatDate(item.dueDate) : formatMonth(item.referenceMonth)} · restante da parcela ${formatCents(item.remainingCents)} · pendente do devedor ${formatCents(debtorPendingCents(debtor))}. Só esta parcela é afetada${early ? ' (antecipação)' : ''}.` }),
+        el('p', { class: 'card__hint', text: `Vencimento ${item.dueDate ? formatDate(item.dueDate) : formatMonth(item.referenceMonth)} · restante da parcela ${formatCents(item.remainingCents)}${item.receivedCents > 0 ? ` (já recebido ${formatCents(item.receivedCents)} de ${formatCents(item.amountCents)})` : ''} · pendente do devedor ${formatCents(debtorPendingCents(debtor))}. Só esta parcela é afetada${early ? ' (antecipação)' : ''}.` }),
         field('Valor recebido (R$) *', 'amountCents', el('input', { type: 'text', id: 'amountCents', name: 'amountCents', value: formatCentsInput(item.remainingCents), autocomplete: 'off' })),
         field('Data do pagamento *', 'date', el('input', { type: 'date', id: 'date', name: 'date', value: todayIso() })),
         field('Conta que recebe *', 'accountId', el('select', { id: 'accountId', name: 'accountId' }, selectOptions(activeAccounts, '', { placeholder: 'Selecione uma conta' }))),
@@ -176,6 +176,7 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   // situação da FATURA aparece à parte (fatura paga ≠ devedor pagou).
   const INVOICE_LABELS = { open: 'fatura aberta', closed: 'fatura fechada', paid: 'fatura paga' };
   const statusOf = (i) => {
+    if (i.paymentState === 'partial') return 'partial'; // estado derivado da soma dos recebimentos
     if (i.source === 'card') return i.status;
     const raw = debts.find((d) => d.id === i.id);
     return raw ? displayDebtStatus(raw) : i.status;
@@ -183,8 +184,9 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   const statusBadge = (i) => {
     const status = statusOf(i);
     const mark = status === 'paid' ? '✓ ' : '';
-    const extra = i.source === 'card' && status === 'pending' && INVOICE_LABELS[i.invoiceStatus] ? ` · ${INVOICE_LABELS[i.invoiceStatus]}` : '';
-    return el('span', { class: `badge badge--${status === 'paid' ? 'success' : status === 'late' ? 'danger' : 'neutral'}`, 'data-status': status, text: `${mark}${STATUS_LABELS[status] ?? status}${extra}` });
+    const extra = status === 'partial' ? ` · recebido ${formatCents(i.receivedCents)} de ${formatCents(i.amountCents)}`
+      : i.source === 'card' && status === 'pending' && INVOICE_LABELS[i.invoiceStatus] ? ` · ${INVOICE_LABELS[i.invoiceStatus]}` : '';
+    return el('span', { class: `badge badge--${status === 'paid' ? 'success' : status === 'late' ? 'danger' : status === 'partial' ? 'warning' : 'neutral'}`, 'data-status': status, text: `${mark}${STATUS_LABELS[status] ?? status}${extra}` });
   };
 
   const table = visible.length
@@ -226,12 +228,13 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   // Resumo e ação do MÊS selecionado (quitar o mês ≠ quitar uma parcela ≠ quitar toda a dívida).
   const monthPending = listAll ? null : previewMonthSettlement({ debtor, ledger, month });
   const monthPaid = listAll ? 0 : obligations.items.filter((i) => i.referenceMonth === month && i.status === 'paid').length;
+  const monthPartial = listAll ? 0 : monthPending.items.filter((i) => i.paymentState === 'partial').length;
   const monthPanel = listAll
     ? el('p', { class: 'card__hint', text: 'Escolha um mês de referência para quitar todas as parcelas pendentes dele de uma vez.' })
     : el('div', { class: 'card', id: 'month-settlement' }, [
       el('p', { class: 'card__label', text: `Parcelas de ${formatMonth(month)}` }),
       el('p', { class: 'card__value', text: formatCents(monthPending.totalCents) }),
-      el('p', { class: 'card__hint', text: `${monthPending.count} pendente(s) · ${monthPaid} paga(s)` }),
+      el('p', { class: 'card__hint', text: `${monthPending.count} pendente(s)${monthPartial ? ` (${monthPartial} com recebimento parcial)` : ''} · ${monthPaid} paga(s)` }),
       isOpen && monthPending.count > 0
         ? el('button', { type: 'button', class: 'btn btn--primary', id: 'settle-month', onClick: () => openSettleMonth(month), text: 'Quitar todas as parcelas pendentes deste mês' })
         : null,

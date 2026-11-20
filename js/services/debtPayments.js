@@ -160,7 +160,7 @@ export async function settleDebts(uid, debtorId, scope = {}, rawData = {}, io = 
     if (remaining > 0) {
       const built = buildEntity('debtPayments', { ...rawData, amountCents: centsToMoneyString(remaining), debtId: debt.id, debtorId });
       if (!built.ok) return { ok: false, errors: built.errors };
-      ops.push({ type: 'create', collection: PAYMENTS, data: built.data, docId: settlementPaymentId(debt.id) });
+      ops.push({ type: 'create', collection: PAYMENTS, data: built.data, docId: receiptPaymentId(debt.id, payments) });
       totalCents += remaining;
     }
     ops.push({ type: 'update', collection: DEBTS, docId: debt.id, data: { status: 'paid' }, action: 'settle' });
@@ -168,11 +168,9 @@ export async function settleDebts(uid, debtorId, scope = {}, rawData = {}, io = 
   if (totalCents > 0) {
     const applied = applyPaymentToDebtor(debtor, totalCents);
     if (!applied.ok) return { ok: false, errors: { _form: applied.error } };
-    ops.push({
-      type: 'update', collection: DEBTORS, docId: debtorId, action: 'receive',
-      data: { receivedCents: applied.receivedCents, status: applied.status },
-    });
+    ops.push(debtorReceiveOp(debtorId, totalCents, applied));
     await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
+    await reconcileDebtorStatus(uid, debtorId, io);
     return { ok: true, count: targets.length, totalCents, debtorPaid: applied.status === 'paid' };
   }
   await (io.commitAtomic ?? commitAtomic)(uid, ops, io); // só marca como pagas parcelas já integralmente recebidas
@@ -183,8 +181,45 @@ export async function settleDebts(uid, debtorId, scope = {}, rawData = {}, io = 
 // Quitação por parcela e por mês (VF-2-03ak)
 // ---------------------------------------------------------------------------------------------------------------
 
-/** ID determinístico do recebimento que QUITA uma parcela (dívida ou compra de cartão): no máximo um por parcela. */
-export const settlementPaymentId = (installmentId) => `settle-${installmentId}`;
+/**
+ * ID EXCLUSIVO e SEQUENCIAL de cada recebimento de uma parcela: `pay-<parcela>-<n>`, com n = (maior entre a
+ * quantidade de recebimentos e o maior sufixo já usado) + 1, lido do histórico atual. Cada recebimento é um
+ * documento independente (parcial ou final) e o histórico nunca é sobrescrito. IDEMPOTÊNCIA/CONCORRÊNCIA: duas
+ * operações que leram o mesmo histórico geram o MESMO ID; a 2ª cai em `update` de documento existente e as Rules
+ * (`debtPayments` é imutável) negam o lote inteiro — impossível receber duas vezes sobre a mesma leitura, e por isso
+ * a soma dos recebimentos de uma parcela nunca passa do valor dela.
+ */
+export function receiptPaymentId(installmentId, payments = []) {
+  const prefix = `pay-${installmentId}-`;
+  const mine = payments.filter((p) => p.debtId === installmentId || p.purchaseId === installmentId).length;
+  const maxSeq = payments.reduce((max, p) => (typeof p.id === 'string' && p.id.startsWith(prefix) ? Math.max(max, Number(p.id.slice(prefix.length)) || 0) : max), 0);
+  return `${prefix}${Math.max(mine, maxSeq) + 1}`;
+}
+
+/**
+ * Soma ao devedor o valor recebido de forma ATÔMICA (`increment`, não valor absoluto de uma leitura que pode estar
+ * velha) e só grava `status: paid` quando esta operação zera o pendente. Recebimentos simultâneos em parcelas
+ * diferentes do mesmo devedor, então, não se sobrescrevem; as Rules (`receivedCents <= lentCents`) barram excesso.
+ */
+const debtorReceiveOp = (debtorId, totalCents, applied) => ({
+  type: 'update', collection: DEBTORS, docId: debtorId, action: 'receive',
+  data: applied.status === 'paid' ? { status: 'paid' } : {}, increments: { receivedCents: totalCents },
+});
+
+/**
+ * Pós-commit: se, com recebimentos concorrentes, o total recebido alcançou o emprestado mas o status ficou `open`
+ * (cada operação via "pendente > 0" na sua leitura), marca `paid`. Idempotente; falha aqui não desfaz o recebimento.
+ */
+async function reconcileDebtorStatus(uid, debtorId, io = {}) {
+  try {
+    const fresh = await (io.getById ?? getById)(uid, DEBTORS, debtorId);
+    if (fresh && fresh.status === 'open' && (Number(fresh.lentCents) || 0) > 0 && (Number(fresh.receivedCents) || 0) >= (Number(fresh.lentCents) || 0)) {
+      await (io.commitAtomic ?? commitAtomic)(uid, [{ type: 'update', collection: DEBTORS, docId: debtorId, data: { status: 'paid' }, action: 'reconcile' }], io);
+    }
+  } catch (error) {
+    console.error('[debtPayments] não foi possível conciliar o status do devedor', error);
+  }
+}
 
 /**
  * Razão do devedor lido do Firestore: dívidas, compras de cartão vinculadas, faturas e recebimentos (uma leitura
@@ -218,8 +253,9 @@ async function checkReceiptTarget(uid, rawData, probeFields, fetch) {
  * efetivamente recebido — padrão: o restante da parcela) e soma ao `receivedCents` do devedor, tudo em UM lote com
  * auditoria. Só a parcela escolhida muda: parcela de dívida vira `paid` quando o restante zera; parcela de cartão é
  * "paga" por derivação (recebido ≥ valor). Valor menor que o restante = recebimento parcial (parcela segue pendente).
- * DUPLICIDADE: (1) parcela já quitada é recusada; (2) o recebimento que quita usa ID determinístico
- * (`settle-<id>`) — um segundo envio concorrente cairia em `update` com `createdAt` diferente e as Rules negam o lote.
+ * DUPLICIDADE: (1) parcela já quitada é recusada; (2) cada recebimento tem ID exclusivo e sequencial
+ * (`pay-<parcela>-<n>`, ver `receiptPaymentId`) — um segundo envio sobre a mesma leitura gera o mesmo ID e as Rules
+ * (histórico imutável) negam o lote inteiro; (3) o devedor soma por `increment` atômico.
  * `rawData`: { date, accountId, amountCents? (pt-BR), notes? }. Retorna { ok, id, settled, remainingCents,
  * amountCents, debtorPaid, anticipated, errors }.
  */
@@ -259,10 +295,11 @@ export async function settleInstallment(uid, debtorId, target = {}, rawData = {}
   if (!applied.ok) return { ok: false, errors: { amountCents: applied.error } };
 
   const settled = amountCents === item.remainingCents;
-  const ops = [{ type: 'create', collection: PAYMENTS, data: built.data, ...(settled ? { docId: settlementPaymentId(installmentId) } : {}), action: settled ? 'settle' : 'receive' }];
+  const ops = [{ type: 'create', collection: PAYMENTS, data: built.data, docId: receiptPaymentId(installmentId, ledger.payments), action: settled ? 'settle' : 'receive' }];
   if (settled && source === 'debt') ops.push({ type: 'update', collection: DEBTS, docId: installmentId, data: { status: 'paid' }, action: 'pay' });
-  ops.push({ type: 'update', collection: DEBTORS, docId: debtorId, data: { receivedCents: applied.receivedCents, status: applied.status }, action: 'receive' });
+  ops.push(debtorReceiveOp(debtorId, amountCents, applied));
   const [id] = await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
+  await reconcileDebtorStatus(uid, debtorId, io);
   const anticipated = typeof item.dueDate === 'string' && built.data.date < item.dueDate;
   return { ok: true, id, settled, amountCents, remainingCents: item.remainingCents - amountCents, debtorPaid: applied.status === 'paid', anticipated };
 }
@@ -283,8 +320,9 @@ export function previewMonthSettlement({ debtor, ledger, month }) {
  * vencimento e compras de cartão pelo mês da fatura. Cada parcela recebe um recebimento com o seu restante e a
  * mesma `date`/`accountId`; parcelas de dívida viram `paid`; o devedor soma o total uma única vez. Parcelas já
  * pagas/canceladas e de outros meses não são tocadas. UM lote atômico (falhou → nada foi gravado). O conjunto é
- * recalculado a partir de uma leitura nova (não confia na prévia da tela), e cada recebimento usa ID determinístico
- * (`settle-<id>`): repetir a operação não duplica (a parcela já está quitada; um envio concorrente é negado pelas Rules).
+ * recalculado a partir de uma leitura nova (não confia na prévia da tela), e cada recebimento usa o ID sequencial
+ * da sua parcela (`receiptPaymentId`): repetir a operação não duplica (a parcela já está quitada; um envio concorrente
+ * sobre a mesma leitura é negado pelas Rules). Parcela com recebimento PARCIAL entra pelo RESTANTE.
  * `rawData`: { date, accountId, notes? }. Retorna { ok, count, totalCents, month, debtorPaid, ids, errors }.
  */
 export async function settleMonthInstallments(uid, debtorId, month, rawData = {}, io = {}) {
@@ -313,11 +351,12 @@ export async function settleMonthInstallments(uid, debtorId, month, rawData = {}
     const idField = item.source === 'debt' ? { debtId: item.id } : { purchaseId: item.id };
     const built = buildEntity('debtPayments', { date: rawData.date, accountId: rawData.accountId, notes: rawData.notes, amountCents: centsToMoneyString(item.remainingCents), ...idField, debtorId });
     if (!built.ok) return { ok: false, errors: built.errors };
-    ops.push({ type: 'create', collection: PAYMENTS, data: built.data, docId: settlementPaymentId(item.id), action: 'settle' });
+    ops.push({ type: 'create', collection: PAYMENTS, data: built.data, docId: receiptPaymentId(item.id, ledger.payments), action: 'settle' });
     if (item.source === 'debt') ops.push({ type: 'update', collection: DEBTS, docId: item.id, data: { status: 'paid' }, action: 'pay' });
   }
-  ops.push({ type: 'update', collection: DEBTORS, docId: debtorId, data: { receivedCents: applied.receivedCents, status: applied.status }, action: 'receive' });
+  ops.push(debtorReceiveOp(debtorId, totalCents, applied));
   const ids = await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
+  await reconcileDebtorStatus(uid, debtorId, io);
   return { ok: true, month, count: items.length, totalCents, debtorPaid: applied.status === 'paid', ids };
 }
 
@@ -336,8 +375,12 @@ export async function cancelDebt(uid, debtId, io = {}) {
   return { ok: true };
 }
 
+async function listPaymentsOfDebt(uid, debtId, io) {
+  return (io.list ?? list)(uid, PAYMENTS, { where: [['debtId', '==', debtId]] });
+}
+
 async function sumPayments(uid, debtId, io) {
-  const payments = await (io.list ?? list)(uid, PAYMENTS, { where: [['debtId', '==', debtId]] });
+  const payments = await listPaymentsOfDebt(uid, debtId, io);
   return payments.reduce((total, p) => total + (Number(p.amountCents) || 0), 0);
 }
 
@@ -366,25 +409,21 @@ export async function registerDebtPayment(uid, debtId, rawData, io = {}) {
   const applied = applyPaymentToDebtor(debtor, data.amountCents);
   if (!applied.ok) return { ok: false, errors: { amountCents: applied.error } };
 
-  const alreadyReceived = await sumPayments(uid, debtId, io);
+  const history = await listPaymentsOfDebt(uid, debtId, io);
+  const alreadyReceived = history.reduce((total, p) => total + (Number(p.amountCents) || 0), 0);
   const debtPending = debt.principalCents - alreadyReceived;
   if (data.amountCents > debtPending) {
     return { ok: false, errors: { amountCents: `O valor excede o saldo pendente da parcela (${formatCents(Math.max(0, debtPending))}).` } };
   }
   const debtPaid = data.amountCents === debtPending;
 
-  // O recebimento que QUITA a parcela tem ID determinístico: um segundo envio concorrente é negado pelas Rules.
-  const ops = [{ type: 'create', collection: PAYMENTS, data, ...(debtPaid ? { docId: settlementPaymentId(debtId) } : {}) }];
+  // ID exclusivo e sequencial (`receiptPaymentId`): um segundo envio sobre a mesma leitura é negado pelas Rules.
+  const ops = [{ type: 'create', collection: PAYMENTS, data, docId: receiptPaymentId(debtId, history) }];
   if (debtPaid) ops.push({ type: 'update', collection: DEBTS, docId: debtId, data: { status: 'paid' }, action: 'pay' });
-  ops.push({
-    type: 'update',
-    collection: DEBTORS,
-    docId: debt.debtorId,
-    data: { receivedCents: applied.receivedCents, status: applied.status },
-    action: 'receive',
-  });
+  ops.push(debtorReceiveOp(debt.debtorId, data.amountCents, applied));
 
   const [id] = await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
+  await reconcileDebtorStatus(uid, debt.debtorId, io);
   // Antecipação (VF-2-03n): recebimento (total ou parcial) antes do vencimento da parcela.
   const anticipated = typeof debt.dueDate === 'string' && typeof data.date === 'string' && data.date < debt.dueDate;
   return { ok: true, id, debtPaid, debtorPaid: applied.status === 'paid', anticipated };

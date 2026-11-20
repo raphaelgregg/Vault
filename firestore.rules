@@ -316,7 +316,9 @@ service cloud.firestore {
     // ---------- recebimentos de dívidas ----------
     match /users/{userId}/debtPayments/{paymentId} {
       allow read: if isOwner(userId) || isAdmin();
-      allow create, update: if isOwner(userId)
+      // HISTÓRICO IMUTÁVEL: recebimento só é criado (nunca editado). Sem `update`, regravar um ID existente também é negado
+      // — base da idempotência dos IDs sequenciais `pay-<parcela>-<n>` (VF-2-03al).
+      allow create: if isOwner(userId)
         && keysOk(['debtId', 'purchaseId', 'debtorId', 'amountCents', 'date', 'accountId', 'notes',
                    'createdAt', 'updatedAt'])
         && requiredOk(['debtorId', 'amountCents', 'date', 'accountId',
