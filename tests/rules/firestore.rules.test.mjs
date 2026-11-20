@@ -52,6 +52,9 @@ let testEnv;
 const asUser = (uid) => testEnv.authenticatedContext(uid).firestore();
 const asAnonymous = () => testEnv.unauthenticatedContext().firestore();
 
+/** Grava documentos como a camada confiável (Admin SDK ignora as Rules): semeia estados que o cliente não pode criar. */
+const seedDoc = (path, data) => testEnv.withSecurityRulesDisabled(async (ctx) => { await setDoc(doc(ctx.firestore(), path), { createdAt: new Date('2026-11-01'), updatedAt: new Date('2026-11-01'), ...data }); });
+
 /** Recebimento + total do devedor no MESMO lote (as Rules exigem que andem juntos: não existe recebimento solto). */
 function receive(db, paymentRef, payload, debtorRef, incrementBy = payload.amountCents) {
   const batch = writeBatch(db);
@@ -227,9 +230,9 @@ describe('Operações válidas', () => {
   // VF-1-02: as Rules não têm como contar vínculos na exclusão; a integridade
   // referencial de contas é garantida por services/accounts.js (fail-closed).
   // Este teste documenta o contrato: o dono exclui; terceiros não.
-  it('exclusão de conta: dono permitido (integridade no service), outro usuário negado', async () => {
+  it('exclusão de conta: o CLIENTE não exclui (nem o dono): só a camada confiável (account.delete) com checagem de histórico', async () => {
     await assertFails(deleteDoc(doc(asUser(BOB), 'users', ALICE, 'accounts', 'acc-main')));
-    await assertSucceeds(deleteDoc(doc(asUser(ALICE), 'users', ALICE, 'accounts', 'acc-main')));
+    await assertFails(deleteDoc(doc(asUser(ALICE), 'users', ALICE, 'accounts', 'acc-main')));
   });
 
   it('permite criar despesa com centavos inteiros e referências válidas', async () => {
@@ -239,20 +242,19 @@ describe('Operações válidas', () => {
     );
   });
 
-  it('permite criar transferência entre contas distintas', async () => {
+  it('permite criar transferência PENDENTE entre contas distintas; CONFIRMADA só nasce na camada confiável (negada ao cliente)', async () => {
     const db = asUser(ALICE);
-    await assertSucceeds(
-      addDoc(collection(db, 'users', ALICE, 'transfers'), {
-        fromAccountId: 'acc-main',
-        toAccountId: 'acc-main2',
-        amountCents: 5000,
-        date: new Date('2026-11-02'),
-        reason: 'Reserva',
-        status: 'confirmed',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      })
-    );
+    const base = {
+      fromAccountId: 'acc-main',
+      toAccountId: 'acc-main2',
+      amountCents: 5000,
+      date: new Date('2026-11-02'),
+      reason: 'Reserva',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+    await assertSucceeds(addDoc(collection(db, 'users', ALICE, 'transfers'), { ...base, status: 'pending' }));
+    await assertFails(addDoc(collection(db, 'users', ALICE, 'transfers'), { ...base, status: 'confirmed' }));
   });
 
   it('nega transferência para a mesma conta', async () => {
@@ -304,8 +306,8 @@ describe('Separação de privilégios: usuário comum × administrador (VF-2-03w
     await assertFails(getDoc(accountOf(alice, BOB, 'acc-bob')));
     await assertFails(getDocs(collection(alice, 'users', BOB, 'accounts')));
     await assertFails(writeBatch(alice).delete(accountOf(alice, BOB, 'acc-bob')).commit());
-    // ...mas apaga o PRÓPRIO
-    await assertSucceeds(deleteDoc(accountOf(alice, ALICE, 'acc-main2')));
+    // ...e (VF-ARQ-02) nem o PRÓPRIO: conta é excluída/arquivada pela camada confiável (preserva histórico)
+    await assertFails(deleteDoc(accountOf(alice, ALICE, 'acc-main2')));
     // e não executa limpeza global (consulta de grupo) nem se declarar admin no cliente
     await assertFails(getDocs(query(collectionGroup(alice, 'accounts'), limit(10))));
   });
@@ -680,7 +682,7 @@ describe('Devedores (VF-2-03b)', () => {
     await assertSucceeds(setDoc(debtorDoc(db), debtor({ notes: 'amigo' })));
     await assertSucceeds(updateDoc(debtorDoc(db), { lentCents: 50000, updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(debtorDoc(db), { status: 'cancelled', updatedAt: serverTimestamp() }));
-    await assertSucceeds(deleteDoc(debtorDoc(db)));
+    await assertFails(deleteDoc(debtorDoc(db))); // VF-ARQ-02: exclusão/arquivamento só pela camada confiável
   });
 
   it('permite emprestado 0 (VF-2-03l); nega negativo/fracionário, recebido negativo ou maior que emprestado', async () => {
@@ -692,13 +694,16 @@ describe('Devedores (VF-2-03b)', () => {
     await assertFails(setDoc(debtorDoc(db), debtor({ lentCents: 10.5 })));
     await assertFails(setDoc(debtorDoc(db), debtor({ receivedCents: -1 })));
     await assertFails(setDoc(debtorDoc(db), debtor({ receivedCents: 100001 })));
-    await assertSucceeds(setDoc(debtorDoc(db), debtor({ receivedCents: 100000, status: 'paid' })));
+    // VF-ARQ-02: o recebido nasce 0 e só a camada confiável o altera; `paid` também é dela
+    await assertFails(setDoc(debtorDoc(db), debtor({ receivedCents: 100000, status: 'paid' })));
+    await assertFails(setDoc(debtorDoc(db), debtor({ status: 'paid' })));
   });
 
   it('nega reduzir emprestado abaixo do recebido (patch)', async () => {
     const db = asUser(ALICE);
-    await assertSucceeds(setDoc(debtorDoc(db), debtor({ receivedCents: 30000 })));
+    await seedDoc(`users/${ALICE}/debtors/dev1`, { name: 'João', loanDate: new Date('2026-11-10T12:00:00.000Z'), lentCents: 100000, receivedCents: 30000, status: 'open' });
     await assertFails(updateDoc(debtorDoc(db), { lentCents: 20000, updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(debtorDoc(db), { lentCents: 30000, updatedAt: serverTimestamp() }));
   });
 
   it('nega status inválido, data como string e campo extra', async () => {
@@ -757,7 +762,7 @@ describe('Parcelas e recebimentos de devedores (VF-2-03b2)', () => {
     await assertSucceeds(batch.commit());
   });
 
-  it('quitar dívida (VF-2-03n): N recebimentos + N parcelas pagas + devedor atualizado no MESMO lote', async () => {
+  it('quitar dívida (VF-2-03n / VF-ARQ-02): o CLIENTE não grava recebimentos, não paga parcelas nem soma no devedor (op debt.settleBatch)', async () => {
     const db = await seed();
     await assertSucceeds(setDoc(debtDoc(db, 'q2'), debt({ installmentNumber: 2, installmentsTotal: 2, debtGroupId: 'g' })));
     const batch = writeBatch(db);
@@ -766,7 +771,10 @@ describe('Parcelas e recebimentos de devedores (VF-2-03b2)', () => {
     batch.update(debtDoc(db, 'd1'), { status: 'paid', updatedAt: serverTimestamp() });
     batch.update(debtDoc(db, 'q2'), { status: 'paid', updatedAt: serverTimestamp() });
     batch.update(debtorDoc(db), { receivedCents: 50000, status: 'paid', updatedAt: serverTimestamp() });
-    await assertSucceeds(batch.commit());
+    await assertFails(batch.commit());
+    // as partes isoladas também: parcela não vira paid nem é editada pelo cliente
+    await assertFails(updateDoc(debtDoc(db, 'd1'), { status: 'paid', updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(debtorDoc(db), { receivedCents: 50000, updatedAt: serverTimestamp() }));
   });
 
   it('dívida: nega installmentsTotal inválido (< parcela, 0, > 360, não inteiro), debtGroupId longo/não texto e campo extra', async () => {
@@ -777,13 +785,16 @@ describe('Parcelas e recebimentos de devedores (VF-2-03b2)', () => {
     }
   });
 
-  it('lote atômico do recebimento: pagamento + parcela paga + devedor quitado', async () => {
+  it('recebimento (pagamento + parcela paga + devedor quitado) NÃO é aceito do cliente em nenhum formato', async () => {
     const db = await seed();
     const batch = writeBatch(db);
     batch.set(payDoc(db), payment({ amountCents: 50000, notes: 'pix' }));
     batch.update(debtDoc(db), { status: 'paid', updatedAt: serverTimestamp() });
     batch.update(debtorDoc(db), { receivedCents: 50000, status: 'paid', updatedAt: serverTimestamp() });
-    await assertSucceeds(batch.commit());
+    await assertFails(batch.commit());
+    await assertFails(setDoc(payDoc(db, 'solto'), payment()));
+    const snap = await getDoc(payDoc(db));
+    if (snap.exists()) throw new Error('nenhum recebimento deveria ter sido gravado');
   });
 
   it('lote inteiro falha se o recebimento excede o emprestado (nada gravado)', async () => {
@@ -798,7 +809,9 @@ describe('Parcelas e recebimentos de devedores (VF-2-03b2)', () => {
 
   it('parcelas: valida schema (principal, número 1..360, status, data, devedor existente)', async () => {
     const db = await seed();
-    await assertSucceeds(setDoc(debtDoc(db, 'd2'), debt({ installmentNumber: 360, status: 'late' })));
+    await assertSucceeds(setDoc(debtDoc(db, 'd2'), debt({ installmentNumber: 360 })));
+    await assertFails(setDoc(debtDoc(db, 'd2b'), debt({ status: 'late' }))); // parcela nasce pendente; atraso/pagamento são derivados/do servidor
+    await assertFails(setDoc(debtDoc(db, 'd2c'), debt({ status: 'paid' })));
     await assertFails(setDoc(debtDoc(db, 'd3'), debt({ principalCents: 0 })));
     await assertFails(setDoc(debtDoc(db, 'd3'), debt({ installmentNumber: 361 })));
     await assertFails(setDoc(debtDoc(db, 'd3'), debt({ installmentNumber: 1.5 })));
@@ -806,12 +819,16 @@ describe('Parcelas e recebimentos de devedores (VF-2-03b2)', () => {
     await assertFails(setDoc(debtDoc(db, 'd3'), debt({ dueDate: '2026-12-10' })));
     await assertFails(setDoc(debtDoc(db, 'd3'), debt({ debtorId: 'inexistente' })));
     await assertFails(setDoc(debtDoc(db, 'd3'), debt({ extra: 1 })));
-    await assertSucceeds(updateDoc(debtDoc(db), { status: 'cancelled', updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(debtDoc(db), { status: 'cancelled', updatedAt: serverTimestamp() })); // cancelar é op debt.cancel
   });
 
-  it('recebimentos: valida schema, referências e isolamento', async () => {
+  it('recebimentos: o cliente NÃO cria/edita/exclui (só lê os próprios); isolamento por usuário', async () => {
     const db = await seed();
-    await assertSucceeds(receive(db, payDoc(db), payment(), debtorDoc(db)));
+    await assertFails(receive(db, payDoc(db), payment(), debtorDoc(db)));
+    await seedDoc(`users/${ALICE}/debtPayments/p1`, { debtId: 'd1', debtorId: 'dev1', amountCents: 10000, date: new Date('2026-11-18T12:00:00.000Z'), accountId: 'acc1' });
+    await assertSucceeds(getDoc(payDoc(db, 'p1')));
+    await assertFails(updateDoc(payDoc(db, 'p1'), { amountCents: 1, updatedAt: serverTimestamp() }));
+    await assertFails(deleteDoc(payDoc(db, 'p1')));
     await assertFails(setDoc(payDoc(db, 'p2'), payment({ amountCents: 0 })));
     await assertFails(setDoc(payDoc(db, 'p2'), payment({ amountCents: 10.5 })));
     await assertFails(setDoc(payDoc(db, 'p2'), payment({ date: '2026-11-18' })));
@@ -876,16 +893,16 @@ describe('Metas e movimentações (VF-2-03c)', () => {
     await assertFails(setDoc(goalDoc(db, 'g3'), goal({ extra: 1 })));
   });
 
-  it('lote atômico do aporte que conclui a meta: movimentação + status', async () => {
+  it('aporte/resgate (VF-ARQ-02): o CLIENTE não grava movimentações (op goal.deposit/withdraw), nem em lote com a meta', async () => {
     const db = await seed();
     const batch = writeBatch(db);
     batch.set(txDoc(db), tx({ amountCents: 100000, notes: 'bônus' }));
     batch.update(goalDoc(db), { status: 'completed', updatedAt: serverTimestamp() });
-    await assertSucceeds(batch.commit());
+    await assertFails(batch.commit());
     const resgate = writeBatch(db);
     resgate.set(txDoc(db, 't2'), tx({ type: 'withdraw', amountCents: 1000 }));
-    resgate.update(goalDoc(db), { status: 'active', updatedAt: serverTimestamp() });
-    await assertSucceeds(resgate.commit());
+    await assertFails(resgate.commit());
+    assert.equal((await getDoc(txDoc(db))).exists(), false);
   });
 
   it('lote inteiro falha se uma operação é inválida (nada gravado)', async () => {
@@ -897,9 +914,13 @@ describe('Metas e movimentações (VF-2-03c)', () => {
     if ((await getDoc(txDoc(db))).exists()) throw new Error('movimentação gravada apesar do lote inválido');
   });
 
-  it('movimentações: valida schema, referências e isolamento', async () => {
+  it('movimentações: só leitura ao dono; sem criar/editar/excluir; isolamento por usuário', async () => {
     const db = await seed();
-    await assertSucceeds(setDoc(txDoc(db), tx()));
+    await assertFails(setDoc(txDoc(db), tx()));
+    await seedDoc(`users/${ALICE}/goalTransactions/t1`, { goalId: 'g1', type: 'deposit', amountCents: 30000, date: noon('2026-11-18'), accountId: 'acc1' });
+    await assertSucceeds(getDoc(txDoc(db)));
+    await assertFails(updateDoc(txDoc(db), { amountCents: 1, updatedAt: serverTimestamp() }));
+    await assertFails(deleteDoc(txDoc(db)));
     await assertFails(setDoc(txDoc(db, 't2'), tx({ type: 'transfer' })));
     await assertFails(setDoc(txDoc(db, 't2'), tx({ amountCents: 0 })));
     await assertFails(setDoc(txDoc(db, 't2'), tx({ amountCents: 10.5 })));
@@ -989,14 +1010,16 @@ describe('Cartões, compras e faturas (VF-2-03d)', () => {
     await assertFails(updateDoc(invDoc(db), { status: 'paid', paidCents: 3000, accountId: 'zzz', paidAt: noon('2026-11-20'), updatedAt: serverTimestamp() }));
     await assertFails(updateDoc(invDoc(db), { status: 'paid', paidCents: 3000, accountId: 'acc1', paidAt: '2026-11-20', updatedAt: serverTimestamp() }));
     await assertFails(updateDoc(invDoc(db), { status: 'paid', paidCents: 3000, accountId: 'acc1', extra: 1, updatedAt: serverTimestamp() }));
-    await assertSucceeds(updateDoc(invDoc(db), { status: 'paid', totalCents: 3000, paidCents: 3000, accountId: 'acc1', paidAt: noon('2026-11-20'), updatedAt: serverTimestamp() }));
+    // VF-ARQ-02: o pagamento da fatura (status paid + conta + valor) só é gravado pela camada confiável (op invoice.pay)
+    await assertFails(updateDoc(invDoc(db), { status: 'paid', totalCents: 3000, paidCents: 3000, accountId: 'acc1', paidAt: noon('2026-11-20'), updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(invDoc(db), { paidCents: 3000, updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(invDoc(db, 'c1_2026-12'), { status: 'cancelled', updatedAt: serverTimestamp() }));
   });
 
   it('compra para devedor (VF-2-03i): parcelas com debtorId + lentCents do devedor no MESMO lote; nega devedor inexistente', async () => {
     const db = await seed();
     const dev = doc(db, 'users', ALICE, 'debtors', 'dev1');
-    await assertSucceeds(setDoc(dev, { name: 'João', loanDate: noon('2026-11-10'), lentCents: 100000, receivedCents: 20000, status: 'open', ...stamps() }));
+    await seedDoc(`users/${ALICE}/debtors/dev1`, { name: 'João', loanDate: noon('2026-11-10'), lentCents: 100000, receivedCents: 20000, status: 'open' });
     await assertSucceeds(setDoc(invDoc(db), invoice()));
     const batch = writeBatch(db);
     batch.set(buyDoc(db, 'p1'), purchase({ debtorId: 'dev1' }));
@@ -1031,7 +1054,7 @@ describe('Cartões, compras e faturas (VF-2-03d)', () => {
     const db = await seed();
     await assertSucceeds(setDoc(invDoc(db), invoice()));
     await assertSucceeds(updateDoc(invDoc(db), { status: 'closed', totalCents: 33334, updatedAt: serverTimestamp() }));
-    await assertSucceeds(updateDoc(invDoc(db), { status: 'paid', paidCents: 33334, updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(invDoc(db), { status: 'paid', paidCents: 33334, updatedAt: serverTimestamp() })); // pagar = servidor
     for (const bad of [{ referenceMonth: '2026-13' }, { referenceMonth: '2026-1' }, { status: 'late' }, { dueDate: '2026-11-17' }, { closingDate: '2026-11-10' },
       { totalCents: -1 }, { paidCents: 1.5 }, { cardId: 'zzz' }, { extra: 1 }]) {
       await assertFails(setDoc(invDoc(db, 'c1_9'), invoice(bad)));
@@ -1134,10 +1157,10 @@ describe('Contas: `name` opcional (Bancos) e receitas só com accountId', () => 
     assert.equal((await getDoc(doc(db, 'users', ALICE, 'incomes', 'r5'))).data().accountId, 'acc-main');
   });
 
-  it('excluir conta sem nome é permitido ao dono', async () => {
+  it('conta sem nome pode ser criada pelo dono; a exclusão (mesmo sem histórico) é da camada confiável (account.delete)', async () => {
     const db = asUser(ALICE);
     await assertSucceeds(setDoc(doc(db, 'users', ALICE, 'accounts', 'acc-del'), nameless));
-    await assertSucceeds(deleteDoc(doc(db, 'users', ALICE, 'accounts', 'acc-del')));
+    await assertFails(deleteDoc(doc(db, 'users', ALICE, 'accounts', 'acc-del')));
   });
 });
 
@@ -1154,17 +1177,23 @@ describe('Contas: saldo de abertura e data de abertura (VF-2-03ai)', () => {
     await assertFails(setDoc(accRef('acc-x2'), { ...account, openingDate: 20261101 }));
   });
 
-  it('conta antiga sem openingDate segue válida; ajuste de abertura (patch só com initialBalanceCents) é aceito', async () => {
-    await assertSucceeds(updateDoc(accRef('acc-main'), { initialBalanceCents: 987654, updatedAt: serverTimestamp() }));
-    assert.equal((await getDoc(accRef('acc-main'))).data().initialBalanceCents, 987654);
-    await assertSucceeds(updateDoc(accRef('acc-main'), { initialBalanceCents: 100, openingDate: new Date('2026-11-06'), updatedAt: serverTimestamp() }));
+  it('conta antiga sem openingDate segue válida; o AJUSTE de abertura é só da camada confiável (op account.adjustOpening)', async () => {
+    const before = (await getDoc(accRef('acc-main'))).data().initialBalanceCents;
+    await assertFails(updateDoc(accRef('acc-main'), { initialBalanceCents: 987654, updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(accRef('acc-main'), { initialBalanceCents: 100, openingDate: new Date('2026-11-06'), updatedAt: serverTimestamp() }));
+    assert.equal((await getDoc(accRef('acc-main'))).data().initialBalanceCents, before);
+    // editar os demais campos segue permitido
+    await assertSucceeds(updateDoc(accRef('acc-main'), { color: '#123456', updatedAt: serverTimestamp() }));
   });
 
-  it('remover openingDate (deleteField) é aceito; saldo de abertura não inteiro continua negado', async () => {
+  it('data de abertura não é removida/alterada pelo cliente; saldo de abertura não inteiro segue negado; `ledgerSeq` não nasce do cliente', async () => {
     await assertSucceeds(setDoc(accRef('acc-ab2'), { ...account, openingDate: new Date('2026-11-01') }));
-    await assertSucceeds(updateDoc(accRef('acc-ab2'), { openingDate: deleteField(), updatedAt: serverTimestamp() }));
-    assert.equal('openingDate' in (await getDoc(accRef('acc-ab2'))).data(), false);
+    await assertFails(updateDoc(accRef('acc-ab2'), { openingDate: deleteField(), updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(accRef('acc-ab2'), { openingDate: new Date('2026-12-01'), updatedAt: serverTimestamp() }));
+    assert.equal('openingDate' in (await getDoc(accRef('acc-ab2'))).data(), true);
     await assertFails(updateDoc(accRef('acc-main'), { initialBalanceCents: 10.5, updatedAt: serverTimestamp() }));
+    await assertFails(setDoc(accRef('acc-seq'), { ...account, ledgerSeq: 7 }));
+    await assertFails(updateDoc(accRef('acc-main'), { ledgerSeq: 99, updatedAt: serverTimestamp() }));
   });
 
   it('outro usuário não ajusta o saldo de abertura alheio', async () => {
@@ -1172,92 +1201,7 @@ describe('Contas: saldo de abertura e data de abertura (VF-2-03ai)', () => {
   });
 });
 
-describe('Quitação por parcela e por mês (VF-2-03ak): recebimento de parcela de cartão e IDs determinísticos', () => {
-  const noon = (d) => new Date(`${d}T12:00:00.000Z`);
-  const debtorDoc = (db) => doc(db, 'users', ALICE, 'debtors', 'dev1');
-  const debtDoc = (db, id) => doc(db, 'users', ALICE, 'debts', id);
-  const payDoc = (db, id) => doc(db, 'users', ALICE, 'debtPayments', id);
-  const payment = (o = {}) => ({
-    debtorId: 'dev1', amountCents: 2500, date: noon('2026-12-06'), accountId: 'acc1',
-    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...o,
-  });
-
-  async function seedAll() {
-    await testEnv.withSecurityRulesDisabled(async (ctx) => {
-      const db = ctx.firestore();
-      const base = { createdAt: new Date('2026-11-01'), updatedAt: new Date('2026-11-01') };
-      await setDoc(doc(db, 'users', ALICE, 'accounts', 'acc1'), { ...account, ...base });
-      await setDoc(doc(db, 'users', ALICE, 'debtors', 'dev1'), { name: 'Renan', loanDate: noon('2026-11-10'), lentCents: 23100, receivedCents: 0, status: 'open', ...base });
-      await setDoc(doc(db, 'users', ALICE, 'creditCards', 'card1'), { name: 'Nubank', ...base });
-      await setDoc(doc(db, 'users', ALICE, 'cardPurchases', 'pc1'), { cardId: 'card1', description: 'Água', amountCents: 2500, purchaseDate: noon('2026-11-20'), installmentsTotal: 1, installmentNumber: 1, debtorId: 'dev1', ...base });
-      await setDoc(doc(db, 'users', ALICE, 'cardPurchases', 'pc2'), { cardId: 'card1', description: 'Mercado', amountCents: 7800, purchaseDate: noon('2026-11-21'), installmentsTotal: 1, installmentNumber: 1, debtorId: 'dev1', ...base });
-      await setDoc(doc(db, 'users', ALICE, 'debts', 'd1'), { debtorId: 'dev1', description: 'Parcela', principalCents: 5000, dueDate: noon('2026-12-30'), installmentNumber: 2, installmentsTotal: 2, debtGroupId: 'g1', status: 'pending', ...base });
-    });
-    return asUser(ALICE);
-  }
-
-  it('aceita recebimento de parcela de CARTÃO (purchaseId) e persiste exatamente esse documento', async () => {
-    const db = await seedAll();
-    await assertSucceeds(receive(db, payDoc(db, 'settle-pc1'), payment({ purchaseId: 'pc1' }), debtorDoc(db)));
-    const stored = (await getDoc(payDoc(db, 'settle-pc1'))).data();
-    assert.deepEqual(Object.keys(stored).sort(), ['accountId', 'amountCents', 'createdAt', 'date', 'debtorId', 'purchaseId', 'updatedAt']);
-    assert.equal(stored.purchaseId, 'pc1');
-  });
-
-  it('recebimento antigo (só debtId) continua aceito; exige exatamente UM de debtId/purchaseId', async () => {
-    const db = await seedAll();
-    await assertSucceeds(receive(db, payDoc(db, 'old'), payment({ debtId: 'd1', amountCents: 5000 }), debtorDoc(db)));
-    await assertFails(setDoc(payDoc(db, 'both'), payment({ debtId: 'd1', purchaseId: 'pc1' })));
-    await assertFails(setDoc(payDoc(db, 'none'), payment()));
-  });
-
-  it('nega purchaseId inexistente, de tipo errado e campos extras', async () => {
-    const db = await seedAll();
-    await assertFails(setDoc(payDoc(db, 'x1'), payment({ purchaseId: 'nao-existe' })));
-    await assertFails(setDoc(payDoc(db, 'x2'), payment({ purchaseId: 42 })));
-    await assertFails(setDoc(payDoc(db, 'x3'), payment({ purchaseId: 'pc1', institution: 'x' })));
-    await assertFails(setDoc(payDoc(db, 'x4'), payment({ purchaseId: 'pc1', amountCents: 0 })));
-  });
-
-  it('lote da quitação do mês: N recebimentos (dívida + cartão) + parcela paga + devedor, tudo ou nada', async () => {
-    const db = await seedAll();
-    const ok = writeBatch(db);
-    ok.set(payDoc(db, 'settle-pc1'), payment({ purchaseId: 'pc1', amountCents: 2500 }));
-    ok.set(payDoc(db, 'settle-pc2'), payment({ purchaseId: 'pc2', amountCents: 7800 }));
-    ok.set(payDoc(db, 'settle-d1'), payment({ debtId: 'd1', amountCents: 5000 }));
-    ok.update(debtDoc(db, 'd1'), { status: 'paid', updatedAt: serverTimestamp() });
-    ok.update(debtorDoc(db), { receivedCents: 15300, updatedAt: serverTimestamp() });
-    await assertSucceeds(ok.commit());
-    assert.equal((await getDoc(debtDoc(db, 'd1'))).data().status, 'paid');
-    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 15300);
-  });
-
-  it('lote com UMA escrita inválida é negado por inteiro (nada parcial)', async () => {
-    const db = await seedAll();
-    const bad = writeBatch(db);
-    bad.set(payDoc(db, 'settle-pc1'), payment({ purchaseId: 'pc1' }));
-    bad.set(payDoc(db, 'settle-pcx'), payment({ purchaseId: 'nao-existe' })); // inválida
-    bad.update(debtorDoc(db), { receivedCents: 2500, updatedAt: serverTimestamp() });
-    await assertFails(bad.commit());
-    assert.equal((await getDoc(payDoc(db, 'settle-pc1'))).exists(), false);
-    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 0);
-  });
-
-  it('DUPLICIDADE: segundo recebimento com o mesmo ID determinístico é negado (createdAt imutável); o original fica intacto', async () => {
-    const db = await seedAll();
-    await assertSucceeds(receive(db, payDoc(db, 'settle-pc1'), payment({ purchaseId: 'pc1' }), debtorDoc(db)));
-    await assertFails(setDoc(payDoc(db, 'settle-pc1'), payment({ purchaseId: 'pc1', date: noon('2026-12-09') })));
-    const stored = (await getDoc(payDoc(db, 'settle-pc1'))).data();
-    assert.equal(stored.date.toDate().toISOString(), '2026-12-06T12:00:00.000Z');
-  });
-
-  it('outro usuário não registra recebimento no devedor alheio', async () => {
-    await seedAll();
-    await assertFails(setDoc(doc(asUser(BOB), 'users', ALICE, 'debtPayments', 'bob'), payment({ purchaseId: 'pc1' })));
-  });
-});
-
-describe('Recebimentos parciais: histórico imutável, IDs sequenciais e total do devedor por increment (VF-2-03al)', () => {
+describe('Recebimentos (VF-ARQ-02): o cliente NUNCA grava; só a camada confiável (Admin SDK) — ex-VF-2-03ak/03al', () => {
   const noon = (d) => new Date(`${d}T12:00:00.000Z`);
   const debtorDoc = (db) => doc(db, 'users', ALICE, 'debtors', 'dev1');
   const debtDoc = (db, id = 'd1') => doc(db, 'users', ALICE, 'debts', id);
@@ -1267,75 +1211,92 @@ describe('Recebimentos parciais: histórico imutável, IDs sequenciais e total d
     createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...o,
   });
 
-  async function seedParcela() {
+  async function seedAll() {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const db = ctx.firestore();
       const base = { createdAt: new Date('2026-11-01'), updatedAt: new Date('2026-11-01') };
       await setDoc(doc(db, 'users', ALICE, 'accounts', 'acc1'), { ...account, ...base });
-      await setDoc(doc(db, 'users', ALICE, 'debtors', 'dev1'), { name: 'Renan', loanDate: noon('2026-11-10'), lentCents: 10000, receivedCents: 0, status: 'open', ...base });
+      await setDoc(doc(db, 'users', ALICE, 'debtors', 'dev1'), { name: 'Renan', loanDate: noon('2026-11-10'), lentCents: 23100, receivedCents: 4000, status: 'open', ...base });
+      await setDoc(doc(db, 'users', ALICE, 'creditCards', 'card1'), { name: 'Nubank', ...base });
+      await setDoc(doc(db, 'users', ALICE, 'cardPurchases', 'pc1'), { cardId: 'card1', description: 'Água', amountCents: 2500, purchaseDate: noon('2026-11-20'), installmentsTotal: 1, installmentNumber: 1, debtorId: 'dev1', ...base });
       await setDoc(doc(db, 'users', ALICE, 'debts', 'd1'), { debtorId: 'dev1', description: 'Parcela', principalCents: 10000, dueDate: noon('2026-12-30'), installmentNumber: 1, installmentsTotal: 1, debtGroupId: 'g', status: 'pending', ...base });
+      await setDoc(doc(db, 'users', ALICE, 'debtPayments', 'pay-d1-1'), { debtId: 'd1', debtorId: 'dev1', amountCents: 4000, date: noon('2026-12-06'), accountId: 'acc1', ...base });
     });
     return asUser(ALICE);
   }
 
-  it('cenário 40 + 60: dois recebimentos independentes (IDs sequenciais), parcela paga, devedor somado por increment', async () => {
-    const db = await seedParcela();
-    const one = writeBatch(db);
-    one.set(payDoc(db, 'pay-d1-1'), payment({ amountCents: 4000 }));
-    one.update(debtorDoc(db), { receivedCents: increment(4000), updatedAt: serverTimestamp() });
-    await assertSucceeds(one.commit());
-    assert.equal((await getDoc(debtDoc(db))).data().status, 'pending'); // parcial: segue pendente
-    const two = writeBatch(db);
-    two.set(payDoc(db, 'pay-d1-2'), payment({ amountCents: 6000, date: noon('2026-12-10') }));
-    two.update(debtDoc(db), { status: 'paid', updatedAt: serverTimestamp() });
-    two.update(debtorDoc(db), { receivedCents: increment(6000), status: 'paid', updatedAt: serverTimestamp() });
-    await assertSucceeds(two.commit());
-    const p1 = (await getDoc(payDoc(db, 'pay-d1-1'))).data();
-    const p2 = (await getDoc(payDoc(db, 'pay-d1-2'))).data();
-    assert.deepEqual([p1.amountCents, p2.amountCents], [4000, 6000]);
-    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 10000);
-    assert.equal((await getDoc(debtDoc(db))).data().status, 'paid');
+  it('o dono LÊ os recebimentos; não cria em nenhum formato (dívida, cartão, lote, increment, ID sequencial ou determinístico)', async () => {
+    const db = await seedAll();
+    await assertSucceeds(getDoc(payDoc(db, 'pay-d1-1')));
+    await assertFails(setDoc(payDoc(db, 'novo'), payment()));
+    const { debtId: _omit, ...cardPayment } = payment({ purchaseId: 'pc1', amountCents: 2500 });
+    await assertFails(setDoc(payDoc(db, 'novo-cartao'), cardPayment));
+    const batch = writeBatch(db);
+    batch.set(payDoc(db, 'pay-d1-2'), payment({ amountCents: 6000 }));
+    batch.update(debtDoc(db), { status: 'paid', updatedAt: serverTimestamp() });
+    batch.update(debtorDoc(db), { receivedCents: increment(6000), status: 'paid', updatedAt: serverTimestamp() });
+    await assertFails(batch.commit());
+    const only = writeBatch(db);
+    only.set(payDoc(db, 'pay-d1-3'), payment({ amountCents: 100 }));
+    only.update(debtorDoc(db), { receivedCents: increment(100), updatedAt: serverTimestamp() });
+    await assertFails(only.commit());
+    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 4000);
+    assert.equal((await getDoc(debtDoc(db))).data().status, 'pending');
   });
 
-  it('HISTÓRICO IMUTÁVEL: não edita valor/data/conta de recebimento existente nem regrava o mesmo ID', async () => {
-    const db = await seedParcela();
-    await assertSucceeds(receive(db, payDoc(db, 'pay-d1-1'), payment(), debtorDoc(db)));
-    await assertFails(updateDoc(payDoc(db, 'pay-d1-1'), { amountCents: 9999, updatedAt: serverTimestamp() }));
-    await assertFails(updateDoc(payDoc(db, 'pay-d1-1'), { date: noon('2026-01-01'), updatedAt: serverTimestamp() }));
-    await assertFails(setDoc(payDoc(db, 'pay-d1-1'), payment({ amountCents: 6000 }))); // 2º envio com o mesmo ID (leitura antiga)
+  it('HISTÓRICO IMUTÁVEL: nem valor, data, conta, parcela, operationId, notas; nem regravar o mesmo ID; nem excluir', async () => {
+    const db = await seedAll();
+    for (const patch of [{ amountCents: 9999 }, { date: noon('2026-01-01') }, { accountId: 'acc1' }, { debtId: 'd1' }, { operationId: 'x' }, { notes: 'y' }]) {
+      await assertFails(updateDoc(payDoc(db, 'pay-d1-1'), { ...patch, updatedAt: serverTimestamp() }));
+    }
+    await assertFails(setDoc(payDoc(db, 'pay-d1-1'), payment({ amountCents: 6000 })));
+    await assertFails(deleteDoc(payDoc(db, 'pay-d1-1')));
     assert.equal((await getDoc(payDoc(db, 'pay-d1-1'))).data().amountCents, 4000);
   });
 
-  it('segundo envio concorrente (mesmo ID) derruba o LOTE INTEIRO: devedor não soma duas vezes', async () => {
-    const db = await seedParcela();
-    const a = writeBatch(db);
-    a.set(payDoc(db, 'pay-d1-1'), payment({ amountCents: 6000 }));
-    a.update(debtorDoc(db), { receivedCents: increment(6000), updatedAt: serverTimestamp() });
-    await assertSucceeds(a.commit());
-    const b = writeBatch(db); // leu o mesmo histórico: gera o MESMO ID
-    b.set(payDoc(db, 'pay-d1-1'), payment({ amountCents: 6000 }));
-    b.update(debtorDoc(db), { receivedCents: increment(6000), updatedAt: serverTimestamp() });
-    await assertFails(b.commit());
-    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 6000);
+  it('o total do devedor e o status da parcela não são alterados pelo cliente (nem para cima, nem para baixo)', async () => {
+    const db = await seedAll();
+    for (const patch of [{ receivedCents: 5000 }, { receivedCents: 3999 }, { receivedCents: 0 }, { receivedCents: increment(1) }, { status: 'paid' }]) {
+      await assertFails(updateDoc(debtorDoc(db), { ...patch, updatedAt: serverTimestamp() }));
+    }
+    for (const status of ['paid', 'cancelled', 'late']) await assertFails(updateDoc(debtDoc(db), { status, updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(debtorDoc(db), { name: 'Renan Silva', updatedAt: serverTimestamp() })); // dados cadastrais seguem editáveis
   });
 
-  it('increment: soma nas duas direções sem perder (parcelas diferentes) e as Rules barram receber acima do emprestado', async () => {
-    const db = await seedParcela();
-    const x = writeBatch(db);
-    x.set(payDoc(db, 'pay-d1-1'), payment({ amountCents: 4000 }));
-    x.update(debtorDoc(db), { receivedCents: increment(4000), updatedAt: serverTimestamp() });
-    await assertSucceeds(x.commit());
-    const y = writeBatch(db); // outra operação, também lida com received=0: o increment soma sobre o valor ATUAL
-    y.set(payDoc(db, 'pay-d1-2'), payment({ amountCents: 3000 }));
-    y.update(debtorDoc(db), { receivedCents: increment(3000), updatedAt: serverTimestamp() });
-    await assertSucceeds(y.commit());
-    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 7000);
-    const over = writeBatch(db);
-    over.set(payDoc(db, 'pay-d1-3'), payment({ amountCents: 3001 }));
-    over.update(debtorDoc(db), { receivedCents: increment(3001), updatedAt: serverTimestamp() }); // 10001 > 10000 emprestado
-    await assertFails(over.commit());
-    assert.equal((await getDoc(debtorDoc(db))).data().receivedCents, 7000);
-    assert.equal((await getDoc(payDoc(db, 'pay-d1-3'))).exists(), false);
+  it('outro usuário não lê nem registra recebimento no devedor alheio', async () => {
+    await seedAll();
+    await assertFails(getDoc(payDoc(asUser(BOB), 'pay-d1-1')));
+    await assertFails(setDoc(doc(asUser(BOB), 'users', ALICE, 'debtPayments', 'bob'), payment()));
+    await assertFails(updateDoc(doc(asUser(BOB), 'users', ALICE, 'debtors', 'dev1'), { receivedCents: 1, updatedAt: serverTimestamp() }));
+  });
+
+  it('coleções SÓ-SERVIDOR (reversals, operations, batches): o dono lê; ninguém do cliente cria, edita ou apaga; chave de OUTRO usuário é ilegível', async () => {
+    const db = await seedAll();
+    for (const coll of ['reversals', 'operations', 'batches']) {
+      await seedDoc(`users/${ALICE}/${coll}/x1`, { op: 'seed' });
+      await assertSucceeds(getDoc(doc(db, 'users', ALICE, coll, 'x1')));
+      await assertFails(setDoc(doc(db, 'users', ALICE, coll, 'novo'), { op: 'forjado', createdAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+      await assertFails(updateDoc(doc(db, 'users', ALICE, coll, 'x1'), { op: 'alterado', updatedAt: serverTimestamp() }));
+      await assertFails(deleteDoc(doc(db, 'users', ALICE, coll, 'x1')));
+      await assertFails(getDoc(doc(asUser(BOB), 'users', ALICE, coll, 'x1')));
+      await assertFails(setDoc(doc(asUser(BOB), 'users', ALICE, coll, 'bob'), { op: 'x' }));
+    }
+  });
+
+  it('despesa/receita/transferência: o cliente não liquida nem exclui o liquidado (pago/recebido/confirmado: só estorno do servidor)', async () => {
+    const db = await seedAll();
+    await seedDoc(`users/${ALICE}/accounts/acc2`, { ...account });
+    await seedDoc(`users/${ALICE}/categories/cat-casa`, { name: 'Casa', kind: 'both', color: '#000000' });
+    await seedDoc(`users/${ALICE}/expenses/ePaid`, { description: 'x', categoryId: 'cat-casa', amountCents: 100, accountId: 'acc1', purchaseDate: noon('2026-11-01'), dueDate: noon('2026-11-10'), status: 'paid', paidDate: noon('2026-11-10'), recurrence: 'none' });
+    await seedDoc(`users/${ALICE}/expenses/ePend`, { description: 'x', categoryId: 'cat-casa', amountCents: 100, accountId: 'acc1', purchaseDate: noon('2026-11-01'), dueDate: noon('2026-11-10'), status: 'pending', recurrence: 'none' });
+    await assertFails(updateDoc(doc(db, 'users', ALICE, 'expenses', 'ePaid'), { amountCents: 1, updatedAt: serverTimestamp() }));
+    await assertFails(deleteDoc(doc(db, 'users', ALICE, 'expenses', 'ePaid')));
+    await assertFails(updateDoc(doc(db, 'users', ALICE, 'expenses', 'ePend'), { status: 'paid', paidDate: noon('2026-11-10'), updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(db, 'users', ALICE, 'expenses', 'ePend'), { description: 'editada', updatedAt: serverTimestamp() }));
+    await assertSucceeds(deleteDoc(doc(db, 'users', ALICE, 'expenses', 'ePend')));
+    await seedDoc(`users/${ALICE}/transfers/tConf`, { fromAccountId: 'acc1', toAccountId: 'acc2', amountCents: 100, date: noon('2026-11-02'), reason: 'x', status: 'confirmed' });
+    await assertFails(updateDoc(doc(db, 'users', ALICE, 'transfers', 'tConf'), { status: 'cancelled', updatedAt: serverTimestamp() }));
+    await assertFails(deleteDoc(doc(db, 'users', ALICE, 'transfers', 'tConf')));
   });
 });
 
@@ -1399,75 +1360,36 @@ describe('Auditoria VF-2-03ao: proteção do histórico financeiro (recebimentos
   }
 
   describe('recebimentos (debtPayments)', () => {
-    it('recebimento SOLTO (sem atualizar o total do devedor) é negado; com delta menor que o valor, negado; correto, aceito', async () => {
+    it('VF-ARQ-02: nenhum recebimento nasce do cliente (solto, em lote, no limite ou acima) e o histórico existente é intocável', async () => {
       const db = await seedWorld();
-      await assertFails(setDoc(U(db, 'debtPayments', 'pay-d1-1'), pay())); // dinheiro "do nada": nenhum devedor atualizado
-      await assertFails(receive(db, U(db, 'debtPayments', 'pay-d1-1'), pay(), U(db, 'debtors', 'dev1'), 4999)); // sobe menos que o valor
-      await assertSucceeds(receive(db, U(db, 'debtPayments', 'pay-d1-1'), pay(), U(db, 'debtors', 'dev1')));
-      assert.equal((await getDoc(U(db, 'debtors', 'dev1'))).data().receivedCents, 5000);
+      await assertFails(setDoc(U(db, 'debtPayments', 'pay-d1-1'), pay()));
+      await assertFails(receive(db, U(db, 'debtPayments', 'pay-d1-1'), pay(), U(db, 'debtors', 'dev1')));
+      await assertFails(receive(db, U(db, 'debtPayments', 'a3'), payCard('pc1', { amountCents: 5000 }), U(db, 'debtors', 'dev1')));
+      await assertFails(receive(db, U(db, 'debtPayments', 'b1'), pay({ debtId: 'd2' }), U(db, 'debtors', 'dev1')));
+      const b = writeBatch(db);
+      for (let i = 0; i < 10; i += 1) b.set(U(db, 'debtPayments', `pay-m${i}-1`), pay({ debtId: `m${i}`, amountCents: 100 }));
+      b.update(U(db, 'debtors', 'dev1'), { receivedCents: increment(1000), updatedAt: serverTimestamp() });
+      await assertFails(b.commit());
+      assert.equal((await getDoc(U(db, 'debtors', 'dev1'))).data().receivedCents, 0);
     });
 
-    it('valor acima do valor da parcela (dívida ou cartão) é negado; no limite é aceito', async () => {
+    it('EXCLUSÃO: só o administrador apaga recebimento (o dono não, mesmo sem devedor); o dono lê', async () => {
       const db = await seedWorld();
-      await assertFails(receive(db, U(db, 'debtPayments', 'a1'), pay({ amountCents: 5001 }), U(db, 'debtors', 'dev1')));
-      await assertFails(receive(db, U(db, 'debtPayments', 'a2'), payCard('pc1', { amountCents: 5001 }), U(db, 'debtors', 'dev1')));
-      await assertSucceeds(receive(db, U(db, 'debtPayments', 'a3'), payCard('pc1', { amountCents: 5000 }), U(db, 'debtors', 'dev1')));
-    });
-
-    it('recebimento de parcela de OUTRO devedor, de parcela inexistente ou de compra sem devedor é negado', async () => {
-      const db = await seedWorld();
-      await assertFails(receive(db, U(db, 'debtPayments', 'b1'), pay({ debtId: 'd2' }), U(db, 'debtors', 'dev1'))); // d2 é do dev2
-      await assertFails(receive(db, U(db, 'debtPayments', 'b2'), pay({ debtId: 'nao-existe' }), U(db, 'debtors', 'dev1')));
-      await assertFails(receive(db, U(db, 'debtPayments', 'b3'), payCard('pcOwn', { amountCents: 100 }), U(db, 'debtors', 'dev1')));
-    });
-
-    it('IMUTÁVEL: o dono não edita (valor, data, conta, parcela, operationId) nem regrava o mesmo ID', async () => {
-      const db = await seedWorld();
-      await receive(db, U(db, 'debtPayments', 'pay-d1-1'), pay(), U(db, 'debtors', 'dev1'));
-      for (const patch of [{ amountCents: 1 }, { date: noon('2026-01-01') }, { accountId: 'acc1' }, { debtId: 'd2' }, { operationId: 'x' }, { notes: 'y' }]) {
-        await assertFails(updateDoc(U(db, 'debtPayments', 'pay-d1-1'), { ...patch, updatedAt: serverTimestamp() }));
-      }
-      await assertFails(setDoc(U(db, 'debtPayments', 'pay-d1-1'), pay({ amountCents: 4000 })));
-      assert.equal((await getDoc(U(db, 'debtPayments', 'pay-d1-1'))).data().amountCents, 5000);
-    });
-
-    it('EXCLUSÃO: o dono NÃO apaga recebimento com devedor e conta existentes; administrador pode; limpeza após remover o devedor/conta pode', async () => {
-      const db = await seedWorld();
-      await receive(db, U(db, 'debtPayments', 'pay-d1-1'), pay(), U(db, 'debtors', 'dev1'));
+      await seedDoc(`users/${ALICE}/debtPayments/pay-d1-1`, { debtId: 'd1', debtorId: 'dev1', amountCents: 5000, date: noon('2026-12-06'), accountId: 'acc1' });
+      await assertSucceeds(getDoc(U(db, 'debtPayments', 'pay-d1-1')));
       await assertFails(deleteDoc(U(db, 'debtPayments', 'pay-d1-1')));
       await assertFails(deleteDoc(doc(asUser(BOB), 'users', ALICE, 'debtPayments', 'pay-d1-1')));
-      assert.equal((await getDoc(U(db, 'debtPayments', 'pay-d1-1'))).exists(), true);
+      await assertFails(deleteDoc(U(db, 'debtors', 'dev1'))); // nem o devedor (histórico): arquivar/excluir é do servidor
+      await assertFails(deleteDoc(U(db, 'debtPayments', 'pay-d1-1')));
       await assertSucceeds(deleteDoc(doc(asAdmin(), 'users', ALICE, 'debtPayments', 'pay-d1-1')));
-      // limpeza de dados do dono: só depois de o devedor (ou a conta) não existir mais
-      await receive(db, U(db, 'debtPayments', 'pay-d1-2'), pay(), U(db, 'debtors', 'dev1'));
-      await assertFails(deleteDoc(U(db, 'debtPayments', 'pay-d1-2')));
-      await assertSucceeds(deleteDoc(U(db, 'debtors', 'dev1')));
-      await assertSucceeds(deleteDoc(U(db, 'debtPayments', 'pay-d1-2')));
-    });
-
-    it('LIMITE DO FIRESTORE: 17 recebimentos no mesmo lote passam; 21 são negados (por isso a quitação em massa grava em blocos de 10)', async () => {
-      const db = await seedWorld();
-      const batchOf = (from, n) => {
-        const b = writeBatch(db);
-        for (let i = from; i < from + n; i += 1) b.set(U(db, 'debtPayments', `pay-m${i}-1`), pay({ debtId: `m${i}`, amountCents: 100 }));
-        b.update(U(db, 'debtors', 'dev1'), { receivedCents: increment(100 * n), updatedAt: serverTimestamp() });
-        return b.commit();
-      };
-      await assertSucceeds(batchOf(0, 10)); // tamanho de bloco usado pelo app
-      await assertSucceeds(batchOf(10, 17)); // folga medida: 17 passam
-      const over = writeBatch(db);
-      for (let i = 0; i < 21; i += 1) over.set(U(db, 'debtPayments', `pay-over${i}-1`), pay({ debtId: `m${i}`, amountCents: 100 }));
-      over.update(U(db, 'debtors', 'dev1'), { receivedCents: increment(2100), updatedAt: serverTimestamp() });
-      await assertFails(over.commit()); // acima do limite de acessos a documentos por lote
     });
   });
 
   describe('devedores, parcelas, compras e faturas', () => {
-    it('devedor: o total recebido nunca DIMINUI (sem rollback pelo cliente) e nunca passa do emprestado', async () => {
+    it('devedor: o total recebido NÃO é alterado pelo cliente (nem sobe, nem desce, nem passa do emprestado)', async () => {
       const db = await seedWorld();
-      await assertSucceeds(updateDoc(U(db, 'debtors', 'dev1'), { receivedCents: 5000, updatedAt: serverTimestamp() }));
-      await assertFails(updateDoc(U(db, 'debtors', 'dev1'), { receivedCents: 4999, updatedAt: serverTimestamp() }));
-      await assertFails(updateDoc(U(db, 'debtors', 'dev1'), { receivedCents: 100001, updatedAt: serverTimestamp() }));
+      for (const receivedCents of [5000, 1, 4999, 100001]) await assertFails(updateDoc(U(db, 'debtors', 'dev1'), { receivedCents, updatedAt: serverTimestamp() }));
+      assert.equal((await getDoc(U(db, 'debtors', 'dev1'))).data().receivedCents, 0);
     });
 
     it('parcela de dívida: valor, vencimento, número, descrição e devedor são imutáveis; só o status muda', async () => {
@@ -1475,13 +1397,13 @@ describe('Auditoria VF-2-03ao: proteção do histórico financeiro (recebimentos
       for (const patch of [{ principalCents: 1 }, { dueDate: noon('2030-01-01') }, { installmentNumber: 9 }, { description: 'outra' }, { debtorId: 'dev2' }, { installmentsTotal: 9 }, { debtGroupId: 'x' }]) {
         await assertFails(updateDoc(U(db, 'debts', 'd1'), { ...patch, updatedAt: serverTimestamp() }));
       }
-      await assertSucceeds(updateDoc(U(db, 'debts', 'd1'), { status: 'paid', updatedAt: serverTimestamp() }));
+      await assertFails(updateDoc(U(db, 'debts', 'd1'), { status: 'paid', updatedAt: serverTimestamp() })); // VF-ARQ-02: só o servidor altera parcelas
     });
 
-    it('parcela PAGA não é excluída pelo dono (só administrador ou após remover o devedor); pendente pode', async () => {
+    it('parcela de dívida não é excluída pelo dono (histórico; só administrador ou o servidor); a criação é só `pending`', async () => {
       const db = await seedWorld();
       await assertFails(deleteDoc(U(db, 'debts', 'dpaid')));
-      await assertSucceeds(deleteDoc(U(db, 'debts', 'd2')));
+      await assertFails(deleteDoc(U(db, 'debts', 'd2')));
       await assertSucceeds(deleteDoc(doc(asAdmin(), 'users', ALICE, 'debts', 'dpaid')));
     });
 
@@ -1501,8 +1423,9 @@ describe('Auditoria VF-2-03ao: proteção do histórico financeiro (recebimentos
         await assertFails(updateDoc(U(db, 'invoices', 'invPaid'), { ...patch, updatedAt: serverTimestamp() }));
       }
       await assertFails(deleteDoc(U(db, 'invoices', 'invPaid')));
-      await assertSucceeds(updateDoc(U(db, 'invoices', 'invOpen'), { status: 'paid', totalCents: 900, paidCents: 900, accountId: 'acc1', paidAt: noon('2027-01-06'), updatedAt: serverTimestamp() }));
-      await assertFails(updateDoc(U(db, 'invoices', 'invOpen'), { paidCents: 1, updatedAt: serverTimestamp() })); // agora paga: imutável
+      // VF-ARQ-02: pagar é do servidor (op invoice.pay): o cliente não consegue marcar a fatura como paga
+      await assertFails(updateDoc(U(db, 'invoices', 'invOpen'), { status: 'paid', totalCents: 900, paidCents: 900, accountId: 'acc1', paidAt: noon('2027-01-06'), updatedAt: serverTimestamp() }));
+      await assertFails(updateDoc(U(db, 'invoices', 'invOpen'), { paidCents: 1, updatedAt: serverTimestamp() }));
       await assertSucceeds(deleteDoc(doc(asAdmin(), 'users', ALICE, 'invoices', 'invPaid')));
     });
   });
