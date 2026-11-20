@@ -315,7 +315,7 @@ async function readLedger(db, uid, debtorId) {
   return { debts: debts.docs.map(plain), purchases: purchases.docs.map(plain), payments: livePayments, invoicesById: new Map(invoices.map((i) => [i.id, i])) };
 }
 
-function planItems(debtor, ledger, scope) {
+export function planItems(debtor, ledger, scope) {
   const { byDebt, byPurchase } = receivedByInstallment(ledger.payments);
   const input = { debtor, debts: ledger.debts, receivedByDebt: byDebt, receivedByPurchase: byPurchase, purchases: ledger.purchases, invoicesById: ledger.invoicesById };
   let items;

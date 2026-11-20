@@ -104,68 +104,9 @@ describe('pagamento parcial: casos de borda', () => {
   });
 });
 
-describe('simultaneidade: duas operações lendo o MESMO estado antigo', () => {
-  /** io cujas leituras de recebimentos/devedor/dívidas ficam congeladas no instante `snapshot`. */
-  const frozen = (s) => {
-    const snap = structuredClone(s.tables);
-    return {
-      ...s.io,
-      getById: async (_u, c, id) => structuredClone((snap[c] ?? []).find((r) => r.id === id) ?? null),
-      list: async (_u, c, o = {}) => structuredClone((snap[c] ?? []).filter((r) => (o.where ?? []).every(([f, op, v]) => (op === '==' ? r[f] === v : v.includes(r[f]))))),
-    };
-  };
-
-  it('dois parciais de R$ 60,00 simultâneos NÃO podem somar R$ 120,00 numa parcela de R$ 100,00', async () => {
-    const s = seed();
-    const staleA = frozen(s);
-    const staleB = frozen(s);
-    const a = await settleInstallment(UID, DEBTOR, target('card'), { ...pay, amountCents: '60,00' }, staleA);
-    assert.equal(a.ok, true);
-    // a 2ª operação leu o estado ANTIGO (nada recebido): tenta gravar mais 60,00
-    let b;
-    try { b = await settleInstallment(UID, DEBTOR, target('card'), { ...pay, amountCents: '60,00' }, { ...staleB, commitAtomic: s.io.commitAtomic }); } catch (e) { b = { ok: false, denied: e.code === 'permission-denied' }; }
-    assert.equal(b.ok, false, 'a segunda gravação concorrente deveria ser barrada');
-    const received = s.tables.debtPayments.reduce((t, p) => t + p.amountCents, 0);
-    assert.equal(received, 6000);
-    assert.equal(debtorOf(s).receivedCents, 6000); // total do devedor == soma dos recebimentos
-  });
-
-  it('duplo clique no mesmo recebimento parcial (mesma leitura) grava UM só', async () => {
-    const s = seed();
-    const one = frozen(s);
-    const two = frozen(s);
-    await settleInstallment(UID, DEBTOR, target('debt'), { ...pay, amountCents: '40,00' }, { ...one, commitAtomic: s.io.commitAtomic });
-    let second;
-    try { second = await settleInstallment(UID, DEBTOR, target('debt'), { ...pay, amountCents: '40,00' }, { ...two, commitAtomic: s.io.commitAtomic }); } catch (e) { second = { ok: false }; }
-    assert.equal(second.ok, false);
-    assert.equal(s.tables.debtPayments.length, 1);
-    assert.equal(debtorOf(s).receivedCents, 4000);
-    assert.equal(balance(s), 100000 + 4000);
-  });
-
-  it('parcial concorrente com a quitação do mês: não recebe duas vezes a mesma parcela', async () => {
-    const s = seed();
-    const stale = frozen(s);
-    await settleInstallment(UID, DEBTOR, target('card'), { ...pay, amountCents: '40,00' }, s.io);
-    let r;
-    try { r = await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, { ...stale, commitAtomic: s.io.commitAtomic }); } catch (e) { r = { ok: false }; }
-    assert.equal(r.ok, false);
-    assert.equal(s.tables.debtPayments.length, 1);
-    assert.equal(debtorOf(s).receivedCents, 4000);
-  });
-
-  it('dois recebimentos simultâneos em parcelas DIFERENTES do mesmo devedor: o total do devedor = soma dos recebimentos (sem perda)', async () => {
-    const s = seed();
-    const staleA = frozen(s);
-    const staleB = frozen(s);
-    await settleInstallment(UID, DEBTOR, target('debt'), { ...pay, amountCents: '40,00' }, { ...staleA, commitAtomic: s.io.commitAtomic });
-    await settleInstallment(UID, DEBTOR, target('card'), { ...pay, amountCents: '30,00' }, { ...staleB, commitAtomic: s.io.commitAtomic });
-    const sum = s.tables.debtPayments.reduce((t, p) => t + p.amountCents, 0);
-    assert.equal(sum, 7000);
-    assert.equal(debtorOf(s).receivedCents, sum, 'a atualização absoluta do devedor perdeu um recebimento');
-    assert.equal(balance(s), 100000 + 7000);
-  });
-});
+// Simultaneidade (dois parciais de R$ 60 na mesma parcela, duplo clique, lote × parcial, parcelas diferentes do mesmo
+// devedor) é decidida por transação no SERVIDOR e testada com clientes simultâneos reais em
+// tests/integration/server-debts.test.mjs (Cenários A–E e estresse, 10× cada). O Firestore em memória não serializa.
 
 describe('estado da parcela derivado da soma dos recebimentos', () => {
   it('pendente (0) · parcial (< valor) · paga (= valor); cancelada à parte; nada é gravado no documento', () => {
@@ -200,21 +141,12 @@ describe('devedor: status e conciliação', () => {
     assert.equal(debtorOf(s).receivedCents, 20000);
   });
 
-  it('conciliação: se recebimentos concorrentes alcançam o emprestado e o status ficou open, vira paid (e só então)', async () => {
+  it('o status do devedor acompanha o total recebido NA MESMA transação do servidor (sem conciliação posterior)', async () => {
     const s = seed();
-    const racing = { ...s.io, commitAtomic: async (u, ops) => {
-      const ids = await s.io.commitAtomic(u, ops);
-      // outra operação concorrente (parcela diferente) somou o resto antes desta reler o devedor; nenhuma viu "pendente zero"
-      s.tables.debtors[0].receivedCents = 20000;
-      return ids;
-    } };
-    const r = await settleInstallment(UID, DEBTOR, target('card'), { ...pay, amountCents: '100,00' }, racing);
-    assert.equal(r.ok, true);
+    await settleInstallment(UID, DEBTOR, target('card'), { ...pay, amountCents: '100,00' }, s.io);
+    assert.equal(s.tables.debtors[0].status, 'open'); // sem alcançar o emprestado, nada muda
+    await settleInstallment(UID, DEBTOR, target('debt'), { ...pay, amountCents: '100,00' }, s.io);
     assert.equal(debtorOf(s).receivedCents, 20000);
-    assert.equal(debtorOf(s).status, 'paid'); // conciliado
-    // sem alcançar o emprestado, nada é alterado
-    const s2 = seed();
-    await settleInstallment(UID, DEBTOR, target('card'), { ...pay, amountCents: '100,00' }, s2.io);
-    assert.equal(s2.tables.debtors[0].status, 'open');
+    assert.equal(debtorOf(s).status, 'paid');
   });
 });

@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  settleInstallment, settleMonthInstallments, previewMonthSettlement, loadDebtorLedger, receiptPaymentId, registerDebtPayment,
+  settleInstallment, settleMonthInstallments, previewMonthSettlement, loadDebtorLedger, registerDebtPayment,
 } from '../../js/services/debtPayments.js';
 import { loadDebtorStatements } from '../../js/services/debtors.js';
 import {
@@ -26,12 +26,16 @@ async function obligations(s) {
 }
 const statusOf = async (s, id) => (await obligations(s)).items.find((i) => i.id === id).status;
 
+// VF-ARQ-02: aqui `s.io.finance` é o SERVIDOR EM MEMÓRIA (lógica real de server/finance/ops.mjs sobre as tabelas);
+// concorrência/transação/idempotência reais ficam em tests/integration/server-debts.test.mjs (Firebase Emulator).
+const view = (p) => ({ purchaseId: p.purchaseId, debtId: p.debtId, debtorId: p.debtorId, amountCents: p.amountCents, date: p.date, accountId: p.accountId });
+
 describe('quitar UMA parcela', () => {
   it('1) parcela de cartão: grava um recebimento com purchaseId, data, conta e valor; só ela fica paga', async () => {
     const s = makeStore();
     const r = await settleInstallment(UID, DEBTOR, { purchaseId: 'pAgua' }, pay, s.io);
     assert.deepEqual([r.ok, r.settled, r.amountCents, r.remainingCents], [true, true, 2500, 0]);
-    assert.deepEqual(payments(s), [{ id: 'pay-pAgua-1', purchaseId: 'pAgua', debtorId: DEBTOR, amountCents: 2500, date: '2026-12-06', accountId: 'acc', action: undefined }].map(({ action, ...x }) => x));
+    assert.deepEqual(payments(s).map(view), [{ purchaseId: 'pAgua', debtId: undefined, debtorId: DEBTOR, amountCents: 2500, date: '2026-12-06', accountId: 'acc' }]);
     assert.equal(await statusOf(s, 'pAgua'), 'paid');
     for (const id of ['pMercado', 'pSuper', 'dNov', 'dDez']) assert.equal(await statusOf(s, id), 'pending', id);
     assert.equal(s.tables.debts.every((d) => d.status === 'pending'), true); // nenhuma outra parcela mudou
@@ -58,11 +62,9 @@ describe('quitar UMA parcela', () => {
   it('5) quitar de novo a mesma parcela é recusado e não grava nada', async () => {
     const s = makeStore();
     await settleInstallment(UID, DEBTOR, { purchaseId: 'pAgua' }, pay, s.io);
-    const commits = s.calls.commits.length;
     const again = await settleInstallment(UID, DEBTOR, { purchaseId: 'pAgua' }, pay, s.io);
     assert.equal(again.ok, false);
     assert.match(again.errors._form, /já foi quitada/);
-    assert.equal(s.calls.commits.length, commits);
     assert.equal(payments(s).length, 1);
     assert.equal(debtorOf(s).receivedCents, 2500);
     // dívida também
@@ -70,69 +72,57 @@ describe('quitar UMA parcela', () => {
     assert.match((await settleInstallment(UID, DEBTOR, { debtId: 'dNov' }, pay, s.io)).errors._form, /já foi quitada/);
   });
 
-  it('9) envio concorrente (leitura antiga): o ID determinístico faz o 2º lote falhar inteiro — nada duplica', async () => {
+  it('repetição com a MESMA chave devolve o resultado original sem gravar de novo (idempotência)', async () => {
     const s = makeStore();
-    const first = await settleInstallment(UID, DEBTOR, { purchaseId: 'pAgua' }, pay, s.io);
-    assert.equal(first.ok, true);
-    // simula a janela de concorrência: o 2º envio leu o razão ANTES do 1º gravar
-    const stale = { ...s.io, list: async (_u, c) => (c === 'debtPayments' ? [] : s.io.list(_u, c, {})), };
-    const balanceBefore = accountBalances(s.tables.accounts, { debtPayments: payments(s) }).get('acc');
-    await assert.rejects(() => settleInstallment(UID, DEBTOR, { purchaseId: 'pAgua' }, { ...pay, date: '2026-12-07' }, { ...s.io, list: stale.list }), /permission-denied/);
+    const first = await settleInstallment(UID, DEBTOR, { purchaseId: 'pAgua' }, { ...pay, operationId: 'k1' }, s.io);
+    const retry = await settleInstallment(UID, DEBTOR, { purchaseId: 'pAgua' }, { ...pay, operationId: 'k1' }, s.io);
+    assert.deepEqual([first.ok, retry.ok, retry.idempotent, retry.id], [true, true, true, first.id]);
     assert.equal(payments(s).length, 1);
     assert.equal(debtorOf(s).receivedCents, 2500);
-    assert.equal(accountBalances(s.tables.accounts, { debtPayments: payments(s) }).get('acc'), balanceBefore);
   });
 
-  it('recebimento parcial não quita (sem ID determinístico); o restante quita depois; excesso é recusado', async () => {
+  it('recebimento parcial não quita; o restante quita depois; excesso é recusado', async () => {
     const s = makeStore();
     const part = await settleInstallment(UID, DEBTOR, { purchaseId: 'pMercado' }, { ...pay, amountCents: '30,00' }, s.io);
     assert.deepEqual([part.ok, part.settled, part.remainingCents], [true, false, 4800]);
     assert.equal(await statusOf(s, 'pMercado'), 'pending');
-    assert.equal(payments(s)[0].id, 'pay-pMercado-1'); // cada recebimento (parcial ou final) tem ID próprio e sequencial
-    assert.equal(receiptPaymentId('pMercado', payments(s)), 'pay-pMercado-2');
     assert.match((await settleInstallment(UID, DEBTOR, { purchaseId: 'pMercado' }, { ...pay, amountCents: '48,01' }, s.io)).errors.amountCents, /excede/);
     const rest = await settleInstallment(UID, DEBTOR, { purchaseId: 'pMercado' }, pay, s.io);
     assert.deepEqual([rest.ok, rest.settled, rest.amountCents], [true, true, 4800]);
     assert.equal(await statusOf(s, 'pMercado'), 'paid');
     assert.equal(debtorOf(s).receivedCents, 7800);
+    assert.equal(new Set(payments(s).map((p) => p.id)).size, 2); // cada recebimento é um documento próprio
   });
 
-  it('valida conta (inexistente/inativa), data, devedor e parcela; nada é gravado nos erros', async () => {
+  it('valida conta (inexistente/inativa), data, valor, devedor e parcela; nada é gravado nos erros', async () => {
     const s = makeStore();
     const bad = [
-      [{ purchaseId: 'pAgua' }, { ...pay, accountId: 'zz' }, /accountId/],
-      [{ purchaseId: 'pAgua' }, { ...pay, accountId: 'off' }, /accountId/],
-      [{ purchaseId: 'pAgua' }, { ...pay, date: '2026-02-30' }, /date/],
-      [{ purchaseId: 'pAgua' }, { ...pay, amountCents: '0,00' }, /amountCents/],
-      [{}, pay, /_form/],
-      [{ purchaseId: 'nao-existe' }, pay, /_form/],
+      [{ purchaseId: 'pAgua' }, { ...pay, accountId: 'zz' }, 'ACCOUNT_NOT_FOUND'],
+      [{ purchaseId: 'pAgua' }, { ...pay, accountId: 'off' }, 'ACCOUNT_NOT_ACTIVE'],
+      [{ purchaseId: 'pAgua' }, { ...pay, date: '2026-02-30' }, undefined, /date/],
+      [{ purchaseId: 'pAgua' }, { ...pay, amountCents: '0,00' }, undefined, /amountCents/],
+      [{}, pay, undefined, /_form/],
+      [{ purchaseId: 'nao-existe' }, pay, 'NOT_FOUND'],
     ];
-    for (const [target, raw, key] of bad) {
+    for (const [target, raw, code, key] of bad) {
       const r = await settleInstallment(UID, DEBTOR, target, raw, s.io);
       assert.equal(r.ok, false);
-      assert.match(Object.keys(r.errors).join(), key);
+      if (code) assert.equal(r.code, code);
+      if (key) assert.match(Object.keys(r.errors).join(), key);
     }
-    assert.equal(s.calls.commits.length, 0);
+    assert.equal(payments(s).length, 0);
     s.tables.debtors[0].status = 'cancelled';
-    assert.match((await settleInstallment(UID, DEBTOR, { purchaseId: 'pAgua' }, pay, s.io)).errors._form, /em aberto/);
-  });
-
-  it('fail-closed: falha ao ler recebimentos cancela a quitação', async () => {
-    const s = makeStore();
-    const r = await settleInstallment(UID, DEBTOR, { purchaseId: 'pAgua' }, pay, { ...s.io, list: async () => { throw new Error('boom'); } });
-    assert.equal(r.ok, false);
-    assert.match(r.errors._form, /cancelada por segurança/);
-    assert.equal(s.calls.commits.length, 0);
+    assert.match((await settleInstallment(UID, DEBTOR, { purchaseId: 'pAgua' }, pay, s.io)).errors._form, /cancelado/);
+    assert.equal(payments(s).length, 0);
   });
 });
 
 describe('quitar TODAS as parcelas pendentes de um mês', () => {
-  it('3) quita as 4 parcelas de 12/2026 (3 de cartão + 1 dívida) num único lote; o mês de novembro não muda', async () => {
+  it('3) quita as 4 parcelas de 12/2026 (3 de cartão + 1 dívida) num lote; o mês de novembro não muda', async () => {
     const s = makeStore();
     const r = await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, s.io);
     assert.deepEqual([r.ok, r.count, r.totalCents, r.debtorPaid], [true, 4, 2500 + 7800 + 2800 + 5000, false]);
-    assert.equal(s.calls.commits.length, 1); // lote ATÔMICO único
-    assert.deepEqual(payments(s).map((p) => p.id).sort(), ['pay-dDez-1', 'pay-pAgua-1', 'pay-pMercado-1', 'pay-pSuper-1']);
+    assert.deepEqual(payments(s).map((p) => p.purchaseId ?? p.debtId).sort(), ['dDez', 'pAgua', 'pMercado', 'pSuper']);
     assert.ok(payments(s).every((p) => p.date === '2026-12-06' && p.accountId === 'acc' && p.debtorId === DEBTOR));
     assert.equal(s.tables.debts.find((d) => d.id === 'dDez').status, 'paid');
     assert.equal(s.tables.debts.find((d) => d.id === 'dNov').status, 'pending'); // 6) outro mês intacto
@@ -153,64 +143,30 @@ describe('quitar TODAS as parcelas pendentes de um mês', () => {
     assert.equal(debtorOf(s).receivedCents, 18100);
   });
 
-  it('repetir o lote não duplica: não há mais pendentes', async () => {
+  it('repetir o lote com OUTRA chave não duplica: não há mais pendentes; com a MESMA chave retoma o mesmo lote', async () => {
     const s = makeStore();
-    await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, s.io);
+    await settleMonthInstallments(UID, DEBTOR, '2026-12', { ...pay, operationId: 'm1' }, s.io);
     const again = await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, s.io);
     assert.equal(again.ok, false);
     assert.match(again.errors._form, /Não há parcelas pendentes/);
+    const same = await settleMonthInstallments(UID, DEBTOR, '2026-12', { ...pay, operationId: 'm1' }, s.io);
+    assert.deepEqual([same.ok, same.count, same.totalCents], [true, 4, 18100]); // mesmo lote, estado final igual
     assert.equal(payments(s).length, 4);
     assert.equal(debtorOf(s).receivedCents, 18100);
   });
 
-  it('lote simultâneo (leitura antiga) é negado por inteiro pelas Rules: nada parcial', async () => {
-    const s = makeStore();
-    const staleDebtor = structuredClone(debtorOf(s)); // lido ANTES do 1º lote gravar
-    await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, s.io);
-    const snapshot = structuredClone(s.tables);
-    const stale = {
-      ...s.io,
-      getById: async (u, c, id) => (c === 'debtors' ? structuredClone(staleDebtor) : s.io.getById(u, c, id)),
-      list: async (u, c, o) => (c === 'debtPayments' ? [] : c === 'debts' ? structuredClone(snapshot.debts).map((d) => ({ ...d, status: 'pending' })) : s.io.list(u, c, o)),
-    };
-    const denied = await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, stale);
-    assert.deepEqual([denied.ok, denied.partial, denied.code], [false, false, 'permission-denied']); // erro identificável
-    assert.deepEqual(s.tables, snapshot); // tudo ou nada: o 2º lote não gravou nenhuma parcela
-    assert.equal(snapshot.debtPayments.length, 4);
-  });
-
-  it('mesmo com leitura antiga do devedor atualizado, o limite do pendente impede receber a mais', async () => {
-    const s = makeStore();
-    await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, s.io);
-    const stale = { ...s.io, list: async (u, c, o) => (c === 'debtPayments' ? [] : s.io.list(u, c, o)) };
-    const r = await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, stale);
-    assert.equal(r.ok, false); // 18100 de novo excederia o pendente (5000)
-    assert.equal(s.tables.debtPayments.length, 4);
-  });
-
-  it('falha no meio do lote não deixa estado parcial (atomicidade)', async () => {
-    const s = makeStore();
-    const failing = { ...s.io, commitAtomic: async (u, ops) => { await s.io.commitAtomic(u, ops.slice(0, 3)); throw new Error('rede caiu'); } };
-    // o commit "parcial" simulado acima grava; o contrato real é do Firestore (writeBatch): verificamos que o service usa UM commit
-    const real = await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, s.io);
-    assert.equal(real.ok, true);
-    assert.equal(s.calls.commits.length, 1);
-    assert.ok(failing);
-    const s2 = makeStore();
-    const boom = { ...s2.io, commitAtomic: async () => { throw new Error('rede caiu'); } };
-    const failed = await settleMonthInstallments(UID, DEBTOR, '2026-12', pay, boom);
-    assert.deepEqual([failed.ok, failed.partial, failed.done], [false, false, 0]);
-    assert.match(failed.errors._form, /nada foi gravado/);
-    assert.deepEqual(s2.tables, makeStore().tables);
-  });
-
-  it('valida mês, conta e devedor; mês sem pendentes é recusado', async () => {
+  it('valida mês, conta e data; mês sem pendentes é recusado', async () => {
     const s = makeStore();
     assert.match((await settleMonthInstallments(UID, DEBTOR, '2026-13', pay, s.io)).errors._form, /inválido/);
     assert.match((await settleMonthInstallments(UID, DEBTOR, '2027-03', pay, s.io)).errors._form, /Não há parcelas pendentes/);
-    assert.ok((await settleMonthInstallments(UID, DEBTOR, '2026-12', { ...pay, accountId: 'zz' }, s.io)).errors.accountId);
-    assert.ok((await settleMonthInstallments(UID, DEBTOR, '2026-12', { ...pay, accountId: 'off' }, s.io)).errors.accountId);
-    assert.equal(s.calls.commits.length, 0);
+    assert.ok((await settleMonthInstallments(UID, DEBTOR, '2026-12', { ...pay, date: '2026-02-30' }, s.io)).errors.date);
+    // conta inexistente/inativa: cada parcela é recusada pelo servidor; o lote termina partial_failed sem gravar nada
+    for (const accountId of ['zz', 'off']) {
+      const r = await settleMonthInstallments(UID, DEBTOR, '2026-12', { ...pay, accountId }, s.io);
+      assert.equal(r.ok, false, accountId);
+      assert.equal(r.count, 0);
+    }
+    assert.equal(payments(s).length, 0);
     assert.equal(debtorOf(s).receivedCents, 0);
   });
 
@@ -299,16 +255,14 @@ describe('integridade financeira: saldo, histórico e indicadores', () => {
     assert.equal(buildEntity('debtPayments', { ...base, debtId: 'x', purchaseId: 'p' }).ok, false);
   });
 
-  it('registerDebtPayment (parcial/antecipação) segue funcionando e cada recebimento tem ID exclusivo e sequencial', async () => {
+  it('registerDebtPayment (parcial/antecipação) segue funcionando: cada recebimento é um documento próprio e o total fecha', async () => {
     const s = makeStore();
-    const ops = [];
-    const spy = { ...s.io, commitAtomic: async (u, o) => { ops.push(o); return s.io.commitAtomic(u, o); } };
-    const part = await registerDebtPayment(UID, 'dDez', { amountCents: '20,00', date: '2026-12-01', accountId: 'acc' }, spy);
+    const part = await registerDebtPayment(UID, 'dDez', { amountCents: '20,00', date: '2026-12-01', accountId: 'acc' }, s.io);
     assert.equal(part.debtPaid, false);
-    assert.equal(ops[0][0].docId, 'pay-dDez-1');
-    const rest = await registerDebtPayment(UID, 'dDez', { amountCents: '30,00', date: '2026-12-02', accountId: 'acc' }, spy);
+    const rest = await registerDebtPayment(UID, 'dDez', { amountCents: '30,00', date: '2026-12-02', accountId: 'acc' }, s.io);
     assert.equal(rest.debtPaid, true);
-    assert.equal(ops[1][0].docId, 'pay-dDez-2');
+    assert.equal(new Set(payments(s).map((p) => p.id)).size, 2);
+    assert.equal(debtorOf(s).receivedCents, 5000);
   });
 });
 
