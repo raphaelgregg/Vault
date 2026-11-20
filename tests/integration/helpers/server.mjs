@@ -33,7 +33,7 @@ export const opId = (prefix = 'op') => `${prefix}-${Date.now().toString(36)}-${(
 export async function call(uid, op, operationId, params, deps = {}) {
   return handleFinance(
     { method: 'POST', headers: { authorization: `Bearer tok-${uid}` }, body: { op, operationId, params } },
-    { db: adminDb(), verifyIdToken: async (t) => ({ uid: String(t).replace(/^tok-/, '') }), log: () => {}, ...deps },
+    { db: adminDb(), verifyIdToken: async (t) => ({ uid: String(t).replace(/^tok-/, '') }), log: process.env.SRV_LOG ? (e) => { if (e.event === 'finance_error') console.error(JSON.stringify(e)); } : () => {}, ...deps },
   );
 }
 

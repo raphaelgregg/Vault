@@ -86,7 +86,7 @@ const movementValidate = (kind, settled) => (p) => ({
   amountCents: v.cents(p.amountCents), accountId: v.id(p.accountId, 'accountId'),
   ...(kind === 'income'
     ? { expectedDate: v.date(p.expectedDate, 'expectedDate'), receivedDate: p.receivedDate ? v.date(p.receivedDate, 'receivedDate') : undefined }
-    : { purchaseDate: v.date(p.purchaseDate, 'purchaseDate'), dueDate: v.date(p.dueDate, 'dueDate'), paidDate: p.paidDate ? v.date(p.paidDate, 'paidDate') : undefined }),
+    : { purchaseDate: v.date(p.purchaseDate, 'purchaseDate'), dueDate: v.date(p.dueDate, 'dueDate'), paidDate: p.paidDate ? v.date(p.paidDate, 'paidDate') : undefined, installmentGroupId: v.text(p.installmentGroupId, 'installmentGroupId', { max: 80 }) }),
   status: v.enum(p.status ?? 'pending', 'status', ['pending', settled, 'cancelled']),
   recurrence: v.enum(p.recurrence ?? 'none', 'recurrence', RECURRENCES), notes: v.text(p.notes, 'notes', { max: 500 }),
 });

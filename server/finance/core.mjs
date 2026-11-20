@@ -243,6 +243,22 @@ const json = (status, body) => ({ status, body });
 const RETRYABLE = new Set([4, 10, 13, 14]); // DEADLINE_EXCEEDED, ABORTED, INTERNAL, UNAVAILABLE (códigos gRPC)
 
 /**
+ * Falha transitória de transação (nada foi confirmado): contenção/expiração. Inclui "Transaction is invalid or closed"
+ * (INVALID_ARGUMENT quando a transação expira sob contenção). Seguro reexecutar: a operação é idempotente.
+ */
+export const isTransient = (error) => RETRYABLE.has(error?.code) || /Transaction is invalid or closed|too much contention/i.test(String(error?.message ?? ''));
+const SERVER_ATTEMPTS = 4;
+
+async function withRetries(fn) {
+  for (let attempt = 1; ; attempt += 1) {
+    try { return await fn(); } catch (error) {
+      if (error instanceof FinanceError || !isTransient(error) || attempt >= SERVER_ATTEMPTS) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25 * attempt + Math.floor(Math.random() * 40)));
+    }
+  }
+}
+
+/**
  * Handler HTTP agnóstico: `{ method, headers, body }` → `{ status, body }`. `deps`: { db, verifyIdToken, now } (testes
  * injetam; produção usa `getAdmin()`).
  */
@@ -272,9 +288,9 @@ export async function handleFinance({ method, headers = {}, body }, deps = {}) {
     }
     const clean = def.validate(params);
     const started = Date.now();
-    const result = def.run
-      ? await def.run({ db: admin.db, uid, op, operationId, params: clean, deps: admin })
-      : await executeOnce({ db: admin.db, uid, op, operationId, params: clean, deps: admin }, (ctx) => def.prepare(ctx, clean, operationId));
+    const result = await withRetries(() => (def.run
+      ? def.run({ db: admin.db, uid, op, operationId, params: clean, deps: admin })
+      : executeOnce({ db: admin.db, uid, op, operationId, params: clean, deps: admin }, (ctx) => def.prepare(ctx, clean, operationId))));
     log({ event: 'finance_op', op, operationId, uid: `${uid.slice(0, 4)}…`, idempotent: Boolean(result.idempotent), ms: Date.now() - started });
     return json(200, { ok: true, ...result });
   } catch (error) {
@@ -283,7 +299,7 @@ export async function handleFinance({ method, headers = {}, body }, deps = {}) {
       return json(error.status, { ok: false, error: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) });
     }
     if (error instanceof SyntaxError) return json(400, { ok: false, error: 'INVALID_BODY', message: 'JSON inválido.' });
-    const retry = RETRYABLE.has(error?.code);
+    const retry = isTransient(error);
     log({ event: 'finance_error', code: error?.code ?? 'unknown', message: String(error?.message ?? error).slice(0, 200) });
     return json(retry ? 503 : 500, { ok: false, error: retry ? 'TEMPORARILY_UNAVAILABLE' : 'INTERNAL_ERROR', message: retry ? 'Falha temporária: repita com o mesmo operationId.' : 'Erro interno.', retryable: retry });
   }
