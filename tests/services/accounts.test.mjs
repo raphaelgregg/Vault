@@ -9,6 +9,10 @@ import {
   listAccounts,
   createAccount,
   deleteAccount,
+  archiveAccount,
+  unarchiveAccount,
+  updateAccount,
+  adjustOpeningBalance,
   ACCOUNT_LINK_QUERIES,
   summarizeAccountLinks,
   buildAccountInUseMessage,
@@ -168,53 +172,68 @@ describe('accounts service — exclusão segura (VF-1-02)', () => {
     assert.match(buildAccountInUseMessage(s), /arquive/i);
   });
 
-  it('bloqueia exclusão com receita vinculada (sem remover nem auditar)', async () => {
-    const { io, calls } = makeIo({ counts: { 'incomes.accountId': 3 } });
-    const result = await deleteAccount(uid, 'acc1', io);
-    assert.equal(result.ok, false);
-    assert.match(result.errors._form, /receitas \(3\)/);
-    assert.equal(calls.remove, 0);
-    assert.equal(calls.audit, 0);
-  });
+  const fake = (responder) => {
+    const calls = [];
+    return { calls, finance: async (op, params, options) => { calls.push({ op, params, options }); return responder(op, params); } };
+  };
 
-  it('bloqueia exclusão com transferência como destino', async () => {
-    const { io, calls } = makeIo({ counts: { 'transfers.toAccountId': 1 } });
-    const result = await deleteAccount(uid, 'acc1', io);
-    assert.equal(result.ok, false);
-    assert.match(result.errors._form, /transferências \(destino\) \(1\)/);
-    assert.equal(calls.remove, 0);
-  });
-
-  it('exclui e audita conta sem vínculos', async () => {
+  it('exclusão é decidida NO SERVIDOR (account.delete): nenhuma remoção direta nem leitura de vínculos no cliente', async () => {
+    const api = fake(() => ({ ok: true }));
     const { io, calls } = makeIo();
-    const result = await deleteAccount(uid, 'acc1', io);
+    const result = await deleteAccount(uid, 'acc1', { ...io, finance: api.finance, operationId: 'op-1' });
     assert.deepEqual(result, { ok: true });
-    assert.equal(calls.remove, 1);
-    assert.equal(calls.audit, 1);
-    assert.equal(calls.queries.length, ACCOUNT_LINK_QUERIES.length);
-  });
-
-  it('fail-closed: falha na verificação bloqueia a exclusão', async () => {
-    const { io, calls } = makeIo({ failOn: 'expenses' });
-    const original = console.error;
-    console.error = () => {};
-    let result;
-    try {
-      result = await deleteAccount(uid, 'acc1', io);
-    } finally {
-      console.error = original;
-    }
-    assert.equal(result.ok, false);
-    assert.match(result.errors._form, /Não foi possível verificar/);
+    assert.deepEqual(api.calls.map((c) => [c.op, c.params, c.options.operationId]), [['account.delete', { accountId: 'acc1' }, 'op-1']]);
     assert.equal(calls.remove, 0);
-    assert.equal(calls.audit, 0);
-  });
-
-  it('conta inexistente não consulta vínculos nem remove', async () => {
-    const { io, calls } = makeIo({ existing: null });
-    const result = await deleteAccount(uid, 'nope', io);
-    assert.equal(result.ok, false);
     assert.equal(calls.queries.length, 0);
-    assert.equal(calls.remove, 0);
+  });
+
+  it('conta com histórico: erro real do servidor (HAS_HISTORY) é repassado; orienta arquivar', async () => {
+    const api = fake(() => ({ ok: false, code: 'HAS_HISTORY', errors: { _form: 'A conta possui histórico financeiro e não pode ser apagada; arquive-a para preservá-lo.' } }));
+    const result = await deleteAccount(uid, 'acc1', { finance: api.finance });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'HAS_HISTORY');
+    assert.equal(result.hasHistory, true);
+    assert.match(result.errors._form, /arquive/);
+  });
+
+  it('arquivar e desarquivar chamam account.archive / account.unarchive (arquivamento lógico)', async () => {
+    const api = fake(() => ({ ok: true }));
+    assert.deepEqual(await archiveAccount(uid, 'acc1', { finance: api.finance }), { ok: true });
+    assert.deepEqual(await unarchiveAccount(uid, 'acc1', { finance: api.finance }), { ok: true });
+    assert.deepEqual(api.calls.map((c) => c.op), ['account.archive', 'account.unarchive']);
+  });
+});
+
+describe('accounts service — saldo de abertura só pelo servidor (VF-ARQ-02)', () => {
+  const uid = 'u1';
+  const base = { institution: 'Nubank', name: 'Corrente', type: 'checking', initialBalanceCents: '100,00', color: '#000000', status: 'active' };
+
+  it('editar conta com saldo/abertura alterados é recusado; sem alteração não envia campos protegidos', async () => {
+    const patches = [];
+    const io = { getById: async () => ({ id: 'a1', initialBalanceCents: 10000 }), update: async (_u, _c, _id, d) => { patches.push(d); }, writeAudit: async () => {} };
+    const refused = await updateAccount(uid, 'a1', { ...base, initialBalanceCents: '999,00' }, io);
+    assert.equal(refused.ok, false);
+    assert.match(refused.errors.initialBalanceCents, /Ajustar saldo/);
+    assert.deepEqual(patches, []);
+    assert.equal((await updateAccount(uid, 'a1', base, io)).ok, true);
+    assert.equal('initialBalanceCents' in patches[0], false);
+    assert.equal('openingDate' in patches[0], false);
+  });
+
+  it('ajustar saldo de abertura chama account.adjustOpening com centavos inteiros e mostra o resultado do servidor', async () => {
+    const ops = [];
+    const finance = async (op, params, options) => { ops.push({ op, params, options }); return { ok: true, previousInitialCents: 0, newInitialCents: 5000, movementsCents: 1000 }; };
+    const r = await adjustOpeningBalance(uid, 'a1', '60,00', { openingDate: '2026-01-01', operationId: 'op-5' }, { finance });
+    assert.deepEqual([r.ok, r.newInitialCents, r.movementsCents], [true, 5000, 1000]);
+    assert.deepEqual(ops[0].params, { accountId: 'a1', realBalanceCents: 6000, openingDate: '2026-01-01' });
+    assert.equal(ops[0].options.operationId, 'op-5');
+  });
+
+  it('valores inválidos param antes do servidor', async () => {
+    const ops = [];
+    const finance = async (op) => { ops.push(op); return { ok: true }; };
+    assert.equal((await adjustOpeningBalance(uid, 'a1', '-5,00', {}, { finance })).ok, false);
+    assert.equal((await adjustOpeningBalance(uid, 'a1', '10,00', { openingDate: '01/01/2026' }, { finance })).ok, false);
+    assert.deepEqual(ops, []);
   });
 });

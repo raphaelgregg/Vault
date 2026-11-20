@@ -11,7 +11,7 @@ import { auditLedgerData } from '../core/integrity.js';
 const SOURCES = {
   accounts: COLLECTIONS.accounts, debtors: COLLECTIONS.debtors, debts: COLLECTIONS.debts, payments: COLLECTIONS.debtPayments,
   purchases: COLLECTIONS.cardPurchases, invoices: COLLECTIONS.invoices, transfers: COLLECTIONS.transfers,
-  incomes: COLLECTIONS.incomes, expenses: COLLECTIONS.expenses, goalTransactions: COLLECTIONS.goalTransactions,
+  incomes: COLLECTIONS.incomes, expenses: COLLECTIONS.expenses, goalTransactions: COLLECTIONS.goalTransactions, reversals: COLLECTIONS.reversals,
 };
 
 /** Retorna { findings, errors, warnings, totals, truncated }. Falha de leitura propaga (auditoria não pode ser "verde" sem ler). */

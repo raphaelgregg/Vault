@@ -106,205 +106,147 @@ describe('transfers service — validação e helpers', () => {
   });
 });
 
-describe('transfers service — transições de status (VF-2-01)', () => {
+/** Cliente de API falso: registra chamadas e devolve a resposta programada (o servidor real é testado em tests/integration). */
+function fakeFinance(responder = () => ({ ok: true })) {
+  const calls = [];
+  const finance = async (op, params, options) => { calls.push({ op, params, options }); return responder(op, params, options); };
+  return { finance, calls };
+}
+
+describe('transfers service — transições de status (VF-2-01 / VF-ARQ-02)', () => {
   const uid = 'u1';
   const transfer = (status) => ({ id: 't1', status, fromAccountId: 'a1', toAccountId: 'a2', amountCents: 10000 });
 
-  function makeIo({ status = 'pending', missing = [], failAccounts = false, exists = true } = {}) {
-    const calls = { update: [], audit: [] };
+  function makeIo({ status = 'pending', exists = true, finance } = {}) {
+    const calls = { update: [], audit: [], remove: [] };
     return {
       calls,
       io: {
-        getById: async (_uid, collection, id) => {
-          if (collection === 'transfers') return exists ? transfer(status) : null;
-          if (failAccounts) throw new Error('unavailable');
-          return missing.includes(id) ? null : { id, institution: 'Banco', name: 'Conta', initialBalanceCents: 50000 };
-        },
-        list: async () => [],
+        getById: async () => (exists ? transfer(status) : null),
         update: async (_u, _c, id, data) => { calls.update.push({ id, data }); },
+        remove: async (_u, c, id) => { calls.remove.push([c, id]); },
         writeAudit: async (_u, entry) => { calls.audit.push(entry); },
+        ...(finance ? { finance } : {}),
       },
     };
   }
 
-  it('canTransitionTransfer cobre a matriz de transições', () => {
-    assert.ok(canTransitionTransfer('pending', 'confirmed'));
-    assert.ok(canTransitionTransfer('pending', 'cancelled'));
-    assert.ok(canTransitionTransfer('confirmed', 'cancelled'));
-    assert.ok(!canTransitionTransfer('confirmed', 'confirmed'));
-    assert.ok(!canTransitionTransfer('confirmed', 'pending'));
-    assert.ok(!canTransitionTransfer('cancelled', 'confirmed'));
-    assert.ok(!canTransitionTransfer('cancelled', 'cancelled'));
-    assert.ok(!canTransitionTransfer('bogus', 'confirmed'));
+  it('canTransitionTransfer: confirmada é terminal (sair dela é estorno); pendente confirma ou cancela', () => {
+    assert.equal(canTransitionTransfer('pending', 'confirmed'), true);
+    assert.equal(canTransitionTransfer('pending', 'cancelled'), true);
+    assert.equal(canTransitionTransfer('confirmed', 'cancelled'), false);
+    assert.equal(canTransitionTransfer('confirmed', 'pending'), false);
+    assert.equal(canTransitionTransfer('cancelled', 'confirmed'), false);
+    assert.equal(canTransitionTransfer('cancelled', 'pending'), false);
+    assert.equal(canTransitionTransfer('x', 'confirmed'), false);
   });
 
-  it('confirma transferência pendente e audita', async () => {
-    const { io, calls } = makeIo();
-    assert.deepEqual(await confirmTransfer(uid, 't1', io), { ok: true });
-    assert.deepEqual(calls.update, [{ id: 't1', data: { status: 'confirmed' } }]);
-    assert.equal(calls.audit.length, 1);
-    assert.equal(calls.audit[0].action, 'confirm');
+  it('confirmar chama o SERVIDOR (transfer.confirm) e não grava nada direto', async () => {
+    const api = fakeFinance(() => ({ ok: true, balanceAfterCents: 1 }));
+    const { io, calls } = makeIo({ finance: api.finance });
+    const r = await confirmTransfer(uid, 't1', { ...io, operationId: 'op-1' });
+    assert.equal(r.ok, true);
+    assert.deepEqual(api.calls.map((c) => [c.op, c.params, c.options.operationId]), [['transfer.confirm', { transferId: 't1' }, 'op-1']]);
+    assert.deepEqual(calls.update, []);
+    assert.deepEqual(calls.audit, []);
   });
 
-  it('rejeita confirmar transferência cancelada (sem update nem auditoria)', async () => {
-    const { io, calls } = makeIo({ status: 'cancelled' });
-    const r = await confirmTransfer(uid, 't1', io);
+  it('erro do servidor (saldo insuficiente) é repassado como veio, com código', async () => {
+    const api = fakeFinance(() => ({ ok: false, errors: { _form: 'Saldo insuficiente em Banco: disponível R$ 10,00.' }, code: 'INSUFFICIENT_BALANCE', status: 409 }));
+    const r = await confirmTransfer(uid, 't1', makeIo({ finance: api.finance }).io);
     assert.equal(r.ok, false);
-    assert.match(r.errors._form, /cancelada/);
-    assert.equal(calls.update.length, 0);
-    assert.equal(calls.audit.length, 0);
+    assert.equal(r.code, 'INSUFFICIENT_BALANCE');
+    assert.match(r.errors._form, /Saldo insuficiente/);
   });
 
-  it('rejeita confirmar transferência já confirmada', async () => {
-    const { io, calls } = makeIo({ status: 'confirmed' });
-    const r = await confirmTransfer(uid, 't1', io);
-    assert.equal(r.ok, false);
-    assert.equal(calls.update.length, 0);
-  });
-
-  it('rejeita confirmar quando uma das contas não existe mais', async () => {
-    const { io, calls } = makeIo({ missing: ['a2'] });
-    const r = await confirmTransfer(uid, 't1', io);
-    assert.equal(r.ok, false);
-    assert.match(r.errors._form, /não existe mais/);
-    assert.equal(calls.update.length, 0);
-  });
-
-  it('fail-closed: falha ao verificar contas bloqueia a confirmação', async () => {
-    const { io, calls } = makeIo({ failAccounts: true });
-    const r = await confirmTransfer(uid, 't1', io);
-    assert.equal(r.ok, false);
-    assert.equal(calls.update.length, 0);
-  });
-
-  it('cancela pendente e confirmada; rejeita cancelar já cancelada', async () => {
-    for (const status of ['pending', 'confirmed']) {
-      const { io, calls } = makeIo({ status });
-      assert.deepEqual(await cancelTransfer(uid, 't1', io), { ok: true });
-      assert.equal(calls.update[0].data.status, 'cancelled');
-      assert.equal(calls.audit[0].action, 'cancel');
+  it('cancelar: pendente grava direto (não move dinheiro) com auditoria; confirmada e cancelada são recusadas', async () => {
+    const { io, calls } = makeIo({ status: 'pending' });
+    assert.deepEqual(await cancelTransfer(uid, 't1', io), { ok: true });
+    assert.equal(calls.update.length, 1);
+    assert.equal(calls.update[0].data.status, 'cancelled');
+    assert.equal(calls.audit[0].action, 'cancel');
+    for (const status of ['confirmed', 'cancelled']) {
+      const m = makeIo({ status });
+      const r = await cancelTransfer(uid, 't1', m.io);
+      assert.equal(r.ok, false);
+      assert.deepEqual(m.calls.update, []);
     }
-    const { io, calls } = makeIo({ status: 'cancelled' });
-    const r = await cancelTransfer(uid, 't1', io);
-    assert.equal(r.ok, false);
-    assert.equal(calls.update.length, 0);
-  });
-
-  it('cancelar não revalida contas (conta removida não impede cancelar)', async () => {
-    const { io } = makeIo({ status: 'confirmed', missing: ['a1', 'a2'] });
-    assert.equal((await cancelTransfer(uid, 't1', io)).ok, true);
+    assert.match((await cancelTransfer(uid, 't1', makeIo({ status: 'confirmed' }).io)).errors._form, /estorne/i);
   });
 
   it('transferência inexistente retorna erro', async () => {
-    const { io, calls } = makeIo({ exists: false });
-    const r = await confirmTransfer(uid, 'nope', io);
+    const { io } = makeIo({ exists: false });
+    assert.equal((await cancelTransfer(uid, 'nope', io)).ok, false);
+    assert.equal((await updateTransfer(uid, 'nope', { fromAccountId: 'a1', toAccountId: 'a2', amountCents: '10,00', date: '2026-12-02', reason: 'x', status: 'pending' }, io)).ok, false);
+  });
+
+  it('editar transferência confirmada é recusado (imutável) sem escrita e sem chamar o servidor', async () => {
+    const api = fakeFinance();
+    const m = makeIo({ status: 'confirmed', finance: api.finance });
+    const r = await updateTransfer(uid, 't1', { fromAccountId: 'a1', toAccountId: 'a2', amountCents: '99,00', date: '2026-12-02', reason: 'x', status: 'confirmed' }, m.io);
     assert.equal(r.ok, false);
-    assert.match(r.errors._form, /não encontrada/);
-    assert.equal(calls.update.length, 0);
+    assert.match(r.errors._form, /estorne/i);
+    assert.deepEqual(m.calls.update, []);
+    assert.deepEqual(api.calls, []);
+  });
+
+  it('editar pendente para confirmada: grava como pendente e confirma NO SERVIDOR (o débito só existe após confirmar)', async () => {
+    const api = fakeFinance();
+    const m = makeIo({ status: 'pending', finance: api.finance });
+    const r = await updateTransfer(uid, 't1', { fromAccountId: 'a1', toAccountId: 'a2', amountCents: '99,00', date: '2026-12-02', reason: 'x', status: 'confirmed' }, m.io);
+    assert.equal(r.ok, true);
+    assert.equal(m.calls.update[0].data.status, 'pending');
+    assert.equal(m.calls.update[0].data.amountCents, 9900);
+    assert.deepEqual(api.calls.map((c) => c.op), ['transfer.confirm']);
   });
 });
 
-describe('transfers service — saldo suficiente na origem', () => {
+describe('transfers service — criação no servidor (VF-ARQ-02)', () => {
   const uid = 'u1';
   const payload = (over = {}) => ({ fromAccountId: 'a1', toAccountId: 'a2', amountCents: '300,00', date: '2026-12-02', reason: 'Reserva', status: 'confirmed', ...over });
-  /** Conta a1 com `initial` centavos; `list` devolve movimentos por coleção. */
-  function makeIo({ initial = 0, movements = {}, stored = null, listFails = false } = {}) {
-    const calls = { create: [], update: [], audit: [] };
-    return {
-      calls,
-      io: {
-        getById: async (_u, collection, id) => {
-          if (collection === 'accounts') return { id, institution: 'Nubank', name: 'Corrente', initialBalanceCents: initial };
-          return stored;
-        },
-        list: async (_u, collection) => { if (listFails) throw new Error('unavailable'); return movements[collection] ?? []; },
-        create: async (_u, _c, data) => { calls.create.push(data); return 'new1'; },
-        update: async (_u, _c, id, data) => { calls.update.push({ id, data }); },
-        writeAudit: async (_u, entry) => { calls.audit.push(entry); },
-      },
-    };
-  }
 
-  it('bloqueia criar transferência confirmada de conta sem dinheiro (nada é gravado)', async () => {
-    const { io, calls } = makeIo({ initial: 0 });
-    const r = await createTransfer(uid, payload(), io);
+  it('confirmada: envia ao servidor valores em centavos inteiros + operationId, sem saldo/total do cliente', async () => {
+    const api = fakeFinance(() => ({ ok: true, transferId: 'T9', status: 'confirmed' }));
+    const calls = { create: [] };
+    const io = { finance: api.finance, create: async (...a) => { calls.create.push(a); return 'x'; } };
+    const r = await createTransfer(uid, payload({ operationId: 'op-77' }), io);
+    assert.equal(r.ok, true);
+    assert.equal(r.id, 'T9');
+    assert.equal(api.calls.length, 1);
+    const { op, params, options } = api.calls[0];
+    assert.equal(op, 'transfer.create');
+    assert.equal(options.operationId, 'op-77');
+    assert.equal(params.amountCents, 30000);
+    assert.equal(params.status, 'confirmed');
+    for (const forbidden of ['balanceCents', 'receivedCents', 'uid', 'operationId']) assert.equal(forbidden in params, false);
+    assert.deepEqual(calls.create, []); // nenhuma gravação direta
+  });
+
+  it('pendente também nasce no servidor; cancelada (não move dinheiro) grava direto', async () => {
+    const api = fakeFinance(() => ({ ok: true, transferId: 'T1', status: 'pending' }));
+    const writes = [];
+    const io = { finance: api.finance, create: async (_u, c, data) => { writes.push([c, data.status]); return 'direct1'; }, writeAudit: async () => {} };
+    assert.equal((await createTransfer(uid, payload({ status: 'pending' }), io)).id, 'T1');
+    assert.equal((await createTransfer(uid, payload({ status: 'cancelled' }), io)).id, 'direct1');
+    assert.deepEqual(api.calls.map((c) => c.op), ['transfer.create']);
+    assert.deepEqual(writes, [['transfers', 'cancelled']]);
+  });
+
+  it('validação do formulário falha antes de chamar o servidor', async () => {
+    const api = fakeFinance();
+    const r = await createTransfer(uid, payload({ toAccountId: 'a1' }), { finance: api.finance });
     assert.equal(r.ok, false);
-    assert.match(r.errors.fromAccountId, /Saldo insuficiente em Nubank — Corrente: disponível R\$ 0,00, transferência de R\$ 300,00/);
-    assert.equal(calls.create.length, 0);
-    assert.equal(calls.audit.length, 0);
+    assert.deepEqual(api.calls, []);
   });
 
-  it('bloqueia quando o saldo é menor que o valor; permite igual ou maior', async () => {
-    assert.equal((await createTransfer(uid, payload(), makeIo({ initial: 29999 }).io)).ok, false);
-    assert.equal((await createTransfer(uid, payload(), makeIo({ initial: 30000 }).io)).ok, true);
-    assert.equal((await createTransfer(uid, payload(), makeIo({ initial: 100000 }).io)).ok, true);
-  });
-
-  it('saldo considera receitas recebidas, despesas pagas e transferências confirmadas (derivado)', async () => {
-    const movements = {
-      incomes: [{ status: 'received', accountId: 'a1', amountCents: 50000 }, { status: 'pending', accountId: 'a1', amountCents: 999999 }],
-      expenses: [{ status: 'paid', accountId: 'a1', amountCents: 40000 }],
-      transfers: [{ status: 'confirmed', fromAccountId: 'a1', toAccountId: 'a3', amountCents: 5000 }, { status: 'pending', fromAccountId: 'a1', toAccountId: 'a3', amountCents: 999999 }],
-    };
-    // 0 + 500 − 400 − 50 = R$ 50,00
-    const r = await createTransfer(uid, payload({ amountCents: '60,00' }), makeIo({ movements }).io);
-    assert.equal(r.ok, false);
-    assert.match(r.errors.fromAccountId, /disponível R\$ 50,00/);
-    assert.equal((await createTransfer(uid, payload({ amountCents: '50,00' }), makeIo({ movements }).io)).ok, true);
-  });
-
-  it('transferência pendente ou cancelada não exige saldo (não move dinheiro)', async () => {
-    for (const status of ['pending', 'cancelled']) {
-      const { io, calls } = makeIo({ initial: 0 });
-      assert.equal((await createTransfer(uid, payload({ status }), io)).ok, true, status);
-      assert.equal(calls.create.length, 1);
-    }
-  });
-
-  it('confirmar pendente sem saldo é bloqueado e não atualiza; com saldo confirma', async () => {
-    const stored = { id: 't1', status: 'pending', fromAccountId: 'a1', toAccountId: 'a2', amountCents: 30000 };
-    const poor = makeIo({ initial: 100, stored });
-    const r = await confirmTransfer(uid, 't1', poor.io);
-    assert.equal(r.ok, false);
-    assert.match(r.errors._form, /Saldo insuficiente/);
-    assert.equal(poor.calls.update.length, 0);
-    assert.equal(poor.calls.audit.length, 0);
-    const rich = makeIo({ initial: 30000, stored });
-    assert.deepEqual(await confirmTransfer(uid, 't1', rich.io), { ok: true });
-  });
-
-  it('editar para confirmada sem saldo é bloqueado; editar confirmada já debitada não conta o valor duas vezes', async () => {
-    const pending = { id: 't1', status: 'pending', fromAccountId: 'a1', toAccountId: 'a2', amountCents: 30000 };
-    const blocked = makeIo({ initial: 0, stored: pending });
-    assert.equal((await updateTransfer(uid, 't1', payload(), blocked.io)).ok, false);
-    assert.equal(blocked.calls.update.length, 0);
-
-    // confirmada de R$ 300 com saldo inicial R$ 300: saldo derivado hoje = 0; editar o motivo (mesmo valor) deve passar
-    const confirmed = { ...pending, status: 'confirmed' };
-    const movements = { transfers: [confirmed] };
-    const same = makeIo({ initial: 30000, movements, stored: confirmed });
-    assert.equal((await updateTransfer(uid, 't1', payload({ reason: 'Outro' }), same.io)).ok, true);
-    // aumentar para R$ 301 excede o saldo disponível (R$ 300)
-    const more = makeIo({ initial: 30000, movements, stored: confirmed });
-    assert.equal((await updateTransfer(uid, 't1', payload({ amountCents: '301,00' }), more.io)).ok, false);
-  });
-
-  it('falha ao ler saldo bloqueia (fail-closed) e nada é gravado', async () => {
-    const { io, calls } = makeIo({ initial: 999999, listFails: true });
-    const r = await createTransfer(uid, payload(), io);
-    assert.equal(r.ok, false);
-    assert.match(r.errors.fromAccountId, /Não foi possível verificar o saldo/);
-    assert.equal(calls.create.length, 0);
-  });
-
-  it('conta de origem inexistente é rejeitada', async () => {
-    const { io } = makeIo();
-    io.getById = async () => null;
-    assert.match((await createTransfer(uid, payload(), io)).errors.fromAccountId, /não encontrada/);
+  it('erro do servidor (saldo insuficiente / conta inativa) volta com código e mensagem reais', async () => {
+    const api = fakeFinance(() => ({ ok: false, errors: { _form: 'Saldo insuficiente.' }, code: 'INSUFFICIENT_BALANCE', status: 409 }));
+    const r = await createTransfer(uid, payload(), { finance: api.finance });
+    assert.deepEqual([r.ok, r.code], [false, 'INSUFFICIENT_BALANCE']);
   });
 });
 
-describe('transfers service — exclusão (qualquer status)', () => {
+describe('transfers service — exclusão', () => {
   const uid = 'u1';
   const io = (status) => {
     const calls = { remove: [], audit: [] };
@@ -314,17 +256,21 @@ describe('transfers service — exclusão (qualquer status)', () => {
       writeAudit: async (_u, e) => { calls.audit.push(e); },
     } };
   };
-  it('exclui confirmada e informa o estorno (saldo é derivado, nada é regravado nas contas)', async () => {
+  it('transferência CONFIRMADA não é excluída (histórico): orienta estornar; nada é removido', async () => {
     const { io: deps, calls } = io('confirmed');
     const { deleteTransfer } = await import('../../js/services/transfers.js');
-    assert.deepEqual(await deleteTransfer(uid, 't1', deps), { ok: true, reversed: true, amountCents: 25000 });
-    assert.deepEqual(calls.remove, [['transfers', 't1']]);
-    assert.equal(calls.audit[0].action, 'delete');
+    const r = await deleteTransfer(uid, 't1', deps);
+    assert.equal(r.ok, false);
+    assert.match(r.errors._form, /estorne/i);
+    assert.deepEqual(calls.remove, []);
   });
-  it('exclui pendente e cancelada sem estorno', async () => {
+  it('exclui pendente e cancelada (sem efeito no saldo) com auditoria', async () => {
     const { deleteTransfer } = await import('../../js/services/transfers.js');
     for (const status of ['pending', 'cancelled']) {
-      assert.deepEqual(await deleteTransfer(uid, 't1', io(status).io), { ok: true, reversed: false, amountCents: 25000 });
+      const { io: deps, calls } = io(status);
+      assert.deepEqual(await deleteTransfer(uid, 't1', deps), { ok: true, reversed: false, amountCents: 25000 });
+      assert.deepEqual(calls.remove, [['transfers', 't1']]);
+      assert.equal(calls.audit[0].action, 'delete');
     }
   });
 });

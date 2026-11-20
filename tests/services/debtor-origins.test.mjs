@@ -202,6 +202,7 @@ describe('fechamento do mês por devedor (VF-2-03j)', () => {
           cardPurchases: buys.map((p) => ({ ...p, debtorId: 'd1', cardId: 'c1' })),
           debts: debts.map((x) => ({ ...x, debtorId: 'd1' })),
           debtPayments: [{ debtId: 'b1', debtorId: 'd1', amountCents: 5000 }],
+          reversals: [],
           invoices: [...inv.values()],
         })[c];
       },

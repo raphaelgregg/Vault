@@ -97,43 +97,33 @@ describe('ajuste guiado do saldo de abertura', () => {
     assert.equal(r.newInitialCents, 60000);
   });
 
-  function makeIo({ stored = account, tables = {}, listFails = false } = {}) {
-    const calls = { update: [], audit: [] };
-    return { calls, io: {
-      getById: async () => stored,
-      list: async (_u, c) => { if (listFails) throw new Error('boom'); return tables[c] ?? []; },
-      update: async (_u, _c, id, d) => { calls.update.push({ id, d }); },
-      writeAudit: async (_u, e) => { calls.audit.push(e); },
-    } };
-  }
+  // VF-ARQ-02: o ajuste é calculado e gravado pelo SERVIDOR (mesma fórmula, testada em tests/integration). Aqui: fiação.
+  const makeApi = (response) => {
+    const calls = [];
+    return { calls, finance: async (op, params, options) => { calls.push({ op, params, options }); return response; } };
+  };
 
-  it('grava só initialBalanceCents (inteiro) com auditoria dedicada', async () => {
-    const { io, calls } = makeIo({ tables: { incomes: movements.incomes, expenses: movements.expenses } });
-    const r = await adjustOpeningBalance('u', 'a1', '1.500,00', {}, io);
+  it('envia o saldo real em centavos inteiros a account.adjustOpening e devolve o cálculo do servidor', async () => {
+    const api = makeApi({ ok: true, previousInitialCents: 0, newInitialCents: 130000, movementsCents: 20000 });
+    const r = await adjustOpeningBalance('u', 'a1', '1.500,00', {}, { finance: api.finance });
     assert.deepEqual([r.ok, r.newInitialCents, r.movementsCents, r.previousInitialCents], [true, 130000, 20000, 0]);
-    assert.deepEqual(calls.update, [{ id: 'a1', d: { initialBalanceCents: 130000 } }]);
-    assert.equal(calls.audit[0].action, 'adjust_opening_balance');
+    assert.deepEqual(api.calls.map((c) => [c.op, c.params]), [['account.adjustOpening', { accountId: 'a1', realBalanceCents: 150000 }]]);
   });
 
-  it('com data de abertura grava os dois campos', async () => {
-    const { io, calls } = makeIo({ tables: { incomes: movements.incomes, expenses: movements.expenses } });
-    await adjustOpeningBalance('u', 'a1', '500,00', { openingDate: '2026-11-06' }, io);
-    assert.deepEqual(calls.update[0].d, { initialBalanceCents: 60000, openingDate: '2026-11-06' });
+  it('com data de abertura envia os dois campos', async () => {
+    const api = makeApi({ ok: true, previousInitialCents: 0, newInitialCents: 60000, movementsCents: -10000 });
+    await adjustOpeningBalance('u', 'a1', '500,00', { openingDate: '2026-11-06' }, { finance: api.finance });
+    assert.deepEqual(api.calls[0].params, { accountId: 'a1', realBalanceCents: 50000, openingDate: '2026-11-06' });
   });
 
-  it('rejeita: saldo inválido/negativo, abertura negativa, leitura truncada ou com falha — nada é gravado', async () => {
-    const a = makeIo({ tables: { incomes: movements.incomes } });
-    assert.ok((await adjustOpeningBalance('u', 'a1', 'abc', {}, a.io)).errors.realBalance);
-    assert.ok((await adjustOpeningBalance('u', 'a1', '-5,00', {}, a.io)).errors.realBalance);
-    assert.match((await adjustOpeningBalance('u', 'a1', '100,00', {}, a.io)).errors.realBalance, /data de abertura/); // movimentos 300 > 100
-    const many = Array.from({ length: 1000 }, () => inc('a1', 1, '2026-11-01'));
-    const t = makeIo({ tables: { incomes: many } });
-    assert.match((await adjustOpeningBalance('u', 'a1', '9999,00', {}, t.io)).errors._form, /incompleto/);
-    const f = makeIo({ listFails: true });
-    assert.match((await adjustOpeningBalance('u', 'a1', '10,00', {}, f.io)).errors._form, /cancelado/);
-    assert.equal(a.calls.update.length + t.calls.update.length + f.calls.update.length, 0);
-    const none = makeIo({ stored: null });
-    assert.match((await adjustOpeningBalance('u', 'zz', '1,00', {}, none.io)).errors._form, /não encontrada/);
+  it('saldo inválido/negativo e data inválida param antes do servidor; abertura negativa vem do servidor como erro de saldo', async () => {
+    const api = makeApi({ ok: true });
+    assert.ok((await adjustOpeningBalance('u', 'a1', 'abc', {}, { finance: api.finance })).errors.realBalance);
+    assert.ok((await adjustOpeningBalance('u', 'a1', '-5,00', {}, { finance: api.finance })).errors.realBalance);
+    assert.ok((await adjustOpeningBalance('u', 'a1', '5,00', { openingDate: 'x' }, { finance: api.finance })).errors.openingDate);
+    assert.equal(api.calls.length, 0);
+    const neg = makeApi({ ok: false, code: 'INVALID_STATE', errors: { _form: 'Os lançamentos já somam mais que o saldo informado; defina uma data de abertura.' } });
+    assert.match((await adjustOpeningBalance('u', 'a1', '100,00', {}, { finance: neg.finance })).errors.realBalance, /data de abertura/);
   });
 });
 
@@ -313,16 +303,20 @@ describe('data de abertura: cadastro, edição e CSV', () => {
     assert.ok(buildEntity('accounts', { ...raw, openingDate: '2026-02-30' }).errors.openingDate);
     assert.equal(buildEntity('accounts', raw).ok, true);
   });
-  it('criar/editar: openingDate vai junto; editar sem ela envia null (remove) e não toca o saldo derivado', async () => {
+  it('criar envia openingDate; editar NÃO altera abertura/saldo (só o servidor ajusta): mudança é recusada, sem mudança não envia o campo', async () => {
     const calls = [];
-    const io = { create: async (_u, _c, d) => { calls.push(['create', d]); return 'n'; }, update: async (_u, _c, _id, d) => { calls.push(['update', d]); }, writeAudit: async () => {} };
+    const stored = { id: 'a1', initialBalanceCents: 150000, openingDate: '2026-11-01' };
+    const io = { getById: async () => stored, create: async (_u, _c, d) => { calls.push(['create', d]); return 'n'; }, update: async (_u, _c, _id, d) => { calls.push(['update', d]); }, writeAudit: async () => {} };
     await createAccount('u', { ...raw, openingDate: '2026-11-01' }, io);
-    await updateAccount('u', 'a1', raw, io);
-    await updateAccount('u', 'a1', { ...raw, openingDate: '2026-11-01' }, io);
     assert.equal(calls[0][1].openingDate, '2026-11-01');
-    assert.equal(calls[1][1].openingDate, null);
-    assert.equal(calls[2][1].openingDate, '2026-11-01');
     assert.equal(calls[0][1].initialBalanceCents, 150000);
+    const refused = await updateAccount('u', 'a1', raw, io); // sem openingDate: tentaria removê-la
+    assert.equal(refused.ok, false);
+    assert.ok(refused.errors.openingDate);
+    const ok = await updateAccount('u', 'a1', { ...raw, openingDate: '2026-11-01' }, io);
+    assert.equal(ok.ok, true);
+    assert.equal('openingDate' in calls[1][1], false);
+    assert.equal('initialBalanceCents' in calls[1][1], false);
   });
   it('CSV de contas: coluna data_abertura opcional; mesclagem preserva a data existente', () => {
     const ctx = { accounts: [], categories: [], cards: [], debtors: [] };

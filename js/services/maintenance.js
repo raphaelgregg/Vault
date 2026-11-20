@@ -16,6 +16,7 @@
  */
 import { COLLECTIONS } from '../utils/constants.js';
 import { list, newBatch, userDoc, writeAudit, listCollectionGroup, docAtPath } from './firestore.js';
+import { callFinance, newOperationId } from './financeApi.js';
 
 export const BATCH_LIMIT = 500;
 
@@ -29,6 +30,7 @@ export const DOMAIN_COLLECTIONS = Object.freeze([
   COLLECTIONS.goalTransactions, COLLECTIONS.goals, COLLECTIONS.debtors, COLLECTIONS.creditCards,
   COLLECTIONS.debtPayments, COLLECTIONS.debts, COLLECTIONS.cardPurchases, COLLECTIONS.invoices,
   COLLECTIONS.subscriptions, COLLECTIONS.budgets,
+  COLLECTIONS.reversals, COLLECTIONS.batches,
   COLLECTIONS.transfers, COLLECTIONS.expenses, COLLECTIONS.incomes, COLLECTIONS.categories, COLLECTIONS.accounts,
 ]);
 export const AUDIT_COLLECTION = 'auditLog';
@@ -75,6 +77,27 @@ export async function clearUserData(uid, { onLog, io = {}, includeAudit = true }
     onLog?.(r);
   }
   return summarize(uid, results);
+}
+
+/** Frase exigida pelo servidor para apagar os próprios dados (mesma de `CLEAR_PHRASE` em server/finance/ops.mjs). */
+export const CLEAR_OWN_PHRASE = 'APAGAR MEUS DADOS';
+
+/**
+ * Limpa os dados do PRÓPRIO usuário NO SERVIDOR (VF-ARQ-02): o histórico financeiro (contas, devedores, recebimentos,
+ * faturas pagas, estornos) é protegido contra exclusão pelo cliente nas Rules; só a camada confiável o remove, em
+ * ordem de dependência, com idempotência (`operationId`) e auditoria. Mesmo formato de resultado de `clearUserData`.
+ */
+export async function clearOwnData(uid, { onLog, io = {}, operationId = newOperationId() } = {}) {
+  try {
+    const r = await (io.callFinance ?? callFinance)('data.clearOwn', { confirm: CLEAR_OWN_PHRASE }, { operationId });
+    const results = Object.entries(r.deleted ?? {}).map(([collection, deleted]) => ({ collection, deleted, batches: 0, error: null, permissionDenied: false }));
+    results.forEach((x) => onLog?.(x));
+    return summarize(uid, results);
+  } catch (error) {
+    const result = { collection: 'users/*', deleted: 0, batches: 0, error: String(error?.message ?? error), permissionDenied: false };
+    onLog?.(result);
+    return summarize(uid, [result]);
+  }
 }
 
 const summarize = (uid, results) => ({
@@ -177,7 +200,7 @@ export async function clearScope({ scope, adminUid, targetUid = null, admin = fa
 
   let summary;
   if (scope === SCOPES.OWN) {
-    summary = await clearUserData(adminUid, { onLog, io });
+    summary = await (io.clearOwn ?? clearOwnData)(adminUid, { onLog, io });
   } else if (scope === SCOPES.TARGET) {
     // auditLog alheio é imutável e ilegível ao admin: não é tentado (o log do próprio usuário é tratado em `own`).
     summary = await clearUserData(target, { onLog, io, includeAudit: false });

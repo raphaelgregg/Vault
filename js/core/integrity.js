@@ -13,8 +13,12 @@ const sum = (rows, pick) => rows.reduce((t, r) => t + n(pick(r)), 0);
 
 export function auditLedgerData({
   accounts = [], debtors = [], debts = [], payments = [], purchases = [], invoices = [], transfers = [],
-  incomes = [], expenses = [], goalTransactions = [],
+  incomes = [], expenses = [], goalTransactions = [], reversals = [],
 } = {}) {
+  // Recebimentos estornados continuam no histórico, mas não contam (nem no saldo nem no recebido do devedor).
+  const reversedPayments = new Set(reversals.filter((r) => r.targetCollection === 'debtPayments').map((r) => r.targetId));
+  const allPayments = payments;
+  payments = payments.filter((p) => !reversedPayments.has(p.id));
   const findings = [];
   const add = (code, severity, message, extra = {}) => findings.push({ code, severity, message, ...extra });
   const accountIds = new Set(accounts.map((a) => a.id));
@@ -93,7 +97,7 @@ export function auditLedgerData({
   }
 
   // ---- saldos e movimentos ----------------------------------------------------------------------------------------
-  const movements = { incomes, expenses, transfers, debtPayments: payments, goalTransactions, invoices };
+  const movements = { incomes, expenses, transfers, debtPayments: allPayments, goalTransactions, invoices, reversals };
   const balances = accountBalances(accounts, movements);
   const orphans = orphanMovements(accounts, movements);
   if (orphans.count) add('ORPHAN_MOVEMENTS', 'warning', `${orphans.count} movimentação(ões) apontam para conta inexistente e ficam fora dos saldos.`, { byCollection: orphans.byCollection });

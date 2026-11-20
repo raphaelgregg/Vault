@@ -14,12 +14,10 @@ import {
   createAudited,
   updateAudited,
   removeAudited,
-  commitAtomic,
 } from './firestore.js';
-import { checkSufficientBalance } from './transfers.js';
+import { financeResult } from './financeApi.js';
 import {
   buildEntity,
-  applyGoalTransaction,
   isAccountLinkedGoal,
   allocateLinkedGoalBalances,
   goalSavedCents,
@@ -45,8 +43,25 @@ export async function getGoal(uid, goalId) {
   return getById(uid, GOALS, goalId);
 }
 
-export async function listGoalTransactions(uid, goalId) {
-  return list(uid, TXS, { where: [['goalId', '==', goalId]] });
+/** Movimentações da meta (cruas) e estornos delas (VF-ARQ-02: estorno = lançamento compensatório, o original é preservado). */
+async function loadGoalLedger(uid, goalId, io = {}) {
+  const listFn = io.list ?? list;
+  const where = { where: [['goalId', '==', goalId]] };
+  const [transactions, reversals] = await Promise.all([listFn(uid, TXS, where), listFn(uid, COLLECTIONS.reversals, where)]);
+  return { transactions: transactions ?? [], reversals: reversals ?? [] };
+}
+
+/** Guardado líquido (aportes − resgates, ignorando movimentos estornados). */
+async function savedOf(uid, goalId, io = {}) {
+  const { transactions, reversals } = await loadGoalLedger(uid, goalId, io);
+  return goalSavedCents(transactions, reversals);
+}
+
+/** Movimentações da meta; as estornadas voltam com `reversed: true` (preservadas no histórico, fora do guardado). */
+export async function listGoalTransactions(uid, goalId, io = {}) {
+  const { transactions, reversals } = await loadGoalLedger(uid, goalId, io);
+  const reversed = new Set(reversals.filter((r) => r.targetCollection === 'goalTransactions').map((r) => r.targetId));
+  return transactions.map((t) => (reversed.has(t.id) ? { ...t, reversed: true } : t));
 }
 
 /** Aportes/resgates mais recentes de todas as metas (histórico exibido em Transferências). */
@@ -92,7 +107,7 @@ export async function updateGoal(uid, goalId, rawData, io = {}) {
   if (!ok) return { ok: false, errors };
   const accountErrors = await checkOptionalAccount(uid, data, io);
   if (accountErrors) return { ok: false, errors: accountErrors };
-  const saved = goalSavedCents(await (io.list ?? list)(uid, TXS, { where: [['goalId', '==', goalId]] }));
+  const saved = await savedOf(uid, goalId, io);
   if (data.targetCents <= saved) {
     return { ok: false, errors: { targetCents: `O alvo deve ser maior que o já guardado (${formatCents(saved)}).` } };
   }
@@ -132,7 +147,7 @@ export async function setGoalStatus(uid, goalId, status, io = {}) {
   }
   if (status === 'active') {
     // Reabrir com alvo já coberto deixaria a meta ativa e "cheia" até o próximo aporte.
-    const saved = goalSavedCents(await (io.list ?? list)(uid, TXS, { where: [['goalId', '==', goalId]] }));
+    const saved = await savedOf(uid, goalId, io);
     if (saved >= current.targetCents) {
       return { ok: false, errors: { _form: 'O valor guardado já atinge o alvo; resgate ou aumente o alvo antes de reabrir.' } };
     }
@@ -147,40 +162,15 @@ export const reopenGoal = (uid, id, io) => setGoalStatus(uid, id, 'active', io);
  * Registra aporte (`deposit`) ou resgate (`withdraw`). `rawData`: { amountCents, date, accountId, notes? }.
  * Retorna { ok, id, status, savedCents, errors }. `io`: getById, list, commitAtomic injetáveis.
  */
-export async function registerGoalTransaction(uid, goalId, type, rawData, io = {}) {
-  const fetch = io.getById ?? getById;
-  const goal = await fetch(uid, GOALS, goalId);
-  if (!goal) return { ok: false, errors: { _form: 'Meta não encontrada.' } };
-
+export async function registerGoalTransaction(uid, goalId, type, rawInput, io = {}) {
+  const { operationId, ...rawData } = rawInput ?? {};
   const { ok, data, errors } = buildEntity('goalTransactions', { ...rawData, goalId, type });
   if (!ok) return { ok: false, errors };
-
-  const account = await fetch(uid, COLLECTIONS.accounts, data.accountId);
-  if (!account) return { ok: false, errors: { accountId: 'Conta não encontrada.' } };
-  if (account.status !== 'active') return { ok: false, errors: { accountId: 'A conta precisa estar ativa.' } };
-
-  const transactions = await (io.list ?? list)(uid, TXS, { where: [['goalId', '==', goalId]] });
-  if (isAccountLinkedGoal(goal, transactions.length)) {
-    return { ok: false, errors: { _form: 'Meta vinculada a uma conta: o progresso segue o saldo dessa conta. Transfira para ela em Transferências (ou remova o vínculo da meta para usar aportes).' } };
-  }
-  const saved = goalSavedCents(transactions);
-  const applied = applyGoalTransaction(goal, saved, type, data.amountCents);
-  if (!applied.ok) return { ok: false, errors: { _form: applied.error } };
-  // Aporte tira dinheiro da conta: ela precisa ter saldo (resgate é limitado ao guardado, em applyGoalTransaction).
-  if (type === 'deposit') {
-    const blocked = await checkSufficientBalance(uid, data.accountId, data.amountCents, { field: 'accountId', what: 'aporte' }, io);
-    if (blocked) return blocked;
-  }
-
-  const ops = [{ type: 'create', collection: TXS, data }];
-  if (applied.status !== goal.status) {
-    ops.push({
-      type: 'update', collection: GOALS, docId: goalId, data: { status: applied.status },
-      action: applied.status === 'completed' ? 'complete' : 'reopen',
-    });
-  }
-  const [id] = await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
-  return { ok: true, id, status: applied.status, savedCents: applied.savedCents };
+  // VF-ARQ-02: aporte/resgate NASCEM no servidor (meta, conta ativa, saldo, vínculo e idempotência dentro da transação).
+  const r = await (io.finance ?? financeResult)(`goal.${type}`, {
+    goalId, amountCents: data.amountCents, date: data.date, accountId: data.accountId, ...(data.notes ? { notes: data.notes } : {}),
+  }, { operationId, ...(io.apiOptions ?? {}) });
+  return r.ok ? { ok: true, id: r.transactionId, status: r.goalStatus, savedCents: r.savedCents, result: r } : r;
 }
 
 export const depositToGoal = (uid, goalId, raw, io) => registerGoalTransaction(uid, goalId, 'deposit', raw, io);

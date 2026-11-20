@@ -83,7 +83,7 @@ describe('auditFinancialIntegrity (serviço)', () => {
     const io = { list: async (_u, c, o) => { calls.push([c, o.limit]); return c === 'incomes' ? Array.from({ length: 1000 }, (_, i) => ({ id: `i${i}`, status: 'pending' })) : []; } };
     const r = await auditFinancialIntegrity('u', io);
     assert.deepEqual(r.truncated, ['incomes']);
-    assert.equal(calls.length, 10);
+    assert.equal(calls.length, 11);
     assert.ok(calls.every(([, limit]) => limit === 1000));
     await assert.rejects(() => auditFinancialIntegrity('u', { list: async () => { throw new Error('boom'); } }), /boom/);
   });

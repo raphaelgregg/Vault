@@ -10,8 +10,8 @@ import {
   updateAudited,
   removeAudited,
 } from './firestore.js';
-import { buildEntity, formatCents, parseMoneyToCents, accountLabel } from '../core/model.js';
-import { loadBalances } from './balances.js';
+import { buildEntity, formatCents, parseMoneyToCents } from '../core/model.js';
+import { financeResult } from './financeApi.js';
 
 const COLLECTION = COLLECTIONS.transfers;
 
@@ -30,92 +30,58 @@ export async function getTransfer(uid, transferId) {
   return getById(uid, COLLECTION, transferId);
 }
 
-/**
- * Saldo suficiente na conta de origem? A transferência só move dinheiro ao ser CONFIRMADA (saldo derivado:
- * `accountBalances`), então a checagem vale para status `confirmed` (criar, editar ou confirmar). Retorna
- * `null` se ok, ou { ok:false, errors:{ [field]: msg } }. `creditCents` = valor desta mesma transferência já
- * debitado no saldo (edição de uma confirmada), devolvido antes de comparar. Fail-closed se não der para
- * ler conta/movimentos. `io.getById`/`io.list` injetáveis.
- * LIMITAÇÃO: checagem client-side (janela de concorrência entre leitura e gravação, como nas demais
- * verificações); o saldo lê até READ_LIMIT movimentos por coleção (ver services/balances.js).
- */
-export async function checkSufficientBalance(uid, fromAccountId, amountCents, { creditCents = 0, field = 'fromAccountId', what = 'transferência' } = {}, io = {}) {
-  try {
-    const account = await (io.getById ?? getById)(uid, COLLECTIONS.accounts, fromAccountId);
-    if (!account) return { ok: false, errors: { [field]: 'Conta de origem não encontrada.' } };
-    const { balances } = await loadBalances(uid, [account], io.list ? { list: io.list } : {});
-    const available = (balances.get(account.id) ?? 0) + creditCents;
-    if (available < amountCents) {
-      return {
-        ok: false,
-        errors: { [field]: `Saldo insuficiente em ${accountLabel(account)}: disponível ${formatCents(available)}, ${what} de ${formatCents(amountCents)}.` },
-      };
-    }
-    return null;
-  } catch (error) {
-    console.error('[transfers] falha ao verificar saldo', error);
-    return { ok: false, errors: { [field]: 'Não foi possível verificar o saldo da conta de origem. A operação não foi registrada; tente novamente.' } };
-  }
-}
+/** Adaptador da camada confiável (injetável nos testes via `io.finance`). */
+const finance = (io) => io.finance ?? financeResult;
 
 /**
- * Cria uma nova transferência.
- * Transferência já `confirmed` exige saldo suficiente na origem; `pending` não move dinheiro (a checagem
- * acontece ao confirmar). Retorna { ok, id, errors }.
+ * Cria uma transferência NO SERVIDOR (VF-ARQ-02): débito, crédito, saldo e idempotência são decididos numa transação
+ * do servidor. `confirmed` exige saldo suficiente dentro da transação; `pending` não move dinheiro.
+ * `rawData.operationId` é a chave de idempotência da intenção (gere ao abrir o formulário; reutilize em retry/duplo
+ * clique). Retorna { ok, id, status, errors, code }.
  */
-export async function createTransfer(uid, rawData, io = {}) {
+export async function createTransfer(uid, rawInput, io = {}) {
+  const { operationId, ...rawData } = rawInput ?? {};
   const { ok, data, errors } = buildEntity('transfers', rawData);
   if (!ok) return { ok: false, errors };
-
-  if (data.status === 'confirmed') {
-    const blocked = await checkSufficientBalance(uid, data.fromAccountId, data.amountCents, {}, io);
-    if (blocked) return blocked;
+  if (data.status === 'cancelled') { // não move dinheiro: gravação direta permitida pelas Rules
+    const id = await createAudited(uid, COLLECTION, data, io);
+    return { ok: true, id };
   }
-
-  const id = await createAudited(uid, COLLECTION, data, io);
-  return { ok: true, id };
+  const r = await finance(io)('transfer.create', {
+    fromAccountId: data.fromAccountId, toAccountId: data.toAccountId, amountCents: data.amountCents, date: data.date,
+    reason: data.reason, ...(data.notes ? { notes: data.notes } : {}), status: data.status,
+  }, { operationId, ...(io.apiOptions ?? {}) });
+  return r.ok ? { ok: true, id: r.transferId, status: r.status, result: r } : r;
 }
 
-/**
- * Atualiza uma transferência existente.
- * Retorna { ok, errors }.
- */
+const CONFIRMED_IMMUTABLE = 'Transferência confirmada não pode ser alterada: estorne-a (lançamento compensatório) e lance outra.';
+
+/** Atualiza uma transferência NÃO confirmada. Confirmada é imutável. Pedir `confirmed` confirma no servidor. */
 export async function updateTransfer(uid, transferId, rawData, io = {}) {
   const { ok, data, errors } = buildEntity('transfers', rawData);
   if (!ok) return { ok: false, errors };
-
-  if (data.status === 'confirmed') {
-    // Se já estava confirmada na mesma origem, o valor antigo já está debitado: devolve-o antes de comparar.
-    const before = await (io.getById ?? getById)(uid, COLLECTION, transferId);
-    const creditCents = before?.status === 'confirmed' && before.fromAccountId === data.fromAccountId ? Number(before.amountCents) || 0 : 0;
-    const blocked = await checkSufficientBalance(uid, data.fromAccountId, data.amountCents, { creditCents }, io);
-    if (blocked) return blocked;
-  }
-
-  await updateAudited(uid, COLLECTION, transferId, data, io);
+  const current = await (io.getById ?? getById)(uid, COLLECTION, transferId);
+  if (!current) return { ok: false, errors: { _form: 'Transferência não encontrada.' } };
+  if (current.status === 'confirmed') return { ok: false, errors: { _form: CONFIRMED_IMMUTABLE } };
+  const wantsConfirm = data.status === 'confirmed';
+  await updateAudited(uid, COLLECTION, transferId, wantsConfirm ? { ...data, status: 'pending' } : data, io);
+  if (wantsConfirm) return confirmTransfer(uid, transferId, io);
   return { ok: true };
 }
 
-/**
- * Exclui uma transferência de qualquer status. O saldo é DERIVADO (só transferências `confirmed` movem dinheiro),
- * então excluir uma confirmada devolve o valor à origem e o retira do destino sem gravar nada nas contas:
- * `reversed`/`amountCents` informam o estorno à interface.
- */
+/** Exclui uma transferência não confirmada (confirmada: estorne). */
 export async function deleteTransfer(uid, transferId, io = {}) {
   const transfer = await (io.getById ?? getById)(uid, COLLECTION, transferId);
   if (!transfer) return { ok: false, errors: { _form: 'Transferência não encontrada.' } };
-
+  if (transfer.status === 'confirmed') return { ok: false, errors: { _form: CONFIRMED_IMMUTABLE } };
   await removeAudited(uid, COLLECTION, transferId, transfer, io);
-  return { ok: true, reversed: transfer.status === 'confirmed', amountCents: Number(transfer.amountCents) || 0 };
+  return { ok: true, reversed: false, amountCents: Number(transfer.amountCents) || 0 };
 }
 
-/**
- * Transições de status permitidas. `cancelled` é terminal; `confirmed` só pode ser
- * cancelada (nunca volta a pendente nem é confirmada de novo).
- */
+/** Transições de status permitidas. `confirmed` só nasce no servidor; sair dela é ESTORNO (`reversal.create`). */
 export const TRANSFER_TRANSITIONS = Object.freeze({
   pending: ['confirmed', 'cancelled'],
-  confirmed: ['cancelled'],
+  confirmed: [],
   cancelled: [],
 });
 
@@ -124,66 +90,22 @@ export function canTransitionTransfer(from, to) {
   return (TRANSFER_TRANSITIONS[from] ?? []).includes(to);
 }
 
-const STATUS_LABELS = { pending: 'pendente', confirmed: 'confirmada', cancelled: 'cancelada' };
+/** Confirma a transferência NO SERVIDOR (saldo da origem verificado na transação). */
+export async function confirmTransfer(uid, transferId, io = {}) {
+  const r = await finance(io)('transfer.confirm', { transferId }, { operationId: io.operationId, ...(io.apiOptions ?? {}) });
+  return r.ok ? { ok: true, status: 'confirmed', result: r } : r;
+}
 
-/**
- * Lê o estado atual, valida a transição e (ao confirmar) revalida as contas.
- * `io` permite injetar dependências nos testes (padrão: services/firestore.js).
- * Limitação: leitura+escrita não atômica (janela de concorrência; as Rules não
- * validam transição de status).
- */
-async function transitionTransfer(uid, transferId, nextStatus, action, io = {}) {
-  const { getById: getFn = getById } = io;
-
-  const transfer = await getFn(uid, COLLECTION, transferId);
+/** Cancela uma transferência PENDENTE (confirmada: estorne). */
+export async function cancelTransfer(uid, transferId, io = {}) {
+  const transfer = await (io.getById ?? getById)(uid, COLLECTION, transferId);
   if (!transfer) return { ok: false, errors: { _form: 'Transferência não encontrada.' } };
-
-  if (!canTransitionTransfer(transfer.status, nextStatus)) {
-    const current = STATUS_LABELS[transfer.status] ?? String(transfer.status);
-    return {
-      ok: false,
-      errors: {
-        _form: `Transferência já está ${current}; não é possível ${nextStatus === 'confirmed' ? 'confirmá-la' : 'cancelá-la'}.`,
-      },
-    };
-  }
-
-  if (nextStatus === 'confirmed') {
-    try {
-      const [from, to] = await Promise.all([
-        getFn(uid, COLLECTIONS.accounts, transfer.fromAccountId),
-        getFn(uid, COLLECTIONS.accounts, transfer.toAccountId),
-      ]);
-      if (!from || !to) {
-        return {
-          ok: false,
-          errors: { _form: 'Conta de origem ou destino não existe mais; não é possível confirmar.' },
-        };
-      }
-      const blocked = await checkSufficientBalance(uid, transfer.fromAccountId, Number(transfer.amountCents) || 0, {}, io);
-      if (blocked) return { ok: false, errors: { _form: blocked.errors.fromAccountId } };
-    } catch (error) {
-      console.error('[transfers] falha ao verificar contas', error);
-      return {
-        ok: false,
-        errors: { _form: 'Não foi possível verificar as contas da transferência. Tente novamente.' },
-      };
-    }
-  }
-
-  await updateAudited(uid, COLLECTION, transferId, { status: nextStatus }, io, action);
+  if (transfer.status === 'confirmed') return { ok: false, errors: { _form: CONFIRMED_IMMUTABLE } };
+  if (transfer.status !== 'pending') return { ok: false, errors: { _form: 'Transferência já está cancelada; não é possível cancelá-la.' } };
+  await updateAudited(uid, COLLECTION, transferId, { status: 'cancelled' }, io, 'cancel');
   return { ok: true };
 }
 
-/** Marca transferência como confirmada (movimenta saldo). Retorna { ok, errors }. */
-export async function confirmTransfer(uid, transferId, io) {
-  return transitionTransfer(uid, transferId, 'confirmed', 'confirm', io);
-}
-
-/** Marca transferência como cancelada. Retorna { ok, errors }. */
-export async function cancelTransfer(uid, transferId, io) {
-  return transitionTransfer(uid, transferId, 'cancelled', 'cancel', io);
-}
 
 /** Status options for transfer. */
 export function getTransferStatusOptions() {

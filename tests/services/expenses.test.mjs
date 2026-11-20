@@ -8,6 +8,8 @@ import {
   getExpenseStatusOptions,
   createExpense,
   updateExpense,
+  deleteExpense,
+  markExpensePaid,
   formatCents,
   parseMoneyToCents,
 } from '../../js/services/expenses.js';
@@ -131,10 +133,13 @@ function stubs(category) {
         calls.lookup.push([uid, categoryId]);
         return category === undefined ? null : category;
       },
-      create: async () => {
+      // VF-ARQ-02: a criação nasce no SERVIDOR (cliente de API falso); nada é gravado direto.
+      finance: async (op, params, options) => {
         calls.create += 1;
-        return 'novo-id';
+        calls.ops = [...(calls.ops ?? []), { op, params, options }];
+        return { ok: true, id: 'novo-id' };
       },
+      getById: async () => ({ id: 'x', status: 'pending' }),
       update: async () => {
         calls.update += 1;
       },
@@ -200,5 +205,35 @@ describe('expenses service — categoria compatível (Etapa 2)', () => {
     const result = await createExpense('uid-1', { ...expenseData, description: '' }, deps);
     assert.equal(result.ok, false);
     assert.equal(calls.lookup.length, 0);
+  });
+});
+
+describe('expenses service — camada confiável (VF-ARQ-02)', () => {
+  it('criar chama expense.create com centavos inteiros e operationId; nenhuma gravação direta', async () => {
+    const { deps, calls } = stubs({ id: 'cat-1', kind: 'expense' });
+    const result = await createExpense('uid-1', { ...expenseData, operationId: 'op-9' }, deps);
+    assert.equal(result.ok, true);
+    assert.equal(calls.ops[0].op, 'expense.create');
+    assert.equal(calls.ops[0].options.operationId, 'op-9');
+    assert.equal(Number.isInteger(calls.ops[0].params.amountCents), true);
+    assert.equal('operationId' in calls.ops[0].params, false);
+  });
+
+  it('item pago é imutável: editar/excluir exigem estorno', async () => {
+    const { deps, calls } = stubs({ id: 'cat-1', kind: 'expense' });
+    deps.getById = async () => ({ id: 'x', status: 'paid', amountCents: 1000, accountId: 'a' });
+    const edit = await updateExpense('uid-1', 'x', expenseData, deps);
+    assert.equal(edit.ok, false);
+    assert.match(edit.errors._form, /estorn/i);
+    const del = await deleteExpense('uid-1', 'x', deps);
+    assert.equal(del.ok, false);
+    assert.equal(calls.update, 0);
+  });
+
+  it('marcar como paga chama expense.pay no servidor', async () => {
+    const ops = [];
+    const r = await markExpensePaid('uid-1', 'x', '2026-12-05', { finance: async (op, params) => { ops.push([op, params]); return { ok: true }; }, operationId: 'op-1' });
+    assert.equal(r.ok, true);
+    assert.deepEqual(ops, [['expense.pay', { id: 'x', date: '2026-12-05' }]]);
   });
 });

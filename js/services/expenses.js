@@ -7,10 +7,10 @@ import { todayInAppZone } from '../utils/dates.js';
 import {
   list,
   getById,
-  createAudited,
   updateAudited,
   commitAtomic,
 } from './firestore.js';
+import { financeResult } from './financeApi.js';
 import {
   buildEntity,
   checkCategoryForMovement,
@@ -56,14 +56,27 @@ export async function getExpense(uid, expenseId) {
   return getById(uid, COLLECTION, expenseId);
 }
 
+const finance = (io) => io.finance ?? financeResult;
+const SETTLED_IMMUTABLE = 'Despesa paga não pode ser alterada nem excluída: estorne-a (lançamento compensatório).';
+
+/** Campos enviados ao servidor (sem status derivado do cliente além do pedido de criação). */
+function movementParams(data) {
+  const params = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (value === undefined || value === null || ['createdAt', 'updatedAt', 'id', 'operationId'].includes(key)) continue;
+    params[key] = value;
+  }
+  return params;
+}
+
 /**
- * Cria uma nova despesa.
- * Ordem: modelo → existência da categoria no Firestore → compatibilidade de tipo.
- * O terceiro parâmetro (deps) existe apenas como ponto de injeção em testes;
- * em produção o lookup padrão lê users/{uid}/categories direto no Firestore.
- * Retorna { ok, id, errors }.
+ * Cria uma despesa NO SERVIDOR (VF-ARQ-02): categoria/conta validadas e saldo derivado dentro da transação; despesa já
+ * `paid` sai do saldo atomicamente. `rawData.operationId`: chave de idempotência (gere ao abrir o formulário).
+ * Ordem: modelo → compatibilidade de categoria (feedback imediato; o servidor revalida) → servidor.
+ * Retorna { ok, id, errors, code }.
  */
-export async function createExpense(uid, rawData, deps = {}) {
+export async function createExpense(uid, rawInput, deps = {}) {
+  const { operationId, ...rawData } = rawInput ?? {};
   const built = buildEntity('expenses', rawData);
   if (!built.ok) return { ok: false, errors: built.errors };
   const data = settleDates(built.data, false);
@@ -73,14 +86,13 @@ export async function createExpense(uid, rawData, deps = {}) {
   const categoryCheck = checkCategoryForMovement(category, ALLOWED_CATEGORY_KINDS);
   if (!categoryCheck.ok) return categoryCheck;
 
-  const id = await createAudited(uid, COLLECTION, data, deps);
-  return { ok: true, id };
+  const r = await finance(deps)('expense.create', movementParams(data), { operationId, ...(deps.apiOptions ?? {}) });
+  return r.ok ? { ok: true, id: r.id, result: r } : r;
 }
 
 /**
- * Atualiza uma despesa existente.
- * Mesma ordem de validação de createExpense.
- * Retorna { ok, errors }.
+ * Atualiza uma despesa NÃO paga. Paga é imutável (estorne). Pedir `paid` grava os campos como pendentes e
+ * confirma o pagamento no servidor.
  */
 export async function updateExpense(uid, expenseId, rawData, deps = {}) {
   const built = buildEntity('expenses', rawData);
@@ -92,30 +104,29 @@ export async function updateExpense(uid, expenseId, rawData, deps = {}) {
   const categoryCheck = checkCategoryForMovement(category, ALLOWED_CATEGORY_KINDS);
   if (!categoryCheck.ok) return categoryCheck;
 
-  await updateAudited(uid, COLLECTION, expenseId, data, deps);
+  const current = await (deps.getById ?? getById)(uid, COLLECTION, expenseId);
+  if (!current) return { ok: false, errors: { _form: 'Despesa não encontrada.' } };
+  if (current.status === 'paid') return { ok: false, errors: { _form: SETTLED_IMMUTABLE } };
+  const wantsPay = data.status === 'paid';
+  const { paidDate, ...rest } = data;
+  await updateAudited(uid, COLLECTION, expenseId, wantsPay ? { ...rest, status: 'pending', paidDate: null } : data, deps);
+  if (wantsPay) return markExpensePaid(uid, expenseId, paidDate ?? null, deps);
   return { ok: true };
 }
 
-/** Exclui uma despesa. */
+/** Exclui uma despesa NÃO paga (paga: estorne). */
 export async function deleteExpense(uid, expenseId, io = {}) {
   const expense = await (io.getById ?? getById)(uid, COLLECTION, expenseId);
   if (!expense) return { ok: false, errors: { _form: 'Despesa não encontrada.' } };
-
-  // Exclusão + auditoria em UM lote atômico (VF-2-03o). O saldo da conta é DERIVADO (despesas pagas), então
-  // excluir uma despesa paga devolve o valor ao saldo sem gravar nada na conta: `reversedCents` informa o estorno.
+  if (expense.status === 'paid') return { ok: false, errors: { _form: SETTLED_IMMUTABLE } };
   await (io.commitAtomic ?? commitAtomic)(uid, [{ type: 'delete', collection: COLLECTION, docId: expenseId, before: expense }], io);
-  const reversed = expense.status === 'paid' && expense.accountId;
-  return { ok: true, reversedCents: reversed ? Number(expense.amountCents) || 0 : 0, accountId: reversed ? expense.accountId : null };
+  return { ok: true, reversedCents: 0, accountId: null };
 }
 
-/** Marca despesa como paga (status -> paid + paidDate = hoje). */
+/** Marca a despesa como paga NO SERVIDOR (status e saldo atômicos, idempotente). */
 export async function markExpensePaid(uid, expenseId, paidDate = null, io = {}) {
-  const current = await (io.getById ?? getById)(uid, COLLECTION, expenseId);
-  if (!current) return { ok: false, errors: { _form: 'Despesa não encontrada.' } };
-  if (current.status !== 'pending') return { ok: false, errors: { _form: 'Só é possível marcar como paga uma despesa pendente.' } };
-  const date = paidDate ?? todayInAppZone();
-  await updateAudited(uid, COLLECTION, expenseId, { status: 'paid', paidDate: date }, io, 'mark_paid');
-  return { ok: true };
+  const r = await finance(io)('expense.pay', { id: expenseId, ...(paidDate ? { date: paidDate } : {}) }, { operationId: io.operationId, ...(io.apiOptions ?? {}) });
+  return r.ok ? { ok: true, result: r } : r;
 }
 
 /** Marca despesa como cancelada. */

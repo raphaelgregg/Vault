@@ -8,7 +8,7 @@ import { el, $, toast, refreshIcons } from '../core/ui.js';
 import { field, mount, emptyBlock } from '../components/form-kit.js';
 import { canAccessMaintenance, CONFIRM_PHRASES } from '../utils/maintenance-config.js';
 import { setAdminClaim, parseAdminTarget, listAdminUsers, buildAdminUserRows } from '../services/adminClaims.js';
-import { clearUserData, clearScope, discoverUsers, isAdminUser, SCOPES } from '../services/maintenance.js';
+import { clearOwnData, clearScope, discoverUsers, isAdminUser, SCOPES } from '../services/maintenance.js';
 import { seedFullTestSuite, MAX_VOLUME } from '../services/seed.js';
 import {
   IMPORT_ENTITIES, IMPORT_ENTITY_KEYS, MAX_IMPORT_ROWS,
@@ -228,7 +228,7 @@ export async function render(container, ctx) {
     if (resetPhrase.value.trim() !== CONFIRM_PHRASES.reset) { toast(`Confirmação inválida. Digite exatamente: ${CONFIRM_PHRASES.reset}`, 5000); return; }
     seedLog.clear();
     seedLog.write('Limpando meu usuário antes de gerar…');
-    const res = await clearUserData(user.uid, { includeAudit: false, onLog: (r) => seedLog.write(`${r.collection}: ${r.deleted} apagado(s)${r.error ? ` — FALHA: ${r.error}` : ''}`, r.error ? 'error' : 'ok') });
+    const res = await clearOwnData(user.uid, { onLog: (r) => seedLog.write(`${r.collection}: ${r.deleted} apagado(s)${r.error ? ` — FALHA: ${r.error}` : ''}`, r.error ? 'error' : 'ok') });
     if (res.failures) { seedLog.write('Limpeza com falhas: geração cancelada.', 'error'); return; }
     await runSeed();
     resetPhrase.value = '';

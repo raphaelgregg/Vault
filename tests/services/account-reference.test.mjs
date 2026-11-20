@@ -255,7 +255,7 @@ describe('contas sem nome (Bancos): instituição como identificação', () => {
 
   it('3) editar conta sem nome: nome removido envia null (deleteField); com nome mantém o texto', async () => {
     const calls = [];
-    const io = { update: async (_u, _c, id, d) => { calls.push([id, d]); }, writeAudit: async () => {} };
+    const io = { getById: async () => ({ id: 'n1', initialBalanceCents: 0 }), update: async (_u, _c, id, d) => { calls.push([id, d]); }, writeAudit: async () => {} };
     assert.equal((await updateAccount(UID, 'n1', { ...base }, io)).ok, true);
     assert.equal(calls[0][1].name, null);
     assert.equal(calls[0][1].institution, 'Alelo Pod');
@@ -277,7 +277,7 @@ describe('contas sem nome (Bancos): instituição como identificação', () => {
     const patches = [];
     const base2 = { description: 'S', categoryId: 'c1', amountCents: '1,00', expectedDate: '2026-12-05', accountId: 'n1', status: 'pending', recurrence: 'none' };
     const { updateIncome } = await import('../../js/services/incomes.js');
-    const r = await updateIncome(UID, 'i1', { ...base2, description: 'S2' }, { lookupCategory: async () => ({ id: 'c1', kind: 'income' }), update: async (_u, _c, id, d) => { patches.push(d); }, writeAudit: async () => {} });
+    const r = await updateIncome(UID, 'i1', { ...base2, description: 'S2' }, { lookupCategory: async () => ({ id: 'c1', kind: 'income' }), getById: async () => ({ id: 'i1', status: 'pending' }), update: async (_u, _c, id, d) => { patches.push(d); }, writeAudit: async () => {} });
     assert.equal(r.ok, true);
     assert.equal(patches[0].accountId, 'n1');
     assert.equal('institution' in patches[0] || 'name' in patches[0], false);

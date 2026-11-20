@@ -89,6 +89,7 @@ describe('loadBalances', () => {
       debtPayments: [{ accountId: 'a2', amountCents: 50 }],
       goalTransactions: [{ accountId: 'a1', type: 'deposit', amountCents: 30 }],
       invoices: [{ accountId: 'a1', status: 'paid', paidCents: 400 }, { status: 'paid', paidCents: 999 }], // sem conta: não debita
+      reversals: [],
     };
     const io = { list: async (u, c, opts) => { calls.push([c, opts]); return tables[c]; } };
     const { balances, truncated } = await loadBalances('u', [{ id: 'a1', initialBalanceCents: 1000 }, { id: 'a2', initialBalanceCents: 0 }], io);

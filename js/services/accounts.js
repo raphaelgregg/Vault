@@ -9,10 +9,9 @@ import {
   count,
   createAudited,
   updateAudited,
-  removeAudited,
 } from './firestore.js';
 import { buildEntity, formatCents, parseMoneyToCents, accountBalances, ACCOUNT_TYPES } from '../core/model.js';
-import { loadBalances } from './balances.js';
+import { financeResult } from './financeApi.js';
 
 const COLLECTION = COLLECTIONS.accounts;
 
@@ -48,10 +47,18 @@ export async function createAccount(uid, rawData, io = {}) {
 export async function updateAccount(uid, accountId, rawData, io = {}) {
   const { ok, data, errors } = buildEntity('accounts', rawData);
   if (!ok) return { ok: false, errors };
-
+  const current = await (io.getById ?? getById)(uid, COLLECTION, accountId);
+  if (!current) return { ok: false, errors: { _form: 'Conta não encontrada.' } };
+  // VF-ARQ-02: saldo e data de abertura só mudam pela camada confiável (`adjustOpeningBalance`), nunca por edição.
+  if ((Number(data.initialBalanceCents) || 0) !== (Number(current.initialBalanceCents) || 0)) {
+    return { ok: false, errors: { initialBalanceCents: 'O saldo de abertura não é editado aqui: use "Ajustar saldo" (ajuste auditado feito pelo servidor).' } };
+  }
+  if ((data.openingDate ?? null) !== (current.openingDate ?? null)) {
+    return { ok: false, errors: { openingDate: 'A data de abertura não é editada aqui: use "Ajustar saldo".' } };
+  }
   // Conta sem nome: remove `name` se existia (null → deleteField em `update`; update é merge).
-  // `openingDate` ausente também é removida (null → deleteField): voltar a contar todos os movimentos.
-  await updateAudited(uid, COLLECTION, accountId, { ...data, name: data.name ?? null, openingDate: data.openingDate ?? null }, io);
+  const { initialBalanceCents: _kept, openingDate: _keptDate, ...editable } = data;
+  await updateAudited(uid, COLLECTION, accountId, { ...editable, name: data.name ?? null }, io);
   return { ok: true };
 }
 
@@ -76,29 +83,16 @@ export function computeOpeningAdjustment(account, movements, realCents) {
  * abertura negativa (o saldo informado é menor que o dos lançamentos — informe uma data de abertura).
  * Retorna { ok, previousInitialCents, newInitialCents, movementsCents, errors }.
  */
-export async function adjustOpeningBalance(uid, accountId, realInput, { openingDate = null } = {}, io = {}) {
+export async function adjustOpeningBalance(uid, accountId, realInput, { openingDate = null, operationId } = {}, io = {}) {
   const realCents = typeof realInput === 'number' ? realInput : parseMoneyToCents(realInput);
   if (!Number.isInteger(realCents) || realCents < 0) return { ok: false, errors: { realBalance: 'Informe o saldo atual da conta (valor monetário válido, sem negativo).' } };
   if (openingDate && !/^\d{4}-\d{2}-\d{2}$/.test(openingDate)) return { ok: false, errors: { openingDate: 'Data inválida (use AAAA-MM-DD).' } };
-  const account = await (io.getById ?? getById)(uid, COLLECTION, accountId);
-  if (!account) return { ok: false, errors: { _form: 'Conta não encontrada.' } };
-  let loaded;
-  try {
-    loaded = await loadBalances(uid, [{ ...account, openingDate: openingDate || undefined }], io.list ? { list: io.list } : {});
-  } catch (error) {
-    console.error('[accounts] falha ao ler movimentos', error);
-    return { ok: false, errors: { _form: 'Não foi possível ler as movimentações da conta; o ajuste foi cancelado por segurança.' } };
-  }
-  if (loaded.truncated.length) {
-    return { ok: false, errors: { _form: `Leitura limitada (${loaded.truncated.join(', ')}): o saldo calculado pode estar incompleto; o ajuste foi cancelado.` } };
-  }
-  const { movementsCents, newInitialCents } = computeOpeningAdjustment({ ...account, openingDate: openingDate || undefined }, loaded.movements, realCents);
-  if (newInitialCents < 0) {
-    return { ok: false, errors: { realBalance: `Os lançamentos já somam ${formatCents(movementsCents)}, mais que o saldo informado. Defina uma data de abertura para ignorar movimentos anteriores.` } };
-  }
-  const patch = { initialBalanceCents: newInitialCents, ...(openingDate ? { openingDate } : {}) };
-  await updateAudited(uid, COLLECTION, accountId, patch, io, 'adjust_opening_balance');
-  return { ok: true, previousInitialCents: Number(account.initialBalanceCents) || 0, newInitialCents, movementsCents };
+  // VF-ARQ-02: o servidor lê os movimentos (sem truncar: fail-closed acima do limite), calcula e grava na MESMA transação.
+  const r = await (io.finance ?? financeResult)('account.adjustOpening', {
+    accountId, realBalanceCents: realCents, ...(openingDate ? { openingDate } : {}),
+  }, { operationId, ...(io.apiOptions ?? {}) });
+  if (!r.ok) return r.code === 'INVALID_STATE' ? { ...r, errors: { realBalance: r.errors._form } } : r;
+  return { ok: true, previousInitialCents: r.previousInitialCents, newInitialCents: r.newInitialCents, movementsCents: r.movementsCents, result: r };
 }
 
 /**
@@ -156,39 +150,25 @@ export async function countAccountUsage(uid, accountId, countFn = count) {
 }
 
 /**
- * Exclui uma conta somente se não houver movimentações vinculadas.
- * `io` permite injetar dependências nos testes (padrão: services/firestore.js).
+ * Exclui uma conta NO SERVIDOR, somente se não houver nenhum vínculo/histórico (checado dentro da transação). Conta com
+ * histórico deve ser ARQUIVADA (`archiveAccount`): o histórico é preservado e consultável.
  */
 export async function deleteAccount(uid, accountId, io = {}) {
-  const { getById: getFn = getById, count: countFn = count } = io;
+  const r = await (io.finance ?? financeResult)('account.delete', { accountId }, { operationId: io.operationId, ...(io.apiOptions ?? {}) });
+  if (r.ok) return { ok: true };
+  return r.code === 'HAS_HISTORY' ? { ...r, errors: { _form: `${r.errors._form}` }, hasHistory: true } : r;
+}
 
-  const account = await getFn(uid, COLLECTION, accountId);
-  if (!account) return { ok: false, errors: { _form: 'Conta não encontrada.' } };
+/** Arquiva (arquivamento lógico: sem exclusão física; deixa de receber lançamentos; histórico segue consultável). */
+export async function archiveAccount(uid, accountId, io = {}) {
+  const r = await (io.finance ?? financeResult)('account.archive', { accountId }, { operationId: io.operationId, ...(io.apiOptions ?? {}) });
+  return r.ok ? { ok: true } : r;
+}
 
-  // As Rules não conseguem consultar coleções na exclusão (sem count/query), então
-  // a integridade referencial é garantida aqui, fail-closed (padrão de deleteCategory).
-  let usage;
-  try {
-    usage = await countAccountUsage(uid, accountId, countFn);
-  } catch (error) {
-    console.error('[accounts] falha ao verificar vínculos', error);
-    return {
-      ok: false,
-      errors: {
-        _form:
-          'Não foi possível verificar se a conta possui movimentações. A exclusão foi cancelada por segurança; tente novamente.',
-      },
-    };
-  }
-
-  // LIMITAÇÃO CONHECIDA: checagem client-side; há janela de concorrência entre a
-  // contagem e o delete. Mitigação definitiva exige backend (fora do plano Spark).
-  if (usage.inUse) {
-    return { ok: false, errors: { _form: buildAccountInUseMessage(usage) } };
-  }
-
-  await removeAudited(uid, COLLECTION, accountId, account, io);
-  return { ok: true };
+/** Desarquiva a conta (volta a `active`). */
+export async function unarchiveAccount(uid, accountId, io = {}) {
+  const r = await (io.finance ?? financeResult)('account.unarchive', { accountId }, { operationId: io.operationId, ...(io.apiOptions ?? {}) });
+  return r.ok ? { ok: true } : r;
 }
 
 /** Formata opções de tipo de conta para <select>. */

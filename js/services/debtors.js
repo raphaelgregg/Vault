@@ -9,11 +9,10 @@ import { COLLECTIONS } from '../utils/constants.js';
 import {
   list,
   getById,
-  count,
   createAudited,
   updateAudited,
-  removeAudited,
 } from './firestore.js';
+import { financeResult } from './financeApi.js';
 import {
   buildEntity,
   centsToMoneyString,
@@ -118,36 +117,24 @@ export async function updateDebtor(uid, debtorId, rawData, deps = {}) {
 }
 
 /**
- * Bloqueia exclusão com dívidas/recebimentos vinculados (fail-closed; sem backend
- * a checagem é client-side, com janela de concorrência — mesmo padrão de deleteAccount).
+ * Exclui o devedor NO SERVIDOR, só sem nenhum vínculo (dívidas, recebimentos, compras, estornos), checado na transação.
+ * Com histórico: cancele ou ARQUIVE (arquivamento lógico: nada é apagado e o histórico segue consultável).
  */
 export async function deleteDebtor(uid, debtorId, io = {}) {
-  const { getById: getFn = getById, count: countFn = count } = io;
-  const debtor = await getFn(uid, COLLECTION, debtorId);
-  if (!debtor) return { ok: false, errors: { _form: 'Devedor não encontrado.' } };
+  const r = await (io.finance ?? financeResult)('debtor.delete', { debtorId }, { operationId: io.operationId, ...(io.apiOptions ?? {}) });
+  return r.ok ? { ok: true } : r;
+}
 
-  let linked;
-  try {
-    linked = await Promise.all(
-      DEBTOR_LINK_QUERIES.map(async (q) => ({
-        label: q.label,
-        count: await countFn(uid, q.collection, { where: [[q.field, '==', debtorId]] }),
-      }))
-    );
-  } catch (error) {
-    console.error('[debtors] falha ao verificar vínculos', error);
-    return {
-      ok: false,
-      errors: { _form: 'Não foi possível verificar os vínculos do devedor. A exclusão foi cancelada por segurança; tente novamente.' },
-    };
-  }
-  const used = linked.filter((l) => l.count > 0);
-  if (used.length) {
-    const detail = used.map((l) => `${l.count} ${l.label}`).join(', ');
-    return { ok: false, errors: { _form: `Este devedor não pode ser excluído: possui ${detail}. Cancele-o para manter o histórico.` } };
-  }
-  await removeAudited(uid, COLLECTION, debtorId, debtor, io);
-  return { ok: true };
+/** Arquiva o devedor (só quitado/cancelado). Arquivado não recebe novos recebimentos; histórico preservado. */
+export async function archiveDebtor(uid, debtorId, io = {}) {
+  const r = await (io.finance ?? financeResult)('debtor.archive', { debtorId }, { operationId: io.operationId, ...(io.apiOptions ?? {}) });
+  return r.ok ? { ok: true } : r;
+}
+
+/** Desarquiva o devedor. */
+export async function unarchiveDebtor(uid, debtorId, io = {}) {
+  const r = await (io.finance ?? financeResult)('debtor.unarchive', { debtorId }, { operationId: io.operationId, ...(io.apiOptions ?? {}) });
+  return r.ok ? { ok: true } : r;
 }
 
 /** Cancela (open→cancelled) ou reabre (cancelled→open) com leitura prévia, fail-closed. */
@@ -199,22 +186,23 @@ export async function loadDebtorStatements(uid, debtors, month, io = {}) {
     chunk(values).map((part) => fetchList(uid, collection, { where: [[field, 'in', part]] })),
   ).then((pages) => pages.flat());
 
-  const [purchases, debts, payments] = await Promise.all([
+  const [purchases, debts, payments, reversals] = await Promise.all([
     byIn(COLLECTIONS.cardPurchases, 'debtorId', ids),
     byIn(COLLECTIONS.debts, 'debtorId', ids),
     byIn(COLLECTIONS.debtPayments, 'debtorId', ids),
+    byIn(COLLECTIONS.reversals, 'debtorId', ids), // estornos de recebimento: o recebido da parcela os desconta
   ]);
   const cardIds = [...new Set(purchases.map((p) => p.cardId).filter(Boolean))];
   const invoices = cardIds.length ? await byIn(COLLECTIONS.invoices, 'cardId', cardIds) : [];
   const invoicesById = new Map(invoices.map((i) => [i.id, i]));
-  const { byDebt: receivedByDebt, byPurchase: receivedByPurchase } = receivedByInstallment(payments);
+  const { byDebt: receivedByDebt, byPurchase: receivedByPurchase } = receivedByInstallment(payments, reversals);
 
   for (const debtor of targets) {
     const own = purchases.filter((p) => p.debtorId === debtor.id);
     const statement = debtorMonthStatement({
       debtor, month, purchases: own, invoicesById, debts: debts.filter((d) => d.debtorId === debtor.id), receivedByDebt, receivedByPurchase,
     });
-    result.set(debtor.id, { ...statement, purchases: own, invoicesById, debts: debts.filter((d) => d.debtorId === debtor.id), payments: payments.filter((p) => p.debtorId === debtor.id) });
+    result.set(debtor.id, { ...statement, purchases: own, invoicesById, debts: debts.filter((d) => d.debtorId === debtor.id), payments: payments.filter((p) => p.debtorId === debtor.id), reversals: reversals.filter((r) => r.debtorId === debtor.id) });
   }
   return result;
 }

@@ -561,7 +561,7 @@ export function filterMovements(items, filters = {}, { dateField } = {}) {
  * movimentação) >= `openingDate` entram — o saldo de abertura já inclui o que aconteceu antes. Sem `openingDate`
  * (contas antigas) todos os movimentos entram, como sempre. Movimento sem data conhecida entra.
  */
-export function accountBalances(accounts, { incomes = [], expenses = [], transfers = [], debtPayments = [], goalTransactions = [], invoices = [] } = {}) {
+export function accountBalances(accounts, { incomes = [], expenses = [], transfers = [], debtPayments = [], goalTransactions = [], invoices = [], reversals = [] } = {}) {
   const balances = new Map();
   const opening = new Map();
   for (const account of accounts) {
@@ -575,6 +575,10 @@ export function accountBalances(accounts, { incomes = [], expenses = [], transfe
   const bump = (id, delta, date) => {
     if (balances.has(id) && counts(id, date)) balances.set(id, balances.get(id) + delta);
   };
+  // ESTORNOS (VF-ARQ-02): recebimento de devedor e movimento de meta não têm status; quando estornados (documento em
+  // `reversals`) o original permanece no histórico mas deixa de contar. Receita/despesa/transferência/fatura estornadas
+  // mudam de status no servidor e já saem por aí.
+  const reversed = new Set(reversals.map((r) => `${r.targetCollection}/${r.targetId}`));
 
   for (const income of incomes) {
     if (income.status === 'received') bump(income.accountId, income.amountCents, income.receivedDate);
@@ -583,13 +587,13 @@ export function accountBalances(accounts, { incomes = [], expenses = [], transfe
     if (expense.status === 'paid') bump(expense.accountId, -expense.amountCents, expense.paidDate);
   }
   // Recebimentos de devedores entram na conta de destino (existir já = dinheiro recebido).
-  for (const payment of debtPayments) bump(payment.accountId, payment.amountCents, payment.date);
+  for (const payment of debtPayments) if (!reversed.has(`debtPayments/${payment.id}`)) bump(payment.accountId, payment.amountCents, payment.date);
   // Fatura paga com conta (VF-2-03p) debita a conta UMA vez; as compras do cartão não são despesas (sem dupla contagem).
   for (const invoice of invoices) {
     if (invoice.status === 'paid' && invoice.accountId) bump(invoice.accountId, -(Number(invoice.paidCents ?? invoice.totalCents) || 0), invoice.paidAt);
   }
   // Aporte em meta tira dinheiro da conta; resgate devolve.
-  for (const t of goalTransactions) bump(t.accountId, t.type === 'deposit' ? -t.amountCents : t.amountCents, t.date);
+  for (const t of goalTransactions) if (!reversed.has(`goalTransactions/${t.id}`)) bump(t.accountId, t.type === 'deposit' ? -t.amountCents : t.amountCents, t.date);
   for (const transfer of transfers) {
     if (transfer.status !== 'confirmed') continue;
     bump(transfer.fromAccountId, -transfer.amountCents, transfer.date);
@@ -758,10 +762,12 @@ export function debtorMonthStatement({ debtor, month, purchases = [], invoicesBy
  * Recebimentos por parcela: { byDebt: Map(debtId → centavos), byPurchase: Map(purchaseId → centavos) }. Puro.
  * Cada recebimento aponta para UMA parcela (dívida ou compra no cartão); somados uma única vez.
  */
-export function receivedByInstallment(payments = []) {
+export function receivedByInstallment(payments = [], reversals = []) {
   const byDebt = new Map();
   const byPurchase = new Map();
+  const reversed = new Set(reversals.filter((r) => r.targetCollection === 'debtPayments').map((r) => r.targetId));
   for (const p of payments) {
+    if (reversed.has(p?.id)) continue; // recebimento estornado não conta (o documento original é preservado)
     const amount = Number(p?.amountCents) || 0;
     if (p?.debtId) byDebt.set(p.debtId, (byDebt.get(p.debtId) ?? 0) + amount);
     else if (p?.purchaseId) byPurchase.set(p.purchaseId, (byPurchase.get(p.purchaseId) ?? 0) + amount);
@@ -926,8 +932,10 @@ export function applyPaymentToDebtor(debtor, amountCents) {
 // ---------------------------------------------------------------------------
 
 /** Valor guardado da meta (aportes − resgates), derivado; nunca gravado. */
-export function goalSavedCents(transactions = []) {
+export function goalSavedCents(transactions = [], reversals = []) {
+  const reversed = new Set(reversals.filter((r) => r.targetCollection === 'goalTransactions').map((r) => r.targetId));
   return transactions.reduce((total, t) => {
+    if (t?.reversed || reversed.has(t?.id)) return total; // movimento estornado não conta
     const amount = Number(t?.amountCents) || 0;
     return total + (t?.type === 'deposit' ? amount : t?.type === 'withdraw' ? -amount : 0);
   }, 0);

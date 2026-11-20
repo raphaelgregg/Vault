@@ -13,6 +13,7 @@
  * não tem `accountId`); sem cancelamento de fatura nem pagamento parcial.
  */
 import { COLLECTIONS } from '../utils/constants.js';
+import { financeResult } from './financeApi.js';
 import { todayInAppZone } from '../utils/dates.js';
 import {
   list,
@@ -353,34 +354,19 @@ export async function registerInvoiceConsolidation(uid, cardId, rawData = {}, io
 }
 
 /**
- * Paga a fatura (`closed` ou `open` → `paid`) debitando uma conta bancária (VF-2-03p). `rawData`: { accountId, date? }.
- * Grava `paidCents = totalCents`, `accountId` e `paidAt`; se estava aberta, fecha junto (`totalCents` = soma das
- * parcelas). O saldo da conta continua DERIVADO (`accountBalances` subtrai faturas pagas) e o limite do cartão
- * é liberado (`cardLimitUsage` ignora faturas pagas). Fatura zerada não é paga: cancele-a.
- * Retorna { ok, paidCents, errors }.
+ * Paga a fatura (`closed` ou `open` → `paid`) NO SERVIDOR (VF-ARQ-02): pagamento único, conta ativa, saldo e total
+ * recalculados na transação, idempotente e seguro sob concorrência. `rawData`: { accountId, date?, operationId? }.
+ * O saldo da conta continua DERIVADO (faturas pagas) e o limite do cartão é liberado. Compras no cartão não reduzem o
+ * saldo bancário. Fatura zerada não é paga: cancele-a. Retorna { ok, paidCents, errors, code }.
  */
 export async function payInvoice(uid, invoiceId, rawData = {}, io = {}) {
-  const fetch = io.getById ?? getById;
-  const invoice = await fetch(uid, INVOICES, invoiceId);
-  if (!invoice) return { ok: false, errors: { _form: 'Fatura não encontrada.' } };
-  if (!['open', 'closed'].includes(invoice.status)) return { ok: false, errors: { _form: 'Só é possível pagar faturas abertas ou fechadas.' } };
-  const date = rawData.date ? String(rawData.date) : todayIso(io);
-  if (!isValidIsoDate(date)) return { ok: false, errors: { date: 'Data inválida (use AAAA-MM-DD).' } };
+  const date = rawData.date ? String(rawData.date) : undefined;
+  if (date && !isValidIsoDate(date)) return { ok: false, errors: { date: 'Data inválida (use AAAA-MM-DD).' } };
   if (!rawData.accountId) return { ok: false, errors: { accountId: 'Selecione a conta que pagou a fatura.' } };
-  const account = await fetch(uid, COLLECTIONS.accounts, String(rawData.accountId));
-  if (!account) return { ok: false, errors: { accountId: 'Conta não encontrada.' } };
-  if (account.status !== 'active') return { ok: false, errors: { accountId: 'A conta precisa estar ativa.' } };
-
-  let totalCents = Number(invoice.totalCents) || 0;
-  if (invoice.status === 'open') {
-    const purchases = await (io.list ?? list)(uid, PURCHASES, { where: [['invoiceId', '==', invoiceId]] });
-    totalCents = invoiceTotalCents(purchases);
-  }
-  if (totalCents <= 0) return { ok: false, errors: { _form: 'Fatura zerada: não há o que pagar. Cancele a fatura.' } };
-  await updateAudited(uid, INVOICES, invoiceId, {
-    status: 'paid', totalCents, paidCents: totalCents, accountId: account.id ?? rawData.accountId, paidAt: date,
-  }, io, 'pay');
-  return { ok: true, paidCents: totalCents };
+  const r = await (io.finance ?? financeResult)('invoice.pay', {
+    invoiceId, accountId: String(rawData.accountId), ...(date ? { date } : {}),
+  }, { operationId: rawData.operationId, ...(io.apiOptions ?? {}) });
+  return r.ok ? { ok: true, paidCents: r.paidCents, result: r } : r;
 }
 
 /**
