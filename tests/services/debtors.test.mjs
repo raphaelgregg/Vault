@@ -7,6 +7,8 @@ import {
   createDebtor,
   updateDebtor,
   deleteDebtor,
+  archiveDebtor,
+  unarchiveDebtor,
   setDebtorStatus,
   cancelDebtor,
   reopenDebtor,
@@ -171,39 +173,26 @@ describe('debtors — service', () => {
     }
   });
 
-  it('delete: sem vínculos remove e audita com before; consulta debts, debtPayments e cardPurchases por debtorId', async () => {
-    const doc = { id: 'd1', name: 'João', status: 'open' };
-    const { io, calls } = makeIo(doc);
-    const r = await deleteDebtor(uid, 'd1', io);
-    assert.equal(r.ok, true);
-    assert.deepEqual(calls.count.map((c) => c.c).sort(), ['cardPurchases', 'debtPayments', 'debts']);
-    assert.deepEqual(calls.count[0].opts, { where: [['debtorId', '==', 'd1']] });
-    assert.equal(calls.remove.length, 1);
-    assert.deepEqual(calls.audit[0].entry, { action: 'delete', collection: 'debtors', docId: 'd1', before: doc });
-  });
-
-  it('delete: com vínculos bloqueia sem remover nem auditar', async () => {
-    const { io, calls } = makeIo({ id: 'd1' }, { count: async (u, c) => (c === 'debts' ? 2 : 0) });
-    const r = await deleteDebtor(uid, 'd1', io);
-    assert.equal(r.ok, false);
-    assert.match(r.errors._form, /2 dívidas/);
+  it('delete/arquivar/desarquivar são decididos NO SERVIDOR (debtor.delete / archive / unarchive); nenhuma exclusão direta', async () => {
+    const ops = [];
+    const finance = async (op, params, options) => { ops.push([op, params, options.operationId]); return { ok: true }; };
+    const { io, calls } = makeIo({ id: 'd1', name: 'João', status: 'open' });
+    assert.deepEqual(await deleteDebtor(uid, 'd1', { ...io, finance, operationId: 'op-1' }), { ok: true });
+    assert.deepEqual(await archiveDebtor(uid, 'd1', { ...io, finance }), { ok: true });
+    assert.deepEqual(await unarchiveDebtor(uid, 'd1', { ...io, finance }), { ok: true });
+    assert.deepEqual(ops.map((o) => [o[0], o[1]]), [['debtor.delete', { debtorId: 'd1' }], ['debtor.archive', { debtorId: 'd1' }], ['debtor.unarchive', { debtorId: 'd1' }]]);
     assert.equal(calls.remove.length + calls.audit.length, 0);
   });
 
-  it('delete: falha na contagem é fail-closed; inexistente é rejeitado', async () => {
-    const orig = console.error;
-    console.error = () => {};
-    try {
-      const failing = makeIo({ id: 'd1' }, { count: async () => { throw new Error('boom'); } });
-      const r = await deleteDebtor(uid, 'd1', failing.io);
-      assert.equal(r.ok, false);
-      assert.equal(failing.calls.remove.length, 0);
-    } finally {
-      console.error = orig;
-    }
-    const { io } = makeIo(null);
-    assert.equal((await deleteDebtor(uid, 'x', io)).ok, false);
+  it('delete com histórico: erro real do servidor (HAS_HISTORY) é repassado, nada é removido', async () => {
+    const finance = async () => ({ ok: false, code: 'HAS_HISTORY', errors: { _form: 'Este devedor possui dívidas e não pode ser excluído; arquive-o.' } });
+    const { io, calls } = makeIo({ id: 'd1' });
+    const r = await deleteDebtor(uid, 'd1', { ...io, finance });
+    assert.deepEqual([r.ok, r.code], [false, 'HAS_HISTORY']);
+    assert.match(r.errors._form, /arquive/);
+    assert.equal(calls.remove.length + calls.audit.length, 0);
   });
+
 
   it('status: cancela e reabre com auditoria cancel/reopen; paid e transições inválidas rejeitadas', async () => {
     let m = makeIo({ status: 'open' });

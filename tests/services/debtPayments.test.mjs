@@ -94,80 +94,67 @@ describe('createDebt', () => {
   });
 });
 
-describe('registerDebtPayment — fluxo atômico', () => {
-  it('quitação total da parcela e do devedor: 1 lote com recebimento, parcela paga e devedor paid', async () => {
-    const { io, calls } = makeIo({ debtors: [debtor({ lentCents: 50000 })] });
-    const r = await registerDebtPayment(uid, 'd1', rawPay(), io);
-    assert.deepEqual([r.ok, r.id, r.debtPaid, r.debtorPaid], [true, 'pay1', true, true]);
-    assert.equal(calls.atomic.length, 1);
-    const [pay, debtOp, debtorOp] = calls.atomic[0];
-    assert.deepEqual(pay.data, { debtId: 'd1', debtorId: 'dev1', amountCents: 50000, date: '2026-11-18', accountId: 'acc1' });
-    assert.deepEqual(debtOp, { type: 'update', collection: 'debts', docId: 'd1', data: { status: 'paid' }, action: 'pay' });
-    // total do devedor por `increment` atômico (não valor absoluto de leitura velha); `status: paid` só quando zera o pendente
-    assert.deepEqual([debtorOp.data, debtorOp.increments], [{ status: 'paid' }, { receivedCents: 50000 }]);
-    assert.equal(debtorOp.action, 'receive');
-    assert.equal(calls.create.length + calls.update.length, 0); // nada fora do lote
-  });
+describe('registerDebtPayment — camada confiável (VF-ARQ-02)', () => {
+  const server = (response) => {
+    const calls = [];
+    return { calls, finance: async (op, params, options) => { calls.push({ op, params, options }); return typeof response === 'function' ? response(op, params) : response; } };
+  };
+  const ok = (over = {}) => ({ ok: true, paymentId: 'pay1', debtId: 'd1', debtorId: 'dev1', amountCents: 50000, settled: true, remainingCents: 0, debtorStatus: 'paid', debtorReceivedCents: 50000, accountId: 'acc1', ...over });
 
-  it('recebimento parcial: parcela e devedor continuam abertos (sem op de parcela)', async () => {
+  it('envia debt.receive (centavos inteiros, operationId) e NÃO grava nada no cliente; devolve o resultado confirmado', async () => {
     const { io, calls } = makeIo();
-    const r = await registerDebtPayment(uid, 'd1', rawPay({ amountCents: '200,00' }), io);
-    assert.deepEqual([r.ok, r.debtPaid, r.debtorPaid], [true, false, false]);
-    const ops = calls.atomic[0];
-    assert.equal(ops.length, 2);
-    assert.deepEqual([ops[1].data, ops[1].increments], [{}, { receivedCents: 20000 }]); // parcial: não reescreve o status
+    const api = server(ok());
+    const r = await registerDebtPayment(uid, 'd1', rawPay({ operationId: 'op-1' }), { ...io, finance: api.finance });
+    assert.deepEqual([r.ok, r.id, r.debtPaid, r.debtorPaid], [true, 'pay1', true, true]);
+    assert.deepEqual(api.calls.map((c) => [c.op, c.params, c.options.operationId]), [['debt.receive', { debtId: 'd1', amountCents: 50000, date: '2026-11-18', accountId: 'acc1' }, 'op-1']]);
+    assert.equal(calls.atomic.length + calls.create.length + calls.update.length, 0);
   });
 
-  it('considera recebimentos anteriores da parcela e quita ao completar', async () => {
-    const { io, calls } = makeIo({ payments: [{ amountCents: 20000 }], debtors: [debtor({ receivedCents: 20000 })] });
-    const r = await registerDebtPayment(uid, 'd1', rawPay({ amountCents: '300,00' }), io);
-    assert.equal(r.debtPaid, true);
-    assert.deepEqual([calls.atomic[0][2].data, calls.atomic[0][2].increments], [{}, { receivedCents: 30000 }]);
-    const over = await registerDebtPayment(uid, 'd1', rawPay({ amountCents: '300,01' }), io);
-    assert.ok(over.errors.amountCents);
+  it('recebimento parcial: parcela e devedor seguem abertos (resultado do servidor)', async () => {
+    const api = server(ok({ amountCents: 20000, settled: false, remainingCents: 30000, debtorStatus: 'open', debtorReceivedCents: 20000 }));
+    const r = await registerDebtPayment(uid, 'd1', rawPay({ amountCents: '200,00' }), { ...makeIo().io, finance: api.finance });
+    assert.deepEqual([r.ok, r.debtPaid, r.debtorPaid, r.remainingCents], [true, false, false, 30000]);
+    assert.equal(api.calls[0].params.amountCents, 20000);
   });
 
-  it('rejeita excesso sobre o pendente do devedor', async () => {
-    const { io, calls } = makeIo({ debts: [debt({ principalCents: 90000 })], debtors: [debtor({ lentCents: 60000 })] });
-    const r = await registerDebtPayment(uid, 'd1', rawPay({ amountCents: '700,00' }), io);
-    assert.ok(r.errors.amountCents);
-    assert.equal(calls.atomic.length, 0);
+  it('excesso e demais regras (parcela paga/cancelada, devedor fechado, conta inativa) são do servidor: erro identificável, sem escrita', async () => {
+    const m = makeIo();
+    for (const [code, message] of [['EXCEEDS_REMAINING', 'O valor excede o restante da parcela.'], ['INVALID_STATE', 'Esta parcela já foi quitada.'], ['EXCEEDS_DEBT', 'O valor excede o pendente do devedor.'], ['ACCOUNT_NOT_ACTIVE', 'A conta precisa estar ativa.']]) {
+      const api = server({ ok: false, code, errors: { _form: message } });
+      const r = await registerDebtPayment(uid, 'd1', rawPay(), { ...m.io, finance: api.finance });
+      assert.equal(r.ok, false);
+      assert.equal(r.code, code);
+      assert.equal(code === 'EXCEEDS_REMAINING' ? r.errors.amountCents : r.errors._form, message);
+    }
+    assert.equal(m.calls.atomic.length, 0);
   });
 
-  it('rejeita parcela inexistente/paga/cancelada, devedor não aberto, conta inválida e dados inválidos', async () => {
-    const run = (setup, raw = rawPay(), id = 'd1') => {
-      const { io, calls } = makeIo(setup);
-      return registerDebtPayment(uid, id, raw, io).then((r) => ({ r, calls }));
-    };
-    assert.equal((await run({}, rawPay(), 'zzz')).r.ok, false);
-    assert.equal((await run({ debts: [debt({ status: 'paid' })] })).r.ok, false);
-    assert.equal((await run({ debts: [debt({ status: 'cancelled' })] })).r.ok, false);
-    assert.equal((await run({ debtors: [debtor({ status: 'cancelled' })] })).r.ok, false);
-    assert.ok((await run({ accounts: [] })).r.errors.accountId);
-    assert.ok((await run({ accounts: [account({ status: 'archived' })] })).r.errors.accountId);
-    assert.ok((await run({}, rawPay({ amountCents: '0' }))).r.errors.amountCents);
-    assert.ok((await run({}, rawPay({ date: '18/11/2026' }))).r.errors.date);
-    const { calls } = await run({ debtors: [debtor({ status: 'paid', receivedCents: 100000 })] });
-    assert.equal(calls.atomic.length, 0);
+  it('parcela inexistente, valor zero e data inválida não chegam ao servidor', async () => {
+    const api = server(ok());
+    const m = makeIo();
+    assert.equal((await registerDebtPayment(uid, 'zzz', rawPay(), { ...m.io, finance: api.finance })).ok, false);
+    assert.ok((await registerDebtPayment(uid, 'd1', rawPay({ amountCents: '0' }), { ...m.io, finance: api.finance })).errors.amountCents);
+    assert.ok((await registerDebtPayment(uid, 'd1', rawPay({ date: '18/11/2026' }), { ...m.io, finance: api.finance })).errors.date);
+    assert.deepEqual(api.calls, []);
   });
 
-  it('aceita parcela atrasada (late)', async () => {
-    const { io } = makeIo({ debts: [debt({ status: 'late' })] });
-    assert.equal((await registerDebtPayment(uid, 'd1', rawPay({ amountCents: '10,00' }), io)).ok, true);
+  it('o cliente não envia saldo, total recebido, status nem uid', async () => {
+    const api = server(ok());
+    await registerDebtPayment(uid, 'd1', rawPay(), { ...makeIo().io, finance: api.finance });
+    for (const forbidden of ['balanceCents', 'receivedCents', 'status', 'uid', 'userId', 'debtorId']) assert.equal(forbidden in api.calls[0].params, false, forbidden);
   });
 });
 
 describe('cancelDebt', () => {
-  it('cancela pendente sem recebimentos com auditoria `cancel`', async () => {
-    const { io, calls } = makeIo();
-    assert.equal((await cancelDebt(uid, 'd1', io)).ok, true);
-    assert.deepEqual(calls.update[0], { c: 'debts', id: 'd1', data: { status: 'cancelled' } });
-    assert.equal(calls.audit[0].action, 'cancel');
-  });
-  it('bloqueia paga, com recebimentos ou inexistente', async () => {
-    assert.equal((await cancelDebt(uid, 'd1', makeIo({ debts: [debt({ status: 'paid' })] }).io)).ok, false);
-    assert.equal((await cancelDebt(uid, 'd1', makeIo({ payments: [{ amountCents: 1 }] }).io)).ok, false);
-    assert.equal((await cancelDebt(uid, 'x', makeIo().io)).ok, false);
+  it('cancela no servidor (debt.cancel); recusa com recebimentos vem do servidor', async () => {
+    const calls = [];
+    const finance = async (op, params) => { calls.push([op, params]); return { ok: true, debtId: 'd1', status: 'cancelled' }; };
+    const m = makeIo();
+    assert.equal((await cancelDebt(uid, 'd1', { ...m.io, finance })).ok, true);
+    assert.deepEqual(calls, [['debt.cancel', { debtId: 'd1' }]]);
+    assert.equal(m.calls.update.length + m.calls.audit.length, 0);
+    const refused = await cancelDebt(uid, 'd1', { ...m.io, finance: async () => ({ ok: false, code: 'INVALID_STATE', errors: { _form: 'A parcela já possui recebimentos e não pode ser cancelada.' } }) });
+    assert.deepEqual([refused.ok, refused.code], [false, 'INVALID_STATE']);
   });
 });
 

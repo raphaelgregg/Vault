@@ -3,7 +3,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { transferableGoals, listRecentGoalTransactions } from '../../js/services/goals.js';
+import { transferableGoals, listRecentGoalTransactions, listGoalTransactions } from '../../js/services/goals.js';
 import {
   createGoal, updateGoal, deleteGoal, setGoalStatus, cancelGoal, reopenGoal,
   registerGoalTransaction, depositToGoal, withdrawFromGoal, getGoalStatusOptions,
@@ -94,41 +94,51 @@ describe('createGoal / updateGoal', () => {
   });
 });
 
-describe('registerGoalTransaction — fluxo atômico', () => {
-  it('aporte parcial: só a movimentação no lote', async () => {
+describe('registerGoalTransaction — camada confiável (VF-ARQ-02)', () => {
+  const api = (response = { ok: true, transactionId: 'tx1', goalStatus: 'active', savedCents: 30000 }) => {
+    const calls = [];
+    return { calls, finance: async (op, params, options) => { calls.push({ op, params, options }); return response; } };
+  };
+
+  it('aporte chama goal.deposit com centavos inteiros e operationId; nenhuma gravação direta', async () => {
     const { io, calls } = makeIo();
-    const r = await depositToGoal(uid, 'g1', raw(), io);
+    const a = api();
+    const r = await depositToGoal(uid, 'g1', { ...raw(), operationId: 'op-1' }, { ...io, finance: a.finance });
     assert.deepEqual([r.ok, r.id, r.status, r.savedCents], [true, 'tx1', 'active', 30000]);
-    assert.equal(calls.atomic[0].length, 1);
-    assert.deepEqual(calls.atomic[0][0].data, { goalId: 'g1', type: 'deposit', amountCents: 30000, date: '2026-11-18', accountId: 'acc1' });
-    assert.equal(calls.create.length + calls.update.length, 0);
+    assert.deepEqual(a.calls.map((c) => [c.op, c.params, c.options.operationId]), [['goal.deposit', { goalId: 'g1', amountCents: 30000, date: '2026-11-18', accountId: 'acc1' }, 'op-1']]);
+    assert.equal(calls.create.length + calls.update.length + calls.atomic.length, 0);
   });
-  it('aporte que atinge o alvo conclui a meta no mesmo lote', async () => {
-    const { io, calls } = makeIo({ txs: [{ type: 'deposit', amountCents: 70000 }] });
-    const r = await depositToGoal(uid, 'g1', raw(), io);
-    assert.equal(r.status, 'completed');
-    assert.deepEqual(calls.atomic[0][1], { type: 'update', collection: 'goals', docId: 'g1', data: { status: 'completed' }, action: 'complete' });
+
+  it('resgate chama goal.withdraw; a meta concluída/reaberta vem do servidor', async () => {
+    const a = api({ ok: true, transactionId: 'tx2', goalStatus: 'active', savedCents: 70000 });
+    const r = await withdrawFromGoal(uid, 'g1', raw(), { ...makeIo().io, finance: a.finance });
+    assert.deepEqual([r.ok, r.status, r.savedCents], [true, 'active', 70000]);
+    assert.equal(a.calls[0].op, 'goal.withdraw');
   });
-  it('resgate de meta concluída abaixo do alvo reativa; excesso é rejeitado', async () => {
-    const { io, calls } = makeIo({ goals: [goal({ status: 'completed' })], txs: [{ type: 'deposit', amountCents: 100000 }] });
-    const r = await withdrawFromGoal(uid, 'g1', raw(), io);
-    assert.equal(r.status, 'active');
-    assert.equal(calls.atomic[0][1].action, 'reopen');
-    const over = await withdrawFromGoal(uid, 'g1', raw({ amountCents: '1.000,01' }), io);
-    assert.ok(over.errors._form);
-    assert.equal(calls.atomic.length, 1);
+
+  it('erros do servidor (saldo insuficiente, resgate acima do guardado, meta vinculada/cancelada) chegam à tela sem escrita', async () => {
+    const m = makeIo();
+    for (const [code, msg] of [['INSUFFICIENT_BALANCE', 'Saldo insuficiente em Nubank.'], ['INVALID_STATE', 'Resgate acima do guardado.'], ['NOT_FOUND', 'Meta não encontrada.']]) {
+      const a = api({ ok: false, code, errors: { _form: msg } });
+      const r = await depositToGoal(uid, 'g1', raw(), { ...m.io, finance: a.finance });
+      assert.deepEqual([r.ok, r.code, r.errors._form], [false, code, msg]);
+    }
+    assert.equal(m.calls.atomic.length + m.calls.create.length, 0);
   });
-  it('rejeita meta inexistente/cancelada/concluída (aporte), conta inválida e dados inválidos', async () => {
-    const run = (setup, r = raw(), id = 'g1') => { const m = makeIo(setup); return registerGoalTransaction(uid, id, 'deposit', r, m.io).then((x) => ({ x, calls: m.calls })); };
-    assert.equal((await run({}, raw(), 'zz')).x.ok, false);
-    assert.equal((await run({ goals: [goal({ status: 'cancelled' })] })).x.ok, false);
-    assert.equal((await run({ goals: [goal({ status: 'completed' })] })).x.ok, false);
-    assert.ok((await run({ accounts: [] })).x.errors.accountId);
-    assert.ok((await run({ accounts: [account({ status: 'inactive' })] })).x.errors.accountId);
-    assert.ok((await run({}, raw({ amountCents: '0' }))).x.errors.amountCents);
-    assert.ok((await run({}, raw({ date: 'hoje' }))).x.errors.date);
-    const { calls } = await run({ goals: [goal({ status: 'cancelled' })] });
-    assert.equal(calls.atomic.length, 0);
+
+  it('dados inválidos (valor zero, data inválida) param no formulário, antes do servidor', async () => {
+    const a = api();
+    const io = { ...makeIo().io, finance: a.finance };
+    assert.ok((await depositToGoal(uid, 'g1', raw({ amountCents: '0' }), io)).errors.amountCents);
+    assert.ok((await depositToGoal(uid, 'g1', raw({ date: 'hoje' }), io)).errors.date);
+    assert.deepEqual(a.calls, []);
+  });
+
+  it('movimentos ESTORNADOS não contam no guardado (listGoalTransactions marca; goalSavedCents ignora)', async () => {
+    const lists = { goalTransactions: [{ id: 't1', type: 'deposit', amountCents: 5000 }, { id: 't2', type: 'deposit', amountCents: 3000 }], reversals: [{ id: 'goalTransactions_t2', targetCollection: 'goalTransactions', targetId: 't2' }] };
+    const rows = await listGoalTransactions(uid, 'g1', { list: async (_u, c) => lists[c] });
+    assert.deepEqual(rows.map((r) => [r.id, Boolean(r.reversed)]), [['t1', false], ['t2', true]]);
+    assert.equal(goalSavedCents(rows), 5000);
   });
 });
 
@@ -164,23 +174,6 @@ describe('status e exclusão', () => {
 });
 
 describe('transferência para metas (conta → meta → conta)', () => {
-  it('aporte sem saldo na conta é bloqueado e nada é gravado; com saldo grava', async () => {
-    const poor = makeIo({ accounts: [account({ initialBalanceCents: 10000 })] });
-    const r = await depositToGoal(uid, 'g1', raw({ amountCents: '300,00' }), poor.io);
-    assert.equal(r.ok, false);
-    assert.match(r.errors.accountId, /Saldo insuficiente em Nubank — Corrente: disponível R\$ 100,00, aporte de R\$ 300,00/);
-    assert.equal(poor.calls.atomic.length, 0);
-    const ok = makeIo({ accounts: [account({ initialBalanceCents: 30000 })] });
-    assert.equal((await depositToGoal(uid, 'g1', raw({ amountCents: '300,00' }), ok.io)).ok, true);
-  });
-
-  it('resgate não exige saldo da conta, mas não passa do guardado', async () => {
-    const empty = makeIo({ accounts: [account({ initialBalanceCents: 0 })], txs: [{ type: 'deposit', amountCents: 50000, accountId: 'acc1' }] });
-    assert.equal((await withdrawFromGoal(uid, 'g1', raw({ amountCents: '500,00' }), empty.io)).ok, true);
-    const over = makeIo({ txs: [{ type: 'deposit', amountCents: 50000, accountId: 'acc1' }] });
-    assert.equal((await withdrawFromGoal(uid, 'g1', raw({ amountCents: '500,01' }), over.io)).ok, false);
-  });
-
   it('transferableGoals: só ativas e sem vínculo de conta (vinculadas seguem o saldo da conta)', () => {
     const goals = [goal({ id: 'a' }), goal({ id: 'b', accountId: 'acc1' }), goal({ id: 'c', accountId: 'acc1' }), goal({ id: 'd', status: 'cancelled' }), goal({ id: 'e', status: 'completed' })];
     assert.deepEqual(transferableGoals(goals, new Map([['c', 2]])).map((g) => g.id), ['a', 'c']); // c: vínculo legado com movimentações

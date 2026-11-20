@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { registerCardPurchase, deleteCardPurchase } from '../../js/services/creditCards.js';
-import { createDebtPlan, settleDebts, registerDebtPayment } from '../../js/services/debtPayments.js';
+import { createDebtPlan, settleDebts, registerDebtPayment, settleInstallment, settleMonthInstallments } from '../../js/services/debtPayments.js';
 import { deleteDebtor, getDebtorOverview, listOpenDebtors, loadDebtorStatements, getDebtorStatement, DEBTOR_LINK_QUERIES } from '../../js/services/debtors.js';
 import { debtorOverview, debtorMonthStatement, debtorObligations, applyPaymentToDebtor } from '../../js/core/model.js';
 import { describeError } from '../../js/utils/errors.js';
@@ -93,13 +93,10 @@ describe('visão consolidada do devedor', () => {
     assert.equal(o.cardPurchases[0].purchaseDate, '2026-02-01');
     assert.equal(o.cardCents, 300);
   });
-  it('exclusão de devedor considera compras no cartão', async () => {
+  it('exclusão de devedor considera compras no cartão: a verificação é do SERVIDOR (debtor.delete); o vínculo segue declarado', async () => {
     assert.ok(DEBTOR_LINK_QUERIES.some((q) => q.collection === 'cardPurchases' && q.field === 'debtorId'));
-    const calls = [];
-    const r = await deleteDebtor(uid, 'd1', {
-      getById: async () => debtor(),
-      count: async (u, c) => { calls.push(c); return c === 'cardPurchases' ? 2 : 0; },
-    });
+    const finance = async () => ({ ok: false, code: 'HAS_HISTORY', errors: { _form: 'Este devedor possui 2 compras no cartão e não pode ser excluído; arquive-o.' } });
+    const r = await deleteDebtor(uid, 'd1', { finance });
     assert.equal(r.ok, false);
     assert.match(r.errors._form, /2 compras no cartão/);
   });
@@ -318,80 +315,76 @@ describe('dívidas do devedor (VF-2-03m)', () => {
   });
 });
 
-describe('antecipar e quitar (VF-2-03n)', () => {
-  const dv = (o = {}) => ({ id: 'd1', name: 'João', status: 'open', lentCents: 100000, receivedCents: 0, ...o });
-  const pd = (id, n, principal, due, o = {}) => ({ id, debtorId: 'd1', description: 'Moto', principalCents: principal, installmentNumber: n, installmentsTotal: 3, debtGroupId: 'g1', dueDate: due, status: 'pending', ...o });
-  const make = ({ debtor = dv(), debts = [], payments = [], accounts = [{ id: 'a1', status: 'active' }] } = {}) => {
-    const atomic = [];
-    return {
-      atomic,
-      io: {
-        getById: async (u, c, id) => ({ debtors: [debtor], debts, accounts }[c] ?? []).find((x) => x.id === id) ?? null,
-        list: async (u, c) => (c === 'debtPayments' ? payments : debts),
-        commitAtomic: async (u, ops) => { atomic.push(ops); return ['x']; },
-      },
-    };
-  };
+describe('antecipar e quitar (VF-2-03n / VF-ARQ-02)', () => {
   const rawS = (o = {}) => ({ date: '2026-11-19', accountId: 'a1', ...o });
+  /** Servidor falso: registra a intenção e responde como a camada confiável responderia. */
+  const server = (responder) => {
+    const calls = [];
+    return { calls, finance: async (op, params, options) => { calls.push({ op, params, options }); return responder(op, params, calls.length); } };
+  };
 
-  it('antecipação: pagar parcela futura (parcial e total) sinaliza `anticipated` e atualiza parcela e devedor', async () => {
-    const future = pd('f1', 3, 30000, '2027-01-10');
-    const { io, atomic } = make({ debts: [future] });
-    const part = await registerDebtPayment(uid, 'f1', { amountCents: '100,00', date: '2026-11-19', accountId: 'a1' }, { ...io, list: async () => [] });
+  it('antecipação: registerDebtPayment envia debt.receive e sinaliza `anticipated` pela data × vencimento da parcela', async () => {
+    const api = server(() => ({ ok: true, paymentId: 'x', settled: false, remainingCents: 20000, amountCents: 10000, debtorStatus: 'open' }));
+    const io = { finance: api.finance, getById: async () => ({ id: 'f1', debtorId: 'd1', dueDate: '2027-01-10' }) };
+    const part = await registerDebtPayment(uid, 'f1', { amountCents: '100,00', date: '2026-11-19', accountId: 'a1', operationId: 'op-1' }, io);
     assert.deepEqual([part.ok, part.anticipated, part.debtPaid], [true, true, false]);
-    assert.equal(atomic.at(-1).find((o) => o.collection === 'debtors').increments.receivedCents, 10000);
-    const full = await registerDebtPayment(uid, 'f1', { amountCents: '300,00', date: '2026-11-19', accountId: 'a1' }, { ...io, list: async () => [] });
-    assert.deepEqual([full.ok, full.anticipated, full.debtPaid], [true, true, true]);
-    assert.ok(atomic.at(-1).some((o) => o.collection === 'debts' && o.data.status === 'paid'));
-    const late = await registerDebtPayment(uid, 'f1', { amountCents: '300,00', date: '2027-01-10', accountId: 'a1' }, { ...io, list: async () => [] });
+    assert.deepEqual(api.calls[0].params, { debtId: 'f1', amountCents: 10000, date: '2026-11-19', accountId: 'a1' });
+    assert.equal(api.calls[0].options.operationId, 'op-1');
+    const late = await registerDebtPayment(uid, 'f1', { amountCents: '300,00', date: '2027-01-10', accountId: 'a1' }, io);
     assert.equal(late.anticipated, false); // no vencimento não é antecipação
   });
 
-  it('quitar dívida (grupo): um recebimento por parcela com o restante, parcelas pagas, devedor soma o total', async () => {
-    const debts = [pd('p1', 1, 33335, '2026-11-10'), pd('p2', 2, 33333, '2026-12-10'), pd('p3', 3, 33333, '2027-01-10'),
-      pd('q1', 1, 20000, '2026-11-10', { debtGroupId: 'g2' }), pd('c1', 1, 5000, '2026-11-10', { debtGroupId: 'g1', status: 'cancelled' })];
-    const payments = [{ debtId: 'p1', debtorId: 'd1', amountCents: 10000 }]; // p1 já recebeu 100,00
-    const { io, atomic } = make({ debts, payments });
-    const r = await settleDebts(uid, 'd1', { groupId: 'g1' }, rawS({ notes: 'quitação' }), io);
-    assert.equal(r.ok, true);
-    assert.equal(r.count, 3);
-    assert.equal(r.totalCents, 23335 + 33333 + 33333);
-    const ops = atomic[0];
-    assert.deepEqual(ops.filter((o) => o.collection === 'debtPayments').map((o) => [o.data.debtId, o.data.amountCents]),
-      [['p1', 23335], ['p2', 33333], ['p3', 33333]]);
-    assert.deepEqual(ops.filter((o) => o.collection === 'debts').map((o) => o.docId), ['p1', 'p2', 'p3']); // g2 e cancelada intactas
-    assert.ok(ops.filter((o) => o.collection === 'debts').every((o) => o.data.status === 'paid'));
-    assert.deepEqual([ops.at(-1).data, ops.at(-1).increments], [{}, { receivedCents: 23335 + 33333 + 33333 }]); // soma por increment; cartão/restante mantém aberto
-    assert.equal(r.debtorPaid, false);
+  it('recebimento NUNCA é gravado direto: nenhuma escrita no cliente em settleInstallment/registerDebtPayment', async () => {
+    const writes = [];
+    const api = server(() => ({ ok: true, paymentId: 'x', settled: true, remainingCents: 0, amountCents: 30000, debtorStatus: 'paid' }));
+    const io = { finance: api.finance, getById: async () => ({ id: 'p1', debtorId: 'd1' }), commitAtomic: async (...a) => { writes.push(a); return []; }, create: async (...a) => { writes.push(a); }, update: async (...a) => { writes.push(a); } };
+    const r = await settleInstallment(uid, 'd1', { debtId: 'p1' }, rawS(), io);
+    assert.deepEqual([r.ok, r.settled, r.debtorPaid], [true, true, true]);
+    assert.deepEqual(writes, []);
   });
 
-  it('quitar todas as dívidas e quitar o devedor inteiro quando recebido == emprestado', async () => {
-    const debts = [pd('p1', 1, 60000, '2026-11-10', { debtGroupId: undefined, installmentsTotal: undefined }), pd('q1', 1, 40000, '2026-12-10', { debtGroupId: 'g2' })];
-    const { io, atomic } = make({ debts });
-    const r = await settleDebts(uid, 'd1', {}, rawS(), io);
-    assert.deepEqual([r.ok, r.count, r.totalCents, r.debtorPaid], [true, 2, 100000, true]);
-    assert.deepEqual([atomic[0].at(-1).data, atomic[0].at(-1).increments], [{ status: 'paid' }, { receivedCents: 100000 }]);
-    const legacy = await settleDebts(uid, 'd1', { groupId: 'p1' }, rawS(), make({ debts }).io); // parcela legada: grupo = próprio id
-    assert.equal(legacy.count, 1);
+  it('quitar dívida (grupo) e todas: envia debt.settleBatch com o escopo; repete a chamada (mesmo operationId) até concluir', async () => {
+    let n = 0;
+    const api = server(() => {
+      n += 1;
+      return n < 3
+        ? { ok: true, status: 'running', total: 3, done: n, skipped: 0, failed: 0, pending: 3 - n, receivedCents: 1000 * n, items: [] }
+        : { ok: true, status: 'completed', total: 3, done: 3, skipped: 0, failed: 0, pending: 0, receivedCents: 90000, items: [] };
+    });
+    const r = await settleDebts(uid, 'd1', { groupId: 'g1' }, rawS({ notes: 'quitação', operationId: 'batch-1' }), { finance: api.finance, getById: async () => ({ id: 'd1', status: 'paid' }) });
+    assert.deepEqual([r.ok, r.count, r.totalCents, r.debtorPaid], [true, 3, 90000, true]);
+    assert.equal(api.calls.length, 3);
+    assert.ok(api.calls.every((c) => c.op === 'debt.settleBatch' && c.options.operationId === 'batch-1'));
+    assert.deepEqual(api.calls[0].params.scope, { groupId: 'g1' });
+    const all = server(() => ({ ok: true, status: 'completed', total: 1, done: 1, skipped: 0, failed: 0, pending: 0, receivedCents: 100, items: [] }));
+    await settleDebts(uid, 'd1', {}, rawS(), { finance: all.finance, getById: async () => null });
+    assert.deepEqual(all.calls[0].params.scope, { all: true });
   });
 
-  it('não quita sem parcelas pendentes, com conta inválida/inativa, devedor fechado, acima do pendente ou > 120 parcelas; nada é gravado', async () => {
-    const one = [pd('p1', 1, 30000, '2026-11-10')];
-    const cases = [
-      [make({ debts: [pd('p1', 1, 1, '2026-11-10', { status: 'paid' })] }), rawS(), '_form'],
-      [make({ debts: one, accounts: [] }), rawS(), 'accountId'],
-      [make({ debts: one, accounts: [{ id: 'a1', status: 'archived' }] }), rawS(), 'accountId'],
-      [make({ debts: one }), rawS({ date: '2026-02-30' }), 'date'],
-      [make({ debts: one, debtor: dv({ status: 'cancelled' }) }), rawS(), '_form'],
-      [make({ debts: one, debtor: dv({ lentCents: 10000 }) }), rawS(), '_form'], // restante 300 > pendente 100
-      [make({ debts: Array.from({ length: 121 }, (_, i) => pd(`z${i}`, i + 1, 100, '2026-11-10')), debtor: dv({ lentCents: 99999999 }) }), rawS(), '_form'],
-    ];
-    for (const [{ io, atomic }, raw, field] of cases) {
-      const r = await settleDebts(uid, 'd1', {}, raw, io);
-      assert.equal(r.ok, false, field);
-      assert.ok(r.errors[field], field);
-      assert.equal(atomic.length, 0);
-    }
+  it('lote parcialmente falho: ok:false, partial, itens gravados permanecem e a mensagem diz como retomar', async () => {
+    const api = server(() => ({ ok: true, status: 'partial_failed', total: 3, done: 2, skipped: 0, failed: 1, pending: 0, receivedCents: 2000, items: [] }));
+    const r = await settleDebts(uid, 'd1', {}, rawS({ operationId: 'b2' }), { finance: api.finance, getById: async () => null });
+    assert.deepEqual([r.ok, r.partial, r.count, r.failed], [false, true, 2, 1]);
+    assert.match(r.errors._form, /Repita a operação/);
+  });
+
+  it('falha de rede NO MEIO do lote devolve partial + batchId (retomável com o mesmo operationId)', async () => {
+    let n = 0;
+    const api = server(() => {
+      n += 1;
+      return n === 1 ? { ok: true, status: 'running', total: 30, done: 15, skipped: 0, failed: 0, pending: 15, receivedCents: 1, items: [] } : { ok: false, errors: { _form: 'Falha de rede.' }, retryable: true };
+    });
+    const r = await settleDebts(uid, 'd1', {}, rawS({ operationId: 'b3' }), { finance: api.finance, getById: async () => null });
+    assert.deepEqual([r.ok, r.partial, r.batchId], [false, true, 'b3']);
+  });
+
+  it('mês inválido e dados inválidos (conta/data) param antes do servidor', async () => {
+    const api = server(() => ({ ok: true }));
+    const io = { finance: api.finance };
+    assert.equal((await settleMonthInstallments(uid, 'd1', '2026-13', rawS(), io)).ok, false);
+    assert.ok((await settleDebts(uid, 'd1', {}, rawS({ date: '2026-02-30' }), io)).errors.date);
+    assert.ok((await settleDebts(uid, 'd1', {}, { date: '2026-11-19' }, io)).errors.accountId);
+    assert.deepEqual(api.calls, []);
   });
 });
 
@@ -416,21 +409,15 @@ describe('metas vinculadas a conta (VF-2-03o)', () => {
     assert.equal(out.has('x'), false); // cancelada fora
     assert.equal(out.has('l'), false); // legada (com movimentações) fora
   });
-  it('aporte/resgate bloqueado em meta vinculada sem movimentações; meta sem conta ou legada segue aceitando', async () => {
-    const mk = (goal, txs = []) => {
-      const atomic = [];
-      return { atomic, io: { getById: async (u, c, id) => (c === 'goals' ? goal : { id, status: 'active', initialBalanceCents: 100000 }), list: async () => txs, commitAtomic: async (u, ops) => { atomic.push(ops); return ['t']; } } };
-    };
+  it('aporte/resgate em meta vinculada a conta: a regra é do SERVIDOR (goal.deposit recusa); o cliente repassa o erro sem gravar', async () => {
+    const atomic = [];
+    const finance = async () => ({ ok: false, code: 'INVALID_STATE', errors: { _form: 'Meta vinculada a uma conta: o progresso segue o saldo dessa conta; transfira para ela em Transferências.' } });
+    const io = { finance, commitAtomic: async (u, ops) => { atomic.push(ops); return []; } };
     const raw = { amountCents: '10,00', date: '2026-11-19', accountId: 'a1' };
-    const linked = mk({ id: 'g1', accountId: 'nu', targetCents: 100000, status: 'active' });
-    const r = await registerGoalTransaction(uid, 'g1', 'deposit', raw, linked.io);
+    const r = await registerGoalTransaction(uid, 'g1', 'deposit', raw, io);
     assert.equal(r.ok, false);
     assert.match(r.errors._form, /Transferências/);
-    assert.equal(linked.atomic.length, 0);
-    const free = mk({ id: 'g1', targetCents: 100000, status: 'active' });
-    assert.equal((await registerGoalTransaction(uid, 'g1', 'deposit', raw, free.io)).ok, true);
-    const legacy = mk({ id: 'g1', accountId: 'nu', targetCents: 100000, status: 'active' }, [{ type: 'deposit', amountCents: 500 }]);
-    assert.equal((await registerGoalTransaction(uid, 'g1', 'deposit', raw, legacy.io)).ok, true);
+    assert.equal(atomic.length, 0);
   });
 });
 

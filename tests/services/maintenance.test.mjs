@@ -198,7 +198,11 @@ describe('limpeza em lotes (≤ 500) e banco inteiro', () => {
     const audits = [];
     const { io } = makeIo({ perCollection: { goals: 2, accounts: 1 } });
     io.writeAudit = async (u, e) => { audits.push([u, e]); return { ok: true }; };
+    // VF-ARQ-02: a limpeza do próprio usuário roda no SERVIDOR (data.clearOwn); aqui um servidor falso devolve os totais.
+    const serverCalls = [];
+    io.callFinance = async (op, params, options) => { serverCalls.push([op, params.confirm, typeof options.operationId]); return { ok: true, deleted: { goals: 2, accounts: 1 } }; };
     const res = await clearScope({ scope: SCOPES.OWN, adminUid: 'me', io });
+    assert.deepEqual(serverCalls, [['data.clearOwn', 'APAGAR MEUS DADOS', 'string']]);
     assert.deepEqual([res.scope, res.adminUid, res.targetUid, res.deleted], ['own', 'me', null, 3]);
     assert.equal(audits[0][0], 'me');
     assert.equal(audits[0][1].action, 'maintenance_clear_own');
@@ -308,9 +312,10 @@ describe('acesso: qualquer usuário autenticado; escopos administrativos só com
       assert.match(r.error, /claim/);
     }
     assert.deepEqual(touched, []);
+    io.callFinance = async () => { touched.push('server'); return { ok: true, deleted: {} }; };
     const own = await clearScope({ scope: SCOPES.OWN, adminUid: 'comum', admin: false, io });
     assert.equal(own.scope, 'own');
-    assert.ok(touched.length > 0); // só o próprio uid é consultado
+    assert.deepEqual(touched, ['server']); // o próprio usuário limpa só pelo servidor (nenhuma leitura/gravação direta)
   });
   it('Rules coerentes com a separação: isAdmin exige claim booleana; perfil/configurações/auditLog nunca usam isAdmin', () => {
     const rules = readFileSync(new URL('../../firestore.rules', import.meta.url), 'utf8');
