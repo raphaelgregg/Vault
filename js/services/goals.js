@@ -170,7 +170,9 @@ export async function registerGoalTransaction(uid, goalId, type, rawInput, io = 
   const r = await (io.finance ?? financeResult)(`goal.${type}`, {
     goalId, amountCents: data.amountCents, date: data.date, accountId: data.accountId, ...(data.notes ? { notes: data.notes } : {}),
   }, { operationId, ...(io.apiOptions ?? {}) });
-  return r.ok ? { ok: true, id: r.transactionId, status: r.goalStatus, savedCents: r.savedCents, result: r } : r;
+  if (r.ok) return { ok: true, id: r.transactionId, status: r.goalStatus, savedCents: r.savedCents, result: r };
+  // erros da conta (saldo, inativa, inexistente) aparecem junto do campo de conta
+  return ['INSUFFICIENT_BALANCE', 'ACCOUNT_NOT_ACTIVE', 'ACCOUNT_NOT_FOUND'].includes(r.code) && r.errors?._form ? { ...r, errors: { ...r.errors, accountId: r.errors._form } } : r;
 }
 
 export const depositToGoal = (uid, goalId, raw, io) => registerGoalTransaction(uid, goalId, 'deposit', raw, io);

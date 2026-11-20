@@ -6,13 +6,16 @@
 import { FinanceError, FieldValue, defineOp, executeOnce, makeCtx, plain, requestHash, stamps, toTs, v, HISTORY_LIMIT } from './core.mjs';
 import {
   applyGoalTransaction, isAccountLinkedGoal, goalSavedCents, applyPaymentToDebtor, debtorObligations, pendingInstallmentsOfMonth,
-  receivedByInstallment, accountBalances, DEBTOR_STATUSES,
+  receivedByInstallment, accountBalances, accountLabel, formatCents, DEBTOR_STATUSES,
 } from '../../js/core/model.js';
 import { todayInAppZone } from '../../js/utils/dates.js';
 
 const RECURRENCES = ['none', 'monthly', 'weekly', 'yearly'];
 const today = (ctx) => todayInAppZone(ctx.now());
-const insufficient = (available, requested) => new FinanceError(409, 'INSUFFICIENT_BALANCE', 'Saldo insuficiente na conta.', { availableCents: available, requestedCents: requested });
+/** Saldo insuficiente com a conta e os valores reais (mensagem mostrada ao usuário; detalhes em centavos para a tela). */
+const insufficient = (available, requested, account) => new FinanceError(409, 'INSUFFICIENT_BALANCE',
+  `Saldo insuficiente${account ? ` em ${accountLabel(account)}` : ' na conta'}: disponível ${formatCents(available)}, necessário ${formatCents(requested)}.`,
+  { availableCents: available, requestedCents: requested, ...(account ? { accountId: account.id } : {}) });
 const invalidState = (message, details) => new FinanceError(409, 'INVALID_STATE', message, details);
 
 async function checkCategory(ctx, categoryId, kinds) {
@@ -40,7 +43,7 @@ defineOp('transfer.create', {
     let balanceAfterCents;
     if (p.status === 'confirmed') {
       const balance = await ctx.balanceOf(from);
-      if (balance < p.amountCents) throw insufficient(balance, p.amountCents);
+      if (balance < p.amountCents) throw insufficient(balance, p.amountCents, from);
       balanceAfterCents = balance - p.amountCents;
     }
     const id = ctx.col('transfers').doc().id;
@@ -66,7 +69,7 @@ defineOp('transfer.confirm', {
     const from = await ctx.account(t.fromAccountId);
     await ctx.account(t.toAccountId);
     const balance = await ctx.balanceOf(from);
-    if (balance < t.amountCents) throw insufficient(balance, t.amountCents);
+    if (balance < t.amountCents) throw insufficient(balance, t.amountCents, from);
     return {
       result: { transferId: t.id, status: 'confirmed', fromBalanceAfterCents: balance - t.amountCents },
       apply(c) {
@@ -108,7 +111,7 @@ function defineMovement(kind) {
       let balanceAfterCents;
       if (settle) {
         const balance = await ctx.balanceOf(account);
-        if (!isIncome && balance < p.amountCents) throw insufficient(balance, p.amountCents);
+        if (!isIncome && balance < p.amountCents) throw insufficient(balance, p.amountCents, account);
         balanceAfterCents = isIncome ? balance + p.amountCents : balance - p.amountCents;
       }
       const date = settle ? (p[dateField] ?? today(ctx)) : undefined;
@@ -136,7 +139,7 @@ function defineMovement(kind) {
       if (doc.status !== 'pending') throw invalidState(isIncome ? 'Só é possível marcar como recebida uma receita prevista.' : 'Só é possível marcar como paga uma despesa pendente.', { status: doc.status });
       const account = await ctx.account(doc.accountId);
       const balance = await ctx.balanceOf(account);
-      if (!isIncome && balance < doc.amountCents) throw insufficient(balance, doc.amountCents);
+      if (!isIncome && balance < doc.amountCents) throw insufficient(balance, doc.amountCents, account);
       const date = p.date ?? today(ctx);
       return {
         result: { id: doc.id, status: settled, [dateField]: date, balanceAfterCents: isIncome ? balance + doc.amountCents : balance - doc.amountCents },
@@ -169,7 +172,7 @@ defineOp('invoice.pay', {
     }
     if (total <= 0) throw invalidState('Fatura zerada: não há o que pagar. Cancele a fatura.');
     const balance = await ctx.balanceOf(account);
-    if (balance < total) throw insufficient(balance, total);
+    if (balance < total) throw insufficient(balance, total, account);
     const date = p.date ?? today(ctx);
     return {
       result: { invoiceId: invoice.id, status: 'paid', paidCents: total, accountId: account.id, paidAt: date, balanceAfterCents: balance - total },
@@ -204,7 +207,7 @@ for (const type of ['deposit', 'withdraw']) {
       const applied = applyGoalTransaction(goal, saved, type, p.amountCents);
       if (!applied.ok) throw invalidState(applied.error);
       const balance = await ctx.balanceOf(account);
-      if (type === 'deposit' && balance < p.amountCents) throw insufficient(balance, p.amountCents);
+      if (type === 'deposit' && balance < p.amountCents) throw insufficient(balance, p.amountCents, account);
       const id = ctx.col('goalTransactions').doc().id;
       return {
         result: { transactionId: id, goalId: goal.id, type, savedCents: applied.savedCents, goalStatus: applied.status, balanceAfterCents: type === 'deposit' ? balance - p.amountCents : balance + p.amountCents },
@@ -433,7 +436,7 @@ defineOp('reversal.create', {
     const requireBalance = async (accountId, needed) => {
       const account = await ctx.account(accountId, { allowInactive: true });
       const balance = await ctx.balanceOf(account);
-      if (balance < needed) throw insufficient(balance, needed);
+      if (balance < needed) throw insufficient(balance, needed, account);
     };
     const snapshot = (keys) => Object.fromEntries(keys.filter((k) => target[k] !== undefined).map((k) => [k, target[k]]));
     if (p.kind === 'income') {

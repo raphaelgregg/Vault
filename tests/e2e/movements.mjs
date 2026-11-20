@@ -210,29 +210,35 @@ try {
   assert.match(goalRow, /31\/12\/2027/); // prazo gravado como Timestamp e lido de volta
   assert.equal(await page.getByRole('button', { name: 'Aportar em Caixinha UI' }).count(), 0); // fonte única: transferências
 
-  log('VF-2-03o: excluir despesa paga e receita recebida com confirmação; saldo derivado estorna');
-  const confirmDelete = async (label, hintRe, toastRe) => {
+  log('VF-ARQ-02: despesa paga e receita recebida são imutáveis; a correção é por ESTORNO (compensatório, com motivo); saldo derivado volta');
+  const reverse = async (label, summaryRe) => {
     await page.getByRole('button', { name: label }).click();
     await page.waitForSelector('.modal');
-    assert.match(await page.locator('.modal').innerText(), hintRe); // aviso do estorno antes de confirmar
-    await page.getByRole('button', { name: 'Excluir', exact: true }).click();
-    await page.waitForFunction((src) => new RegExp(src).test(document.querySelector('.toast')?.innerText ?? ''), toastRe.source);
+    assert.match(await page.locator('.modal').innerText(), summaryRe); // resumo do lançamento antes de confirmar
+    await page.fill('#reason', 'Lançado por engano (E2E)');
+    await page.locator('#reversal-form button[type="submit"]').click();
+    await page.waitForFunction(() => /Estorno registrado/.test(document.querySelector('.toast')?.innerText ?? ''));
   };
   await go('despesas');
   await waitText(/Conta debitada|CONTA DEBITADA/);
   assert.match(await content(), /Cartões \/ Faturas/); // despesa direta × fatura de cartão
   assert.match(await rows().filter({ hasText: 'Compras UI' }).innerText(), /Banco A — Conta A/);
-  await confirmDelete('Excluir Compras UI', /voltam ao saldo de Banco A — Conta A/, /estornados em Banco A — Conta A/);
+  assert.equal(await page.getByRole('button', { name: 'Excluir Compras UI' }).count(), 0, 'despesa paga não tem excluir');
+  assert.equal(await page.getByRole('button', { name: 'Editar Compras UI' }).count(), 0, 'despesa paga não tem editar');
+  await reverse('Estornar Compras UI', /Compras UI/);
+  await page.waitForFunction(() => !document.querySelector('[aria-label="Estornar Compras UI"]')); // a lista recarrega após a confirmação do servidor
+  assert.ok(await page.getByRole('button', { name: 'Excluir Compras UI' }).count() > 0, 'estornada volta a pendente (editável/excluível)');
   await go('receitas');
-  await confirmDelete('Excluir Salário UI', /saem do saldo de Banco A — Conta A/, /estornados em Banco A — Conta A/);
+  assert.equal(await page.getByRole('button', { name: 'Excluir Salário UI' }).count(), 0, 'receita recebida não tem excluir');
+  await reverse('Estornar Salário UI', /Salário UI/);
   await go('bancos');
   await page.getByRole('button', { name: 'Recalcular saldo atual' }).click();
   await waitText(/Saldo atual derivado/);
-  assert.match(await rows().filter({ hasText: 'Conta A' }).innerText(), /R\$\s?500,00/); // 1000 − 500 (transferência)
+  assert.match(await rows().filter({ hasText: 'Conta A' }).innerText(), /R\$\s?500,00/); // 1000 − 500 (transferência); estornos devolvem/retiram o que foi liquidado
 
   await page.getByRole('button', { name: 'Excluir Conta A' }).click();
   await page.getByRole('button', { name: 'Excluir', exact: true }).click();
-  await page.waitForFunction(() => /não pode ser excluída/.test(document.querySelector('.toast')?.innerText ?? ''));
+  await page.waitForFunction(() => /não pode ser apagada|arquive-a/.test(document.querySelector('.toast')?.innerText ?? ''));
 
   log('contas sem nome: criar só com instituição, editar, receita vinculada persiste só accountId, rótulos sem duplicar');
   await go('bancos');
@@ -310,7 +316,7 @@ try {
   });
   assert.equal(leaked, false, 'transferência sem saldo não pode ser gravada');
 
-  log('transferências: excluir confirmada (estorno derivado) e pendente pela UI');
+  log('transferências: estornar confirmada (compensatório) e excluir pendente pela UI');
   await go('transferencias');
   const createTransferUi = async (status, reason) => {
     await page.getByRole('button', { name: 'Nova transferência' }).click();
@@ -332,11 +338,15 @@ try {
   const before = await balanceOf(alelo.id);
   await createTransferUi('confirmed', 'Apagar confirmada UI');
   assert.equal(await balanceOf(alelo.id), before + 1000);
-  await rows().filter({ hasText: 'Apagar confirmada UI' }).getByRole('button', { name: 'Excluir transferência' }).click();
-  await page.waitForFunction(() => /voltam para/.test(document.querySelector('.modal, [role="dialog"]')?.innerText ?? document.body.innerText));
-  await page.getByRole('button', { name: 'Excluir', exact: true }).click();
-  await page.waitForFunction(() => !/Apagar confirmada UI/.test(document.querySelector('#page-content').innerText));
+  const confirmedRow = rows().filter({ hasText: 'Apagar confirmada UI' });
+  assert.equal(await confirmedRow.getByRole('button', { name: 'Excluir transferência' }).count(), 0, 'transferência confirmada não tem excluir');
+  await confirmedRow.getByRole('button', { name: 'Estornar transferência' }).click(); // VF-ARQ-02: correção por estorno compensatório
+  await page.waitForSelector('.modal');
+  await page.fill('#reason', 'Valor errado (E2E)');
+  await page.locator('#reversal-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Estorno registrado/.test(document.querySelector('.toast')?.innerText ?? ''));
   assert.equal(await balanceOf(alelo.id), before, 'saldo volta ao valor anterior');
+  await page.waitForFunction(() => [...document.querySelectorAll('tbody tr')].some((tr) => /Apagar confirmada UI/.test(tr.innerText) && /Cancelada/.test(tr.innerText))); // original preservado, status compensado
   await createTransferUi('pending', 'Apagar pendente UI');
   await rows().filter({ hasText: 'Apagar pendente UI' }).getByRole('button', { name: 'Excluir transferência' }).click();
   await page.getByRole('button', { name: 'Excluir', exact: true }).click();

@@ -22,7 +22,7 @@ const page = await context.newPage();
 const problems = [];
 page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
 page.on('console', (m) => {
-  if (m.type() === 'error' && !/ERR_FAILED|unpkg|lucide/i.test(m.text())) problems.push(`console: ${m.text().slice(0, 200)}`);
+  if (m.type() === 'error' && !/ERR_FAILED|unpkg|lucide|status of 409 \(Conflict\)/i.test(m.text())) problems.push(`console: ${m.text().slice(0, 200)}`);
 });
 
 let step = 'início';

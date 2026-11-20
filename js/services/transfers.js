@@ -33,6 +33,10 @@ export async function getTransfer(uid, transferId) {
 /** Adaptador da camada confiável (injetável nos testes via `io.finance`). */
 const finance = (io) => io.finance ?? financeResult;
 
+/** Erros de conta (saldo, inativa, inexistente, mesma conta) aparecem junto do campo de origem, além do erro geral. */
+const ACCOUNT_CODES = new Set(['INSUFFICIENT_BALANCE', 'ACCOUNT_NOT_ACTIVE', 'ACCOUNT_NOT_FOUND', 'SAME_ACCOUNT']);
+const withAccountField = (r, field) => (!r.ok && ACCOUNT_CODES.has(r.code) && r.errors?._form ? { ...r, errors: { ...r.errors, [field]: r.errors._form } } : r);
+
 /**
  * Cria uma transferência NO SERVIDOR (VF-ARQ-02): débito, crédito, saldo e idempotência são decididos numa transação
  * do servidor. `confirmed` exige saldo suficiente dentro da transação; `pending` não move dinheiro.
@@ -51,7 +55,7 @@ export async function createTransfer(uid, rawInput, io = {}) {
     fromAccountId: data.fromAccountId, toAccountId: data.toAccountId, amountCents: data.amountCents, date: data.date,
     reason: data.reason, ...(data.notes ? { notes: data.notes } : {}), status: data.status,
   }, { operationId, ...(io.apiOptions ?? {}) });
-  return r.ok ? { ok: true, id: r.transferId, status: r.status, result: r } : r;
+  return r.ok ? { ok: true, id: r.transferId, status: r.status, result: r } : withAccountField(r, 'fromAccountId');
 }
 
 const CONFIRMED_IMMUTABLE = 'Transferência confirmada não pode ser alterada: estorne-a (lançamento compensatório) e lance outra.';
