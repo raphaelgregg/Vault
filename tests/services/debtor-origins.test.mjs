@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { registerCardPurchase, deleteCardPurchase } from '../../js/services/creditCards.js';
 import { createDebtPlan, settleDebts, registerDebtPayment } from '../../js/services/debtPayments.js';
 import { deleteDebtor, getDebtorOverview, listOpenDebtors, loadDebtorStatements, getDebtorStatement, DEBTOR_LINK_QUERIES } from '../../js/services/debtors.js';
-import { debtorOverview, debtorMonthStatement, debtorObligations } from '../../js/core/model.js';
+import { debtorOverview, debtorMonthStatement, debtorObligations, applyPaymentToDebtor } from '../../js/core/model.js';
 import { describeError } from '../../js/utils/errors.js';
 import { allocateLinkedGoalBalances, isAccountLinkedGoal } from '../../js/core/model.js';
 import { registerGoalTransaction } from '../../js/services/goals.js';
@@ -44,10 +44,11 @@ describe('compra de cartão vinculada a devedor', () => {
     assert.equal(parts.length, 3);
     assert.ok(parts.every((o) => o.data.debtorId === 'd1'));
     const upd = batch.find((o) => o.collection === 'debtors');
-    assert.deepEqual(upd, { type: 'update', collection: 'debtors', docId: 'd1', action: 'card-purchase', data: { lentCents: 130000 } });
-    assert.ok(Number.isInteger(upd.data.lentCents));
+    // soma por `increment` atômico (não valor absoluto de leitura velha); devedor em aberto não muda de status
+    assert.deepEqual(upd, { type: 'update', collection: 'debtors', docId: 'd1', action: 'card-purchase', data: {}, increments: { lentCents: 30000 } });
+    assert.ok(Number.isInteger(upd.increments.lentCents));
   });
-  it('rejeita devedor inexistente ou não aberto e não grava nada', async () => {
+  it('rejeita devedor inexistente ou cancelado e não grava nada', async () => {
     for (const debtors of [[], [debtor({ status: 'cancelled' })]]) {
       const { io, atomic } = makeIo({ debtors });
       const r = await registerCardPurchase(uid, 'c1', rawBuy(), io);
@@ -61,7 +62,7 @@ describe('compra de cartão vinculada a devedor', () => {
     const { io, atomic } = makeIo({ debtors: [zero] });
     const r = await registerCardPurchase(uid, 'c1', rawBuy(), io);
     assert.equal(r.ok, true);
-    assert.equal(atomic.at(-1).find((o) => o.collection === 'debtors').data.lentCents, 30000);
+    assert.equal(atomic.at(-1).find((o) => o.collection === 'debtors').increments.lentCents, 30000);
     const none = debtorMonthStatement({ debtor: zero, month: '2026-11' });
     assert.equal(none.totalCents, 0); // sem nada vinculado: 0, sem erro
     const st = debtorMonthStatement({ debtor: debtor({ lentCents: 30000, receivedCents: 0 }), month: '2026-11', purchases: [{ amountCents: 10000, purchaseDate: '2026-11-05' }] });
@@ -229,7 +230,7 @@ describe('listOpenDebtors (seletor da compra de cartão)', () => {
     const calls = [];
     const rows = [debtor({ id: 'a', name: 'Zé' }), debtor({ id: 'b', name: 'Ana' }), debtor({ id: 'c', name: 'Bia', status: 'cancelled' }), debtor({ id: 'd', name: 'Caio', status: 'paid' })];
     const out = await listOpenDebtors(uid, { list: async (u, c, opts) => { calls.push({ c, opts }); return rows; } });
-    assert.deepEqual(out.map((d) => d.name), ['Ana', 'Zé']);
+    assert.deepEqual(out.map((d) => d.name), ['Ana', 'Caio', 'Zé']); // abertos e quitados (a compra reabre o quitado); cancelado fora
     assert.deepEqual(calls, [{ c: 'debtors', opts: {} }]); // sem where/orderBy
   });
 });
@@ -259,7 +260,7 @@ describe('dívidas do devedor (VF-2-03m)', () => {
     assert.deepEqual(parcels.map((o) => o.data.installmentNumber), [1, 2, 3]);
     assert.ok(parcels.every((o) => o.data.installmentsTotal === 3 && o.data.debtGroupId === 'grp1' && o.data.status === 'pending'));
     assert.deepEqual(parcels.map((o) => o.data.dueDate), ['2026-01-31', '2026-02-28', '2026-03-31']);
-    assert.deepEqual(ops.at(-1), { type: 'update', collection: 'debtors', docId: 'd1', action: 'debt-plan', data: { lentCents: 100001 } });
+    assert.deepEqual(ops.at(-1), { type: 'update', collection: 'debtors', docId: 'd1', action: 'debt-plan', data: {}, increments: { lentCents: 100001 } });
   });
   it('à vista (1 parcela) e várias dívidas independentes somam no emprestado', async () => {
     const { io, atomic } = planIo([debtor({ lentCents: 50000, receivedCents: 0 })]);
@@ -267,7 +268,7 @@ describe('dívidas do devedor (VF-2-03m)', () => {
     assert.equal(r.ok, true);
     assert.equal(atomic[0].filter((o) => o.collection === 'debts').length, 1);
     assert.equal(atomic[0].filter((o) => o.collection === 'debts')[0].data.installmentsTotal, 1);
-    assert.equal(atomic[0].at(-1).data.lentCents, 70000);
+    assert.equal(atomic[0].at(-1).increments.lentCents, 20000);
   });
   it('valida devedor, valor, parcelas e data sem gravar', async () => {
     const bad = [
@@ -590,5 +591,38 @@ describe('assinaturas × cartão × fatura (VF-2-03r)', () => {
     const r = await deleteCard(uid, 'c1', { getById: async () => cardX, list: async () => [], count: async (u, c) => (c === 'subscriptions' ? 1 : 0) });
     assert.equal(r.ok, false);
     assert.match(r.errors._form, /1 assinaturas/);
+  });
+});
+
+describe('devedor QUITADO pode receber nova dívida e nova compra (reabre no mesmo lote)', () => {
+  const paid = () => debtor({ lentCents: 100000, receivedCents: 100000, status: 'paid' });
+
+  it('nova dívida parcelada: lança as parcelas, soma ao emprestado e volta a `open`', async () => {
+    const atomic = [];
+    const io = { getById: async () => paid(), commitAtomic: async (u, ops) => { atomic.push(ops); return ops.map((o, i) => `n${i}`); }, groupId: () => 'g' };
+    const r = await createDebtPlan(uid, { debtorId: 'd1', description: 'Nova', totalCents: '300,00', installments: 3, firstDueDate: '2026-12-10' }, io);
+    assert.equal(r.ok, true);
+    assert.equal(atomic[0].filter((o) => o.collection === 'debts').length, 3);
+    assert.deepEqual(atomic[0].at(-1), { type: 'update', collection: 'debtors', docId: 'd1', action: 'debt-plan', data: { status: 'open' }, increments: { lentCents: 30000 } });
+  });
+
+  it('devedor cancelado continua barrado, com mensagem para reabrir', async () => {
+    const io = { getById: async () => debtor({ status: 'cancelled' }), commitAtomic: async () => { throw new Error('não deveria gravar'); } };
+    const r = await createDebtPlan(uid, { debtorId: 'd1', description: 'Nova', totalCents: '10,00', installments: 1, firstDueDate: '2026-12-10' }, io);
+    assert.equal(r.ok, false);
+    assert.match(r.errors._form, /Reabra o devedor cancelado/);
+  });
+
+  it('nova compra de cartão vinculada reabre o quitado no mesmo lote', async () => {
+    const { io, atomic } = makeIo({ debtors: [paid()] });
+    const r = await registerCardPurchase(uid, 'c1', rawBuy(), io);
+    assert.equal(r.ok, true);
+    const upd = atomic.at(-1).find((o) => o.collection === 'debtors');
+    assert.deepEqual([upd.data, upd.increments], [{ status: 'open' }, { lentCents: 30000 }]);
+  });
+
+  it('depois de reaberto o recebimento volta a funcionar (devedor open aceita pagamento)', () => {
+    assert.equal(applyPaymentToDebtor(paid(), 100).ok, false); // quitado: nada a receber
+    assert.deepEqual(applyPaymentToDebtor({ ...paid(), lentCents: 130000, status: 'open' }, 30000), { ok: true, receivedCents: 130000, status: 'paid' });
   });
 });

@@ -194,13 +194,13 @@ async function openPurchaseModal(card) {
       field('Categoria', 'categoryId', el('select', { id: 'categoryId', name: 'categoryId' }, [el('option', { value: '' }, 'Sem categoria'), ...selectOptions(expenseCats, '')])),
       field('Devedor (opcional)', 'debtorId', el('select', { id: 'debtorId', name: 'debtorId' }, [
         el('option', { value: '' }, 'Compra minha (sem devedor)'),
-        ...selectOptions(openDebtors.map((x) => ({ value: x.id, label: `${x.name} — pendente ${formatCents(debtorPendingCents(x))}` })), ''),
+        ...selectOptions(openDebtors.map((x) => ({ value: x.id, label: `${x.name} — ${x.status === 'paid' ? 'quitado (a compra o reabre)' : `pendente ${formatCents(debtorPendingCents(x))}`}` })), ''),
       ])),
       el('p', { class: 'card__hint', text: debtorsFailed
         ? `Não foi possível carregar os devedores (${debtorsFailed}). A compra só poderá ser lançada sem vínculo.`
         : openDebtors.length
           ? 'Ao vincular a um devedor, o total da compra é somado ao valor emprestado dele.'
-          : 'Nenhum devedor em aberto. Cadastre em Devedores (o valor emprestado pode ser 0) para vincular compras.' }),
+          : 'Nenhum devedor em aberto ou quitado. Cadastre em Devedores (o valor emprestado pode ser 0) para vincular compras.' }),
       field('Observações', 'notes', el('textarea', { id: 'notes', name: 'notes', maxlength: 300, rows: 2 })),
     ],
     submit: (d) => registerCardPurchase(user.uid, card.id, {

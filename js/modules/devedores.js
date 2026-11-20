@@ -179,8 +179,12 @@ function createActions(item) {
   const actions = [
     iconButton(`Parcelas e recebimentos de ${item.name}`, 'list-checks', () => openDebtorInstallments({ user: currentUser, debtor: item, onChange: reload })),
   ];
-  if (item.status === 'open') {
+  // Aberto OU quitado: nova dívida (reabre o quitado) e edição ficam disponíveis; cancelar só de quem está em aberto.
+  if (item.status === 'open' || item.status === 'paid') {
+    actions.push(iconButton(`Nova dívida para ${item.name}`, 'plus-circle', () => openDebtorInstallments({ user: currentUser, debtor: item, onChange: reload, startCreate: true }), 'btn--success'));
     actions.push(iconButton(`Editar ${item.name}`, 'edit-2', () => openDebtorModal(item)));
+  }
+  if (item.status === 'open') {
     actions.push(iconButton(`Cancelar ${item.name}`, 'x-circle', () => confirmCancel(item), 'btn--danger'));
   }
   if (item.status === 'cancelled') {

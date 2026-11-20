@@ -97,7 +97,7 @@ try {
   await page.goto(`${app.base}/pages/devedores.html`);
   await page.waitForSelector('#page-content tbody tr');
   await page.getByRole('button', { name: 'Parcelas e recebimentos de Maria' }).click();
-  await page.getByRole('button', { name: 'Nova dívida' }).click();
+  await page.getByRole('button', { name: 'Nova dívida', exact: true }).click();
   await page.fill('#description', 'Moto');
   await page.fill('#totalCents', '600,00');
   await page.fill('#installments', '3');
@@ -316,6 +316,73 @@ try {
   assert.equal(chairPays[0].amountCents, 6000);
   assert.equal(p3.debtor.receivedCents, 10000 + 6000); // o total do devedor == soma dos recebimentos (sem perda/excesso)
   assert.equal(p3.bal - p0.bal, 10000 + 6000);
+
+  log('VF-2-03am: devedor quitado mantém ações, recebe nova dívida pela lista e nova compra de cartão (reabre)');
+  const quit = await page.evaluate(async () => {
+    const { createDebtor } = await import('/js/services/debtors.js');
+    const { createDebtPlan, settleMonthInstallments } = await import('/js/services/debtPayments.js');
+    const { listAccounts } = await import('/js/services/accounts.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const uid = auth.currentUser.uid;
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+    const debtor = await createDebtor(uid, { name: 'Quitado Teste', lentCents: '0,00', loanDate: today });
+    const plan = await createDebtPlan(uid, { debtorId: debtor.id, description: 'Primeira', totalCents: '100,00', installments: 1, firstDueDate: today });
+    const acc = (await listAccounts(uid)).find((a) => a.institution === 'Banco E2E');
+    const done = await settleMonthInstallments(uid, debtor.id, today.slice(0, 7), { date: today, accountId: acc.id });
+    return { id: debtor.id, ok: plan.ok && done.ok, debtorPaid: done.debtorPaid };
+  });
+  assert.equal(quit.ok, true);
+  assert.equal(quit.debtorPaid, true);
+  const debtorState = () => page.evaluate(async (id) => {
+    const { getDebtor } = await import('/js/services/debtors.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const d = await getDebtor(auth.currentUser.uid, id);
+    return { status: d.status, lentCents: d.lentCents, receivedCents: d.receivedCents };
+  }, quit.id);
+  assert.deepEqual(await debtorState(), { status: 'paid', lentCents: 10000, receivedCents: 10000 });
+  await page.goto(`${app.base}/pages/devedores.html`);
+  await page.waitForSelector('#page-content tbody tr');
+  const quitRow = page.locator('#page-content tbody tr', { hasText: 'Quitado Teste' });
+  assert.match(await quitRow.innerText(), /Quitado/);
+  // ações disponíveis para devedor quitado (antes: só "Parcelas" e "Excluir")
+  for (const name of ['Parcelas e recebimentos de Quitado Teste', 'Nova dívida para Quitado Teste', 'Editar Quitado Teste', 'Excluir Quitado Teste']) {
+    assert.equal(await page.getByRole('button', { name }).count(), 1, name);
+  }
+  assert.equal(await page.getByRole('button', { name: 'Cancelar Quitado Teste' }).count(), 0); // cancelar só de quem está em aberto
+  await page.getByRole('button', { name: 'Nova dívida para Quitado Teste' }).click();
+  await page.waitForSelector('#debt-form');
+  await page.fill('#description', 'Segunda');
+  await page.fill('#totalCents', '50,00');
+  await page.locator('#debt-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Dívida à vista criada/.test(document.querySelector('.toast')?.innerText ?? ''));
+  assert.deepEqual(await debtorState(), { status: 'open', lentCents: 15000, receivedCents: 10000 }); // reaberto: emprestado soma 50,00
+  await page.keyboard.press('Escape');
+  await page.reload();
+  await page.waitForSelector('#page-content tbody tr');
+  assert.match(await page.locator('#page-content tbody tr', { hasText: 'Quitado Teste' }).innerText(), /Em aberto/);
+  // quita de novo e lança compra de cartão vinculada ao devedor quitado (aparece no seletor e reabre)
+  await page.evaluate(async (id) => {
+    const { settleMonthInstallments, listDebts } = await import('/js/services/debtPayments.js');
+    const { listAccounts } = await import('/js/services/accounts.js');
+    const { auth } = await import('/js/firebase/client.js');
+    const uid = auth.currentUser.uid;
+    const acc = (await listAccounts(uid)).find((a) => a.institution === 'Banco E2E');
+    const [debt] = (await listDebts(uid, id)).filter((d) => d.status === 'pending');
+    await settleMonthInstallments(uid, id, debt.dueDate.slice(0, 7), { date: debt.dueDate, accountId: acc.id });
+  }, quit.id);
+  assert.equal((await debtorState()).status, 'paid');
+  await page.goto(`${app.base}/pages/cartoes.html`);
+  await page.waitForSelector('#page-content .panel');
+  await page.getByRole('button', { name: 'Nova compra em Cartão E2E' }).click();
+  await page.fill('#description', 'Compra pós quitação');
+  await page.fill('#amountCents', '40,00');
+  const labels = await page.locator('#debtorId option').allInnerTexts();
+  const quitLabel = labels.find((t) => t.startsWith('Quitado Teste'));
+  assert.ok(quitLabel && /quitado/.test(quitLabel), `seletor sem o devedor quitado: ${labels.join(' | ')}`);
+  await page.selectOption('#debtorId', { label: quitLabel });
+  await page.locator('#purchase-form button[type="submit"]').click();
+  await page.waitForFunction(() => /Compra lançada/.test(document.querySelector('.toast')?.innerText ?? ''));
+  assert.deepEqual(await debtorState(), { status: 'open', lentCents: 19000, receivedCents: 15000 }); // reaberto: +40,00 emprestado
 
   log('VF-2-03p: pagar fatura com conta bancária e cancelar fatura vazia (modal Faturas e compras)');
   const seeded2 = await page.evaluate(async () => {

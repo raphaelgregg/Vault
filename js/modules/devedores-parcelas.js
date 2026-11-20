@@ -28,7 +28,7 @@ export function displayDebtStatus(debt, today = todayIso()) {
 /**
  * @param {{ user: {uid:string}, debtor: object, onChange: () => Promise<void> }} ctx
  */
-export async function openDebtorInstallments({ user, debtor, onChange, month = 'all' }) {
+export async function openDebtorInstallments({ user, debtor, onChange, month = 'all', startCreate = false }) {
   const [debts, payments, accounts, statement, cards] = await Promise.all([
     listDebts(user.uid, debtor.id),
     listDebtPayments(user.uid, { where: [['debtorId', '==', debtor.id]] }),
@@ -41,6 +41,8 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
   // Recebimentos por parcela (dívida ou compra no cartão); cada um é contado uma única vez.
   const { byDebt: receivedBy, byPurchase: receivedByPurchase } = receivedByInstallment(payments);
   const isOpen = debtor.status === 'open';
+  // Quitado também aceita nova dívida (reabre o devedor); cancelado só consulta até ser reaberto.
+  const canAddDebt = isOpen || debtor.status === 'paid';
   const activeAccounts = accounts.filter((a) => a.status === 'active').map((a) => ({ value: a.id, label: accountLabel(a) }));
 
   const refresh = async () => {
@@ -254,10 +256,11 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
     title: `Dívidas — ${debtor.name}`,
     body: el('div', {}, [
       el('div', { class: 'grid grid--cards' }, [totals, closing]),
-      !isOpen ? el('p', { class: 'card__hint', text: 'Devedor não está em aberto: somente consulta.' }) : null,
+      debtor.status === 'paid' ? el('p', { class: 'card__hint', text: 'Devedor quitado: uma nova dívida (ou compra no cartão vinculada) o reabre.' }) : null,
+      debtor.status === 'cancelled' ? el('p', { class: 'card__hint', text: 'Devedor cancelado: somente consulta. Reabra-o na lista para lançar dívidas.' }) : null,
       el('div', { class: 'form__field' }, [el('label', { for: 'statement-month', text: 'Mês de referência' }), monthSelect]),
       monthPanel,
-      isOpen ? el('button', { type: 'button', class: 'btn btn--primary', onClick: openCreate, text: 'Nova dívida' }) : null,
+      canAddDebt ? el('button', { type: 'button', class: 'btn btn--primary', onClick: openCreate, text: 'Nova dívida' }) : null,
       isOpen && debts.some((d) => ['pending', 'late'].includes(d.status))
         ? el('button', { type: 'button', class: 'btn btn--secondary', onClick: () => openSettle(null, `todas as dívidas de ${debtor.name}`), text: 'Quitar todas as dívidas' }) : null,
       table,
@@ -265,4 +268,5 @@ export async function openDebtorInstallments({ user, debtor, onChange, month = '
     footer: [el('button', { type: 'button', class: 'btn btn--secondary', onClick: closeModal, text: 'Fechar' })],
   });
   refreshIcons();
+  if (startCreate && canAddDebt) openCreate(); // atalho "Nova dívida" da lista de devedores
 }

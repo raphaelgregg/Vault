@@ -229,12 +229,13 @@ export async function registerCardPurchase(uid, cardId, rawData, io = {}) {
     if (!check.ok) return check;
   }
 
-  // Compra feita para um devedor (VF-2-03i): devedor em aberto; o valor soma ao emprestado dele.
+  // Compra feita para um devedor (VF-2-03i): devedor em aberto ou quitado; o valor soma ao emprestado dele.
   let debtor = null;
   if (probe.data.debtorId) {
     debtor = await fetch(uid, COLLECTIONS.debtors, probe.data.debtorId);
     if (!debtor) return { ok: false, errors: { debtorId: 'Devedor não encontrado.' } };
-    if (debtor.status !== 'open') return { ok: false, errors: { debtorId: 'Só é possível vincular a devedor em aberto.' } };
+    // Quitado (`paid`) também recebe compras: a compra o reabre no mesmo lote. Cancelado precisa ser reaberto antes.
+    if (!['open', 'paid'].includes(debtor.status)) return { ok: false, errors: { debtorId: 'Reabra o devedor cancelado antes de vincular compras.' } };
   }
 
   const { invoices, availableCents } = await usageOf(uid, card, io);
@@ -280,7 +281,7 @@ export async function registerCardPurchase(uid, cardId, rawData, io = {}) {
   if (debtor) {
     purchaseOps.push({
       type: 'update', collection: COLLECTIONS.debtors, docId: probe.data.debtorId, action: 'card-purchase',
-      data: { lentCents: (Number(debtor.lentCents) || 0) + probe.data.amountCents },
+      data: debtor.status === 'paid' ? { status: 'open' } : {}, increments: { lentCents: probe.data.amountCents },
     });
   }
   const ids = await commit(uid, purchaseOps, io);

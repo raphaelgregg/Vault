@@ -157,8 +157,12 @@ describe('debtors — service', () => {
     assert.equal(calls.update.length, 0);
   });
 
-  it('update: inexistente, cancelado e quitado são rejeitados sem escrita', async () => {
-    for (const current of [null, { status: 'cancelled' }, { status: 'paid' }]) {
+  it('update: inexistente e cancelado são rejeitados sem escrita; quitado pode ser editado (preserva status e recebido)', async () => {
+    const paid = makeIo({ status: 'paid', receivedCents: 100000, lentCents: 100000 });
+    const ok = await updateDebtor(uid, 'd1', raw({ lentCents: '1.000,00' }), paid.io);
+    assert.equal(ok.ok, true);
+    assert.equal(paid.calls.update[0].data.status, 'paid');
+    for (const current of [null, { status: 'cancelled' }]) {
       const { io, calls } = makeIo(current);
       const r = await updateDebtor(uid, 'd1', raw(), io);
       assert.equal(r.ok, false);

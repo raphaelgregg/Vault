@@ -50,7 +50,7 @@ export async function listDebtPayments(uid, options = {}) {
   return list(uid, PAYMENTS, constraints);
 }
 
-/** Cria parcela (status sempre `pending`). Devedor precisa existir e estar em aberto. */
+/** Cria parcela (status sempre `pending`). Devedor precisa existir e estar em aberto (para dívida nova use `createDebtPlan`). */
 export async function createDebt(uid, rawData, deps = {}) {
   const fetch = deps.getById ?? getById;
   const debtor = rawData?.debtorId ? await fetch(uid, DEBTORS, String(rawData.debtorId)) : null;
@@ -78,13 +78,14 @@ export async function createDebt(uid, rawData, deps = {}) {
  * Parcelas mensais no mesmo dia (com clamp ao fim do mês), valores em centavos inteiros (a 1ª leva o
  * resto da divisão), todas com `installmentsTotal` e o mesmo `debtGroupId`. O total soma ao `lentCents`
  * do devedor (agregado mantido pelo service; o pendente continua `lentCents − receivedCents`).
- * Devedor precisa existir e estar em aberto. `io`: getById, commitAtomic, groupId() injetáveis.
+ * Devedor precisa existir e estar em aberto ou quitado (quitado é reaberto no mesmo lote). `io`: getById, commitAtomic, groupId() injetáveis.
  */
 export async function createDebtPlan(uid, rawData, io = {}) {
   const fetch = io.getById ?? getById;
   const debtor = rawData?.debtorId ? await fetch(uid, DEBTORS, String(rawData.debtorId)) : null;
   if (!debtor) return { ok: false, errors: { debtorId: 'Devedor não encontrado.' } };
-  if (debtor.status !== 'open') return { ok: false, errors: { _form: 'Só é possível criar dívidas para devedor em aberto.' } };
+  // Devedor QUITADO (`paid`) pode receber nova dívida: ela o reabre no mesmo lote. Só o cancelado fica de fora.
+  if (!['open', 'paid'].includes(debtor.status)) return { ok: false, errors: { _form: 'Reabra o devedor cancelado antes de criar dívidas.' } };
 
   const rawN = rawData.installments === undefined || rawData.installments === '' ? 1 : Number(rawData.installments);
   if (!Number.isInteger(rawN) || rawN < 1 || rawN > MAX_PLAN_INSTALLMENTS) {
@@ -109,9 +110,10 @@ export async function createDebtPlan(uid, rawData, io = {}) {
     if (!built.ok) return { ok: false, errors: built.errors };
     ops.push({ type: 'create', collection: DEBTS, data: built.data });
   }
+  // Soma por `increment` (não valor absoluto de leitura velha); devedor quitado volta a `open` no mesmo lote.
   ops.push({
     type: 'update', collection: DEBTORS, docId: debtor.id ?? rawData.debtorId, action: 'debt-plan',
-    data: { lentCents: (Number(debtor.lentCents) || 0) + total },
+    data: debtor.status === 'paid' ? { status: 'open' } : {}, increments: { lentCents: total },
   });
   const ids = await (io.commitAtomic ?? commitAtomic)(uid, ops, io);
   return { ok: true, ids, groupId, installments: rawN, totalCents: total };

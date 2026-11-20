@@ -184,7 +184,7 @@ try {
   await page.locator('#debtor-form button[type="submit"]').click();
   await page.waitForSelector('tbody tr');
   await page.getByRole('button', { name: /Parcelas e recebimentos de Maria/ }).click();
-  await page.getByRole('button', { name: 'Nova dívida' }).click();
+  await page.getByRole('button', { name: 'Nova dívida', exact: true }).click();
   await page.fill('#description', 'Parcela única');
   await page.fill('#totalCents', '500,00');
   await page.fill('#firstDueDate', addDays(-3));

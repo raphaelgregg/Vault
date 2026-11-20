@@ -1330,3 +1330,35 @@ describe('Recebimentos parciais: histórico imutável, IDs sequenciais e total d
     assert.equal((await getDoc(payDoc(db, 'pay-d1-3'))).exists(), false);
   });
 });
+
+describe('Devedor quitado recebe nova dívida e volta a open (VF-2-03am)', () => {
+  const noon = (d) => new Date(`${d}T12:00:00.000Z`);
+  const debtorDoc = (db) => doc(db, 'users', ALICE, 'debtors', 'dev1');
+  const debtDoc = (db, id) => doc(db, 'users', ALICE, 'debts', id);
+
+  async function seedPaid() {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      const base = { createdAt: new Date('2026-11-01'), updatedAt: new Date('2026-11-01') };
+      await setDoc(doc(db, 'users', ALICE, 'debtors', 'dev1'), { name: 'Renan', loanDate: noon('2026-11-10'), lentCents: 10000, receivedCents: 10000, status: 'paid', ...base });
+    });
+    return asUser(ALICE);
+  }
+
+  it('lote: novas parcelas + lentCents por increment + status open (devedor quitado reaberto)', async () => {
+    const db = await seedPaid();
+    const batch = writeBatch(db);
+    batch.set(debtDoc(db, 'n1'), { debtorId: 'dev1', description: 'Nova', principalCents: 3000, dueDate: noon('2026-12-10'), installmentNumber: 1, installmentsTotal: 1, debtGroupId: 'g', status: 'pending', createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    batch.update(debtorDoc(db), { lentCents: increment(3000), status: 'open', updatedAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+    const d = (await getDoc(debtorDoc(db))).data();
+    assert.deepEqual([d.lentCents, d.receivedCents, d.status], [13000, 10000, 'open']);
+  });
+
+  it('continua negando recebido acima do emprestado mesmo reaberto, e editar nome de quitado é aceito', async () => {
+    const db = await seedPaid();
+    await assertFails(updateDoc(debtorDoc(db), { receivedCents: increment(1), updatedAt: serverTimestamp() })); // 10001 > 10000
+    await assertSucceeds(updateDoc(debtorDoc(db), { name: 'Renan Silva', updatedAt: serverTimestamp() }));
+    assert.equal((await getDoc(debtorDoc(db))).data().status, 'paid');
+  });
+});

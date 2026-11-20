@@ -58,7 +58,8 @@ export async function listDebtors(uid, options = {}) {
  */
 export async function listOpenDebtors(uid, io = {}) {
   const all = await (io.list ?? list)(uid, COLLECTION, {});
-  return all.filter((d) => d.status === 'open').sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  // Aberto e quitado: nova compra/dívida reabre o quitado. Cancelado fica de fora (reabra-o antes).
+  return all.filter((d) => d.status === 'open' || d.status === 'paid').sort((a, b) => String(a.name).localeCompare(String(b.name)));
 }
 
 export async function getDebtor(uid, debtorId) {
@@ -89,13 +90,13 @@ export async function createDebtor(uid, rawData, deps = {}) {
 
 /**
  * Edita nome, data, valor emprestado e observações. Lê o estado atual: preserva
- * receivedCents/status e rejeita lentCents < receivedCents (Rule) e devedor cancelado/quitado.
+ * receivedCents/status (aberto ou quitado) e rejeita lentCents < receivedCents (Rule) e devedor cancelado.
  */
 export async function updateDebtor(uid, debtorId, rawData, deps = {}) {
   const current = await (deps.getById ?? getById)(uid, COLLECTION, debtorId);
   if (!current) return { ok: false, errors: { _form: 'Devedor não encontrado.' } };
-  if (current.status !== 'open') {
-    return { ok: false, errors: { _form: 'Só é possível editar devedores em aberto.' } };
+  if (!['open', 'paid'].includes(current.status)) {
+    return { ok: false, errors: { _form: 'Reabra o devedor cancelado antes de editar.' } };
   }
   const blankLent = rawData?.lentCents === undefined || rawData.lentCents === null || String(rawData.lentCents).trim() === '';
   const { ok, data, errors } = buildEntity('debtors', {

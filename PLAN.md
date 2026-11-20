@@ -288,6 +288,12 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - Arquivos: `firestore.rules`, `js/core/model.js`, `js/services/{debtPayments,firestore}.js`, `js/modules/devedores-parcelas.js`, `tests/services/{debtor-partial,debtor-installments,debtPayments,debtor-origins}.test.mjs`, `tests/services/helpers/memory-store.mjs`, `tests/rules/firestore.rules.test.mjs`, `tests/e2e/debtors.mjs`.
 - Limitações: leitura prévia + lote sem transação (a concorrência é coberta por ID sequencial + increment + Rules); recebimento continua sem estorno; exclusão de recebimento só por limpeza de dados/administração (o app nunca exclui).
 
+- [x] **VF-2-03am — Devedor quitado: ações disponíveis e novas dívidas/compras (reabre)** (correção) — CONCLUÍDA 2026-11-20 (**`firestore.rules` NÃO alterado**; sem migração).
+- Causa raiz [C]: devedor quitado vira `paid` e as regras tratavam só `open` como ativo: a lista oferecia apenas "Parcelas" e "Excluir" (Editar/Cancelar eram só para `open`), `createDebtPlan` e `registerCardPurchase` recusavam devedor não `open`, `updateDebtor` também, e o modal ocultava "Nova dívida". Quitar tudo, portanto, bloqueava novos lançamentos.
+- Solução: `paid` aceita nova dívida, nova compra de cartão vinculada e edição; o lançamento o REABRE no mesmo lote (`status: open`) e soma ao emprestado por `increment` (`lentCents`, também no caso aberto — sem valor absoluto de leitura velha). Cancelado continua barrado, com mensagem para reabrir. Lista de devedores: "Nova dívida para X" (atalho que abre o formulário) e "Editar" para aberto/quitado; "Cancelar" só para aberto. Seletor da compra de cartão lista abertos e quitados ("quitado (a compra o reabre)").
+- Arquivos: `js/services/{debtPayments,creditCards,debtors}.js`, `js/modules/{devedores,devedores-parcelas,cartoes}.js`, `tests/services/{debtor-origins,debtors}.test.mjs`, `tests/rules/firestore.rules.test.mjs`, `tests/e2e/{debtors,flows}.mjs`.
+- Limitações: `createDebt` (parcela avulsa legada) segue exigindo devedor em aberto; reabrir manualmente um quitado sem lançar nada não existe (o status `paid` é consequência de pendente zero).
+
 ### Fase 3 — Arquitetura, qualidade e refatoração
 
 - [x] **VF-3-01 — Reduzir duplicação nos services** (Médio) — CONCLUÍDA 2026-11-18: extrair helper de create/update/delete com auditoria reutilizando `firestore.js`, sem mudar API pública. Arquivos: `js/services/*.js`. Dependências: VF-1-01. Aceite: testes existentes passam sem alteração; diff líquido de linhas negativo.
@@ -365,3 +371,4 @@ Convenção de IDs: `VF-<fase>-<nn>`. Preservar IDs; não remover tarefas conclu
 - 2026-11-20 — VF-2-03aj concluída (referência de data America/Sao_Paulo; assinaturas no cartão: comprometimento × caixa). Pendente de publicação (aprovação do usuário): `firestore.rules` da VF-2-03ai.
 - 2026-11-20 — VF-2-03ak concluída (quitação por parcela e por mês). **Republicar `firestore.rules`** (`debtPayments.purchaseId`; sem isso quitar parcela de cartão dá `permission-denied`).
 - 2026-11-20 — VF-2-03al concluída (recebimentos parciais: ID exclusivo/sequencial, histórico imutável, devedor por increment). **Republicar `firestore.rules`** junto com a VF-2-03ak (VF-2-03al muda a regra de `debtPayments`).
+- 2026-11-20 — VF-2-03am concluída (devedor quitado: ações, nova dívida e nova compra reabrem o devedor). Sem mudança em Rules/índices.
