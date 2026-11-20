@@ -377,6 +377,21 @@ export async function render(container, ctx) {
 
   mount(container,
     el('section', { class: 'panel' }, [el('div', { class: 'panel__header' }, [el('div', {}, [el('h2', { text: 'Manutenção de dados' }), el('p', { class: 'card__hint', text: 'Limpeza, massa de testes e importação/exportação CSV.' }), el('p', { class: 'card__hint', id: 'maint-role', text: admin ? 'Seu acesso: ADMINISTRADOR (claim admin) — além dos seus dados, pode limpar um usuário específico ou todo o banco.' : 'Seu acesso: usuário comum — todas as ações valem apenas para os seus próprios dados.' })])])]),
-    cleanPanel, adminPanel, seedPanel, importPanel);
+    cleanPanel, adminPanel, seedPanel, importPanel, await loadValidationCenter(admin));
   refreshIcons();
+}
+
+/**
+ * Central de validação do sistema (VF-UI-02): seção INDEPENDENTE, só para administradores. Carregada sob demanda e
+ * isolada: qualquer falha aqui NUNCA impede os demais painéis (retorna null). O acesso real é decidido pelo servidor.
+ */
+async function loadValidationCenter(admin) {
+  if (admin !== true) return null;
+  try {
+    const { createValidationCenter } = await import('../components/validation-center.js');
+    return createValidationCenter();
+  } catch (error) {
+    console.error('[manutencao] central de validação indisponível', error);
+    return null;
+  }
 }

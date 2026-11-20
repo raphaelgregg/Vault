@@ -3,7 +3,8 @@
   "cleanUrls": true,
   "trailingSlash": false,
   "functions": {
-    "api/finance.mjs": { "maxDuration": 30 }
+    "api/finance.mjs": { "maxDuration": 30 },
+    "api/validation.mjs": { "maxDuration": 60 }
   },
   "headers": [
     {

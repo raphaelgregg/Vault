@@ -57,19 +57,21 @@ try {
   } else {
     const base = JSON.parse(await readFile(FIXTURE, 'utf8'));
     for (const role of ['common', 'admin']) {
-      const now = snapshot[role];
-      const nowKeys = new Map(now.map((e) => [key(e), e]));
-      const missing = base[role].filter((e) => !nowKeys.has(key(e)));
-      assert.deepEqual(missing.map(key), [], `${role}: controles da linha de base AUSENTES/ALTERADOS`);
+      const keyed = (list) => { const seen = new Map(); return list.map((e) => { const k = key(e); const n = (seen.get(k) ?? 0) + 1; seen.set(k, n); return { ...e, k: `${k}#${n}` }; }); };
+      const now = keyed(snapshot[role]);
+      const baseline = keyed(base[role]);
+      const nowKeys = new Map(now.map((e) => [e.k, e]));
+      const missing = baseline.filter((e) => !nowKeys.has(e.k));
+      assert.deepEqual(missing.map((e) => e.k), [], `${role}: controles da linha de base AUSENTES/ALTERADOS`);
       // atributos de estado idênticos
-      for (const e of base[role]) {
-        const cur = nowKeys.get(key(e));
-        for (const f of ['placeholder', 'disabled', 'checked', 'value', 'options', 'cls']) assert.deepEqual(cur[f], e[f], `${role}: ${key(e)} campo ${f}`);
+      for (const e of baseline) {
+        const cur = nowKeys.get(e.k);
+        for (const f of ['placeholder', 'disabled', 'checked', 'value', 'options', 'cls']) assert.deepEqual(cur[f], e[f], `${role}: ${e.k} campo ${f}`);
       }
       // ordem relativa preservada
-      const order = base[role].map((e) => nowKeys.get(key(e)).order);
+      const order = baseline.map((e) => nowKeys.get(e.k).order);
       assert.deepEqual(order, [...order].sort((a, b) => a - b), `${role}: ordem dos controles alterada`);
-      assert.equal(now.length, base[role].length, `${role}: nenhum controle novo fora de #panel-validation (${now.length} vs ${base[role].length})`);
+      assert.equal(now.length, baseline.length, `${role}: nenhum controle novo fora de #panel-validation (${now.length} vs ${baseline.length})`);
     }
     // usuário comum NUNCA vê a central
     await page.goto(`${app.base}/pages/manutencao-dados.html`);

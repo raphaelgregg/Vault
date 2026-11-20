@@ -30,6 +30,13 @@ export function startServer({ port = 5500, host = '127.0.0.1', handleFinance } =
       res.end(JSON.stringify(result.body));
       return;
     }
+    if (pathname === '/api/validation') { // Central de validação (VF-UI-02): endpoint próprio, só administradores
+      const { handleValidation } = await import('../server/validation/center.mjs');
+      const result = await handleValidation({ method: req.method, headers: req.headers, body: req.method === 'POST' ? await readBody(req) : undefined });
+      res.writeHead(result.status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(result.body));
+      return;
+    }
     const path = normalize(decodeURIComponent(pathname));
     const rewritten = path === '/' || path === '\\' ? 'index.html' : path;
     let file = join(root, rewritten);
